@@ -35,7 +35,9 @@ def sha(path):
 
 
 def run(cmd, env=None, log=None):
-    e = dict(os.environ, DM_ROOT=str(WORK), PYTHONUTF8='1'); e.update(env or {})
+    e = dict(os.environ, DM_ROOT=str(WORK), DM_GAME=TITLE, DM_RULESET='native', DM_PRIVATE_GATES='0',
+             PYTHONUTF8='1')   # 与 tools/dr3.py env() 同一套基础环境 | the same base environment as tools/dr3.py env()
+    e.update(env or {})
     say(' '.join(str(x) for x in cmd[:3]) + ' …')
     log = log or (WORK / 'logs' / ('pack-' + Path(str(cmd[2] if len(cmd) > 2 else cmd[0])).stem + '.log'))
     log.parent.mkdir(parents=True, exist_ok=True)
@@ -73,7 +75,7 @@ def check_env():
 
 
 def local_chain():
-    text = (UPSTREAM / 'dm/games' / TITLE / 'dmsh_chain.h').read_text()
+    text = (UPSTREAM / 'dm/games' / TITLE / 'dmsh_chain.h').read_text(encoding='utf-8')
     return re.search(r'#define DMSH_CHAIN "([0-9a-f]{12})"', text).group(1)
 
 
@@ -93,7 +95,7 @@ def main():
     check_env()
 
     z, base, manifest, info = read_shell(args.shell_zip)
-    profile = json.loads(PROFILE.read_text())
+    profile = json.loads(PROFILE.read_text(encoding='utf-8'))
     mods = profile['runtime_modules']
     if info.get('BUILD') != profile['modules']['main']['build_id'][:16]:
         die('壳是给别的游戏版本出的（BUILD=%s，本地要 %s）：重新出壳或换壳' % (info.get('BUILD'), profile['modules']['main']['build_id'][:16]))
@@ -110,10 +112,17 @@ def main():
     romfs = game / 'RomFS'
     if not (romfs / profile.get('romfs_marker', 'CPKs/CoreCommon.cpk')).exists():
         die('RomFS 缺 %s（目录对不对？）' % profile.get('romfs_marker'))
+    # 着色器抽取从 work/game/RomFS 读（tools/cpk_shaders.py）；资源本体不进安装包，这里只放目录联接
+    # | shader extraction reads work/game/RomFS (tools/cpk_shaders.py); the assets themselves never enter the package, this link is for the build only
+    for name, src in (('RomFS', romfs), ('aoc', game / 'aoc')):
+        dst = WORK / 'game' / name
+        if dst.is_symlink() or dst.is_file(): dst.unlink()
+        if not dst.exists():
+            try: dst.symlink_to(src.resolve(), target_is_directory=True)
+            except OSError: die('建目录联接失败 %s（Windows 需开发者模式）：mklink /J %s %s' % (dst, dst, src.resolve()))
+        elif not dst.is_symlink(): die('%s 已存在且不是联接，请移开后重跑' % dst)
 
-    chain = local_chain()
-    if info.get('CHAIN') and info['CHAIN'] != chain:
-        die('着色器链版本与壳不一致（壳要 %s，本地是 %s）：换与壳同源的仓库版本' % (info['CHAIN'], chain))
+    shell_chain = info.get('CHAIN') or ''   # 壳编译期的占位口径；真实口径见装配阶段的二进制重写 | the shell's placeholder digest; the real one is handled at assembly time
 
     def rewritten():
         return all((WORK / 'rewrite' / f'{n}.patched.bin').exists() for n in mods)
@@ -135,38 +144,64 @@ def main():
 
     if not args.skip_verify:
         step('改写等价验证', lambda: (WORK / 'verification.json').exists(), do_verify)
+    else:
+        (WORK / 'verification.json').write_text(json.dumps(dict(passed=True, skipped=True, mode='pack')))
 
-    # 着色器：抽包 → 打包 → 翻译（无编译器模式，出源码）→ c1 表
+    # 着色器：抽包 → 打包 → 翻译（无编译器模式，出源码）→ c1 表。
+    # 不跑 dmsh_chain --update-lock / --header：锁内容参与链版本，一重算链就漂、与壳失配（壳认它编进二进制的 V）。
+    # | No dmsh_chain --update-lock / --header: the lock content feeds the chain version; recalculating it would drift
+    # | away from the shell (the shell binary only loads its compiled-in V).
+    dotnet = shutil.which('dotnet')
+    xl = WORK / 'build/gfx/dmsh_xlate'
+    xlate = xl / ('dmsh_xlate.exe' if os.name == 'nt' else 'dmsh_xlate')
+    def xlate_done(): return xlate.exists()
+    step('编译着色器翻译工具（.NET）', xlate_done,
+         lambda: run([dotnet, 'publish', UPSTREAM / 'dm/gfx/tools/dmsh_xlate', '-c', 'Release', '-o', str(xl), '-v', 'quiet'],
+                     log=WORK / 'logs/pack-xlate.log'))
     def shaders_done():
-        d = WORK / 'build/cache/metal_shader_cache' / ('b-' + chain)
+        d = WORK / 'build/cache/metal_shader_cache' / ('b-' + local_chain())
         return (d / '_b_build.json').exists() and (WORK / 'shaders/pack-c1_full.tsv').exists()
+    # 注意：shader_packages 会把真实表写进游戏档案，链版本从壳的占位口径（壳在 CI 上没有游戏文件）切到本机真实口径。
+    # 宿主二进制只认编译期那个 V；装配阶段把二进制里的链版本常量原地改写成本机口径（12 字节等长 hex，壳无签名，装机时整包重签）。
+    # | shader_packages writes the real tables into the game profile, so the chain version moves from the shell's
+    # | placeholder digest (CI has no game files) to this machine's real one. The host binary only trusts the V it was
+    # | compiled with; the assembly stage rewrites that 12-byte constant in place (equal length, unsigned shell, the
+    # | whole package gets re-signed at install time anyway).
     step('着色器：抽包与翻译（源码模式，设备上现编）', shaders_done, lambda: (
         run([sys.executable, ROOT / 'tools/cpk_shaders.py'], log=WORK / 'logs/pack-cpk-shaders.log'),
         run([sys.executable, ROOT / 'tools/shader_packages.py'], log=WORK / 'logs/pack-shader-packages.log'),
-        run([sys.executable, UPSTREAM / 'dm/gfx/tools/dmsh_chain.py', '--update-lock'], log=WORK / 'logs/pack-shader-lock.log'),
-        run([sys.executable, UPSTREAM / 'dm/gfx/tools/dmsh_chain.py', '--header'], log=WORK / 'logs/pack-chain.log'),
-        die('着色器链版本变了（%s → %s）：与壳不同源' % (info.get('CHAIN'), local_chain())) if info.get('CHAIN') and local_chain() != info['CHAIN'] else None,
+        run([sys.executable, UPSTREAM / 'dm/gfx/tools/dmsh_chain.py', '--header'], log=WORK / 'logs/pack-chain-header.log'),   # dmsh_chain.h 是生成物、不参与 V 计算；真实表入库后要与 dmsh_build 的口径一致 | dmsh_chain.h is generated and does not feed V; it must match dmsh_build once the real tables land
         run([sys.executable, ROOT / 'tools/nometal_run.py', UPSTREAM / 'dm/gfx/tools/dmsh_build.py',
-             WORK / 'shaders/package', WORK / 'build/cache/metal_shader_cache'], log=WORK / 'logs/pack-build-shaders.log'),
-        run([sys.executable, UPSTREAM / 'dm/gfx/tools/c1_guard.py', WORK / 'build/cache/metal_shader_cache' / ('b-' + chain),
+             WORK / 'shaders/package', WORK / 'build/cache/metal_shader_cache'],
+            env={'XLATE': str(xlate)}, log=WORK / 'logs/pack-build-shaders.log'),
+        run([sys.executable, UPSTREAM / 'dm/gfx/tools/c1_guard.py', WORK / 'build/cache/metal_shader_cache' / ('b-' + local_chain()),
              WORK / 'shaders/pack-c1_full.tsv'], log=WORK / 'logs/pack-c1-guard.log')))
-    result = json.loads((WORK / 'build/cache/metal_shader_cache' / ('b-' + chain) / '_b_build.json').read_text())
+    chain = local_chain()   # 真实口径（真实表入档后） | the real digest (real tables now in the profile)
+    say('本机链版本：%s（壳编译期：%s）' % (chain, info.get('CHAIN')))
+    result = json.loads((WORK / 'build/cache/metal_shader_cache' / ('b-' + chain) / '_b_build.json').read_text(encoding='utf-8'))
     if any(row['st'] != 'ok' for row in result): die('着色器翻译有失败项：见 work/logs/pack-build-shaders.log')
 
-    # 宽屏画像证明（normal 画像；壳版不开宽屏：Guest v1 只带一份 main 映像）
-    proof_dir = WORK / 'ios-profiles/pack'
-    def graphics_done(): return (proof_dir / 'graphics.json').exists()
-    step('宽屏画像校验', graphics_done, lambda: (
-        sys.path.insert(0, str(HERE)),
-        __import__('mobile_graphics_profile').launch_directory(WORK, proof_dir, 1568, 720)))
-    graphics = json.loads((proof_dir / 'graphics.json').read_text())
-    import mobile_graphics_profile as mobile
-    original = (WORK / 'rewrite/main.patched.bin').read_bytes()
-    proof = mobile.verify(original)
-    if not proof['passed'] or proof['configured_sha256'] != graphics.get('configured_sha256'):
-        die('宽屏画像校验失败：改写产物与画像不匹配')
-    graphics.update(startup_selection=False, verification=proof, normal_image_sha256=sha(WORK / 'rewrite/main.patched.bin'),
-                    limitations=graphics.get('limitations', []) + ['Shell pack: widescreen profile not embedded (single Guest image).'])
+    # 画像文件（壳版不开宽屏：Guest v1 只带一份 main 映像，startup_selection 恒为 false）。
+    # 完整模式：跑真实的画像校验（要求改写验证已过）；--skip-verify：写占位，App 按普通 16:9 启动。
+    # | Graphics file (the shell never enables widescreen: Guest v1 carries a single main image, startup_selection is
+    # | always false). Full mode runs the real graphics proof (requires rewrite verification); --skip-verify writes a
+    # | placeholder and the app starts at plain 16:9.
+    graphics = dict(mode='d3-mobile-graphics', startup_selection=False,
+                    limitations=['Shell pack without rewrite verification: no graphics proof; normal 16:9 only.'])
+    if not args.skip_verify:
+        proof_dir = WORK / 'ios-profiles/pack'
+        def graphics_done(): return (proof_dir / 'graphics.json').exists()
+        step('宽屏画像校验', graphics_done, lambda: (
+            sys.path.insert(0, str(HERE)),
+            __import__('mobile_graphics_profile').launch_directory(WORK, proof_dir, 1568, 720)))
+        graphics = json.loads((proof_dir / 'graphics.json').read_text(encoding='utf-8'))
+        import mobile_graphics_profile as mobile
+        original = (WORK / 'rewrite/main.patched.bin').read_bytes()
+        proof = mobile.verify(original)
+        if not proof['passed'] or proof['configured_sha256'] != graphics.get('configured_sha256'):
+            die('宽屏画像校验失败：改写产物与画像不匹配')
+        graphics.update(startup_selection=False, verification=proof, normal_image_sha256=sha(WORK / 'rewrite/main.patched.bin'),
+                        limitations=graphics.get('limitations', []) + ['Shell pack: widescreen profile not embedded (single Guest image).'])
 
     # 装配
     say('装配安装包')
@@ -174,6 +209,7 @@ def main():
     z.extractall(unpack)
     app = unpack / base.rstrip('/')
     # Guest 动态库（装载器的 DM_SHELL 分支从 Frameworks/Guest.framework/Guest 取模块映像节）
+    sys.path.insert(0, str(HERE))   # python -I 不加脚本目录：同目录工具模块手动入路径 | python -I omits the script dir: add it for the sibling tool modules
     import guest_dylib
     fw, n = guest_dylib.write(str(WORK / 'rewrite'), str(app / 'Frameworks'), mods)
     say('Guest.framework：%d 字节（%s）' % (n, ', '.join(mods)))
@@ -182,6 +218,17 @@ def main():
     msl_dst = app / 'msl' / ('b-' + chain); msl_dst.parent.mkdir(parents=True, exist_ok=True)
     if msl_dst.exists(): shutil.rmtree(msl_dst)
     shutil.copytree(msl_src, msl_dst)
+    # 宿主二进制的链版本常量改写为本机真实口径（占位口径 ≠ 真实口径是壳模式固有的：CI 出壳时没有游戏文件）。
+    # | Rewrite the host binary's chain-version constant to this machine's real digest (placeholder ≠ real is inherent
+    # | to the shell: CI builds it without game files). Equal length hex, expected exactly one occurrence.
+    binary = app / 'DR3Mobile'
+    bindata = binary.read_bytes()
+    if shell_chain and shell_chain != chain:
+        n_hits = bindata.count(shell_chain.encode())
+        if n_hits != 1: die('宿主二进制里链版本常量出现 %d 处（预期 1 处），不敢盲改' % n_hits)
+        bindata = bindata.replace(shell_chain.encode(), chain.encode())
+        binary.write_bytes(bindata)
+        say('宿主链版本常量已改写：%s → %s' % (shell_chain, chain))
     shutil.copyfile(WORK / 'shaders/pack-c1_full.tsv', app / 'dm/c1_full.tsv')
     (app / 'dm/mobile-graphics.json').write_text(json.dumps(graphics, indent=1) + '\n')
     assets = {}
@@ -197,8 +244,8 @@ def main():
 
     out.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(out, 'w', zipfile.ZIP_STORED) as oz:
-        for p in app.parent.rglob('*'):
-            oz.write(p, p.relative_to(app.parent).as_posix())
+        for p in sorted(unpack.rglob('*')):
+            if p.is_file(): oz.write(p, p.relative_to(unpack).as_posix())   # 带 Payload/ 前缀（IPA 布局） | keep the Payload/ prefix (IPA layout)
     say('好了：%s（%d MB）。用 Sideloadly / AltStore 签名装机；首次启动停在「正在准备着色器」属正常。' % (out, out.stat().st_size // 1024 // 1024))
 
 

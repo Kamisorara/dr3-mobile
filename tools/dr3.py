@@ -152,11 +152,7 @@ def bootstrap(_):
                 (UPSTREAM / path_str).unlink(missing_ok=True)   # 孤儿树里已删除的文件
             print(f'上游孤儿提交重建：{len(tree["tree"])} 项，从 API 取回 {fetched} 个文件', flush=True)
             run(['git', 'init', '-q'], WORK / 'logs/upstream-init.log', cwd=UPSTREAM)
-            run(['git', 'add', '-A'], WORK / 'logs/upstream-add.log', cwd=UPSTREAM)
-            run(['git', '-c', 'user.name=dr3-bootstrap', '-c', 'user.email=bootstrap@local',
-                 'commit', '-qm', f'nxnative pinned snapshot {COMMIT[:12]}'], WORK / 'logs/upstream-commit.log', cwd=UPSTREAM)
-            (UPSTREAM / '.dm-pinned').write_text(COMMIT + '\n')
-            run(['git', 'init', '-q'], WORK / 'logs/upstream-init.log', cwd=UPSTREAM)
+            run(['git', 'config', 'core.autocrlf', 'false'], WORK / 'logs/upstream-config.log', cwd=UPSTREAM)   # 不转换换行：上游树与补丁产物保持字节原样（Windows 的 CRLF 会污染链版本输入） | no newline conversion: the tree and patch results stay byte-exact (Windows CRLF would pollute chain-version inputs)
             run(['git', 'add', '-A'], WORK / 'logs/upstream-add.log', cwd=UPSTREAM)
             run(['git', '-c', 'user.name=dr3-bootstrap', '-c', 'user.email=bootstrap@local',
                  'commit', '-qm', f'nxnative pinned snapshot {COMMIT[:12]}'], WORK / 'logs/upstream-commit.log', cwd=UPSTREAM)
@@ -181,7 +177,7 @@ def bootstrap(_):
     for name in ('shader_facts.tsv', 'shader_map.tsv', 'shader_map.tsv.conflicts.tsv', 'shader_pairs.tsv',
                  'pso_manifest.tsv', 'bf_want.tsv', 'c1_full.tsv'):
         if not (game / name).exists():
-            (game / name).write_text('# D3 inventory pending; no graphics validation\n')
+            (game / name).write_text('# D3 inventory pending; no graphics validation\n', newline='\n')   # 钉死 LF：内容参与链版本，Windows 文本模式会转 CRLF | pin LF: the content feeds the chain version; Windows text mode would turn it CRLF
     target = UPSTREAM / 'dm/verify'
     target.mkdir(exist_ok=True)
     for path in (ROOT / 'third_party/d2r-verify').glob('*.py'):
