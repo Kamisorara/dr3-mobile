@@ -25,6 +25,34 @@ Known structure so far (from ConsoleHUD.ui / ConsoleHUD_SinglePlayerFrame.ui):
 
 Not yet understood: the node record layout (where x/y floats and anchors live), the
 directory hash function, how entries reference the string pool.
+
+Session findings (2026-11-04, HUD relocation recon):
+  * Payload is PLAINTEXT — no compression (zlib scan over every offset: zero streams;
+    earlier "garbage" was binary float/pointer fields, not compressed data).
+  * String pool: entries of [u64 length][bytes+NUL]; node paths are plaintext
+    ("ConsoleHUD_main.LayoutRoot.hp_bar_template_player"), "$anon$…" markers before
+    string refs, 32-bit file-offset pointers into the pool (0x68f0 -> adjacent string).
+  * Directory entries ({hash64, offset, count}) point at string tables
+    (e.g. SinglePlayerFrame 0x15118 = "OnlinePortraitFrame…", count 20/73).
+  * HUD host files (of the 397 dumped from ClientCommon.cpk):
+      - ConsoleHUD.ui          — Globes container (Globe, Globe_Console_Reversed =
+                                 mirrored left orb, Globe_Console_lowHealthReversed,
+                                 Globe_Paragon, GlobeCover) + hp_bar templates
+      - GameHUDPC.ui           — HotBar ×17 + SkillButton (PC skill bar)
+      - ConsoleGameHUDMisc.ui  — named attribute "PositionOffset" with attribute
+                                 paths ("…Wrapper.MassacreReportWrapper.PositionOffset")
+                                 ⇒ H2O nodes carry named properties; if a getter by
+                                 path exists at runtime, relocation = property write
+      - Minimap.ui / ConsoleMinimap.ui — the map
+  * No 1280/720 float constants and no bottom-left pixel/normalized position pairs
+    in ConsoleHUD.ui ⇒ positions are either relative/anchored or live in the node
+    records as something other than raw (x,y) float pairs. Next step: parse the node
+    records around the Globes/hotbar path references (walk the dir offsets, decode
+    record boundaries), and look for the runtime property getter (script VM paths
+    like "…Wrapper.PositionOffset" suggest a lookup by path string).
+  * Design constraint (user-confirmed): relocation must be live-switchable — physical
+    controller connected ⇒ HUD back to stock positions (same trigger as the virtual
+    gamepad hide/show). So no static .ui rewrite; runtime node patching only.
 """
 import struct
 import sys
