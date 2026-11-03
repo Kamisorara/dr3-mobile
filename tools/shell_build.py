@@ -44,7 +44,8 @@ def precheck():
     if not UPSTREAM.exists():
         die('third_party/nxnative missing; run: python3 tools/dr3.py bootstrap')
     actual = subprocess.check_output(['git', '-C', str(UPSTREAM), 'rev-parse', 'HEAD'], text=True).strip()
-    if actual != COMMIT:
+    pinned = UPSTREAM / '.dm-pinned'   # tree-rebuild path: HEAD is the rebuild commit; the pinned SHA is recorded in .dm-pinned
+    if actual != COMMIT and not (pinned.exists() and pinned.read_text().strip() == COMMIT and actual):
         die('upstream commit mismatch; run: python3 tools/dr3.py bootstrap')
     # The DM_SHELL branches (Guest-framework loader + on-device shader compile) ship inside
     # patches/nxnative.patch itself; make sure the pinned patch is really applied.
