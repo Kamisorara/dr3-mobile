@@ -15,7 +15,10 @@
 #include "game_profile.h"
 #include "DmTouchControlArt.h"
 
-enum { B_A = 0, B_B, B_X, B_Y, B_LS, B_RS, B_L, B_R, B_ZL, B_ZR, B_PLUS, B_MINUS, B_BAG, B_MENU, B_LEFT, B_UP, B_RIGHT, B_DOWN, B_N };
+enum { B_A = 0, B_B, B_X, B_Y, B_LS, B_RS, B_L, B_R, B_ZL, B_ZR, B_PLUS, B_MINUS,
+       B_LEFT, B_UP, B_RIGHT, B_DOWN,   // 12-15 = NpadButton 十字键位序：直接透传（此前错位成摇杆伪键）
+       B_BAG, B_MENU,                   // 16+ 纯虚拟键：fill() 的 &0xffff 掩掉，recompute 里仍显式剔除
+       B_N };
 enum { C_NONE = 0, C_STICK, C_DPAD, C_FACE, C_BTN, C_SWAP, C_GAME };   // which control a touch holds; C_GAME = game-screen passthrough (hle_touch)
 
 static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
@@ -77,6 +80,7 @@ static __weak DmGamepad *g_view;
     CAShapeLayer *_swap; CATextLayer *_swapLabel; BOOL _swapHeld;
     BOOL _sticksShown;                             // a stick was held at the last refresh
     BOOL _full;                                    // the 3D layout is current
+    BOOL _d3;                                      // D3 专用布局：技能环 + 语义标签（键=真实键，只改几何/标签）
 }
 
 static UIColor *k_idle, *k_on, *k_line, *k_text, *k_textOn;
@@ -92,7 +96,9 @@ static CATextLayer *label(CALayer *parent, NSString *s) {
     t.string = s; t.alignmentMode = kCAAlignmentCenter; t.foregroundColor = k_text.CGColor; t.contentsScale = parent.contentsScale;
     [parent addSublayer:t]; return t;
 }
-static BOOL fullOnly(int b) { return b == B_LS || b == B_RS || b >= B_LEFT; }   // keys shown only in the 3D layout
+static BOOL fullOnly(int b) {   // 仅 3D 布局显示的键（显式列举：包/单等尾部枚举不受影响）
+    return b == B_LS || b == B_RS || b == B_LEFT || b == B_UP || b == B_RIGHT || b == B_DOWN;
+}
 
 - (instancetype)initWithFrame:(CGRect)f {
     if ((self = [super initWithFrame:f])) {
@@ -116,7 +122,7 @@ static BOOL fullOnly(int b) { return b == B_LS || b == B_RS || b >= B_LEFT; }   
             _knob[i] = shape(self.layer);
             _knob[i].fillColor = UIColor.clearColor.CGColor; _knob[i].strokeColor = nil;
         }
-        static NSString *const names[B_N] = {@"A", @"B", @"X", @"Y", @"L3", @"R3", @"L", @"R", @"ZL", @"ZR", @"+", @"−", @"包", @"单"};
+        static NSString *const names[B_N] = {@"A", @"B", @"X", @"Y", @"L3", @"R3", @"L", @"R", @"ZL", @"ZR", @"+", @"−", @"←", @"↑", @"→", @"↓", @"包", @"单"};
         for (int b = 0; b < B_N; b++) {
             _key[b] = shape(self.layer);
             if(b<=B_Y) {
@@ -127,23 +133,33 @@ static BOOL fullOnly(int b) { return b == B_LS || b == B_RS || b >= B_LEFT; }   
         }
         _swap = shape(self.layer); _swapLabel = label(_swap, @"");
         NSNumber *saved = [NSUserDefaults.standardUserDefaults objectForKey:k_layout_key];
-        _full = saved ? saved.boolValue : DM_GAME_PAD_FULL;
+        // 三态布局：0 = 2D、1 = 3D、2 = D3（旧布尔 0/1 迁移）；D3 为触控模式默认意图见 setD3
+        int mode = saved ? saved.intValue : (DM_GAME_PAD_FULL ? 1 : 0);
+        _d3 = mode == 2; _full = mode == 1;
         [self applyLayout];
     }
     return self;
 }
 - (void)applyLayout {   // show / hide the controls for the current layout
     [CATransaction begin]; [CATransaction setDisableActions:YES];
-    for (int b = 0; b < B_N; b++) _key[b].hidden = fullOnly(b) && !_full;
-    _ring[1].hidden = _knob[1].hidden = !_full;
-    _swapLabel.string = _full ? @"3D" : @"2D";
+    for (int b = 0; b < B_N; b++) _key[b].hidden = _d3 ? (b == B_LS || b == B_RS || b == B_L ||
+        b == B_LEFT || b == B_UP || b == B_RIGHT || b == B_DOWN) : (fullOnly(b) && !_full);
+    _ring[1].hidden = _knob[1].hidden = _d3 || !_full;
+    _swapLabel.string = _d3 ? @"D3" : _full ? @"3D" : @"2D";
     [CATransaction commit];
 }
 - (void)setFull:(BOOL)full {   // switch layouts: release every touch first (no key stays held), save, lay out again
-    if (full == _full) return;
+    if (full == _full && !_d3) return;
     [self reset];
-    _full = full;
-    [NSUserDefaults.standardUserDefaults setObject:@(full) forKey:k_layout_key];
+    _full = full; _d3 = NO;
+    [NSUserDefaults.standardUserDefaults setObject:@(full ? @1 : @0) forKey:k_layout_key];
+    [self applyLayout]; [self setNeedsLayout];
+}
+- (void)setD3:(BOOL)d3 {   // D3 专用布局（触控模式默认）：真实键重排为技能环 + 语义标签
+    if (d3 == _d3) return;
+    [self reset];
+    _d3 = d3; if (d3) _full = NO;
+    [NSUserDefaults.standardUserDefaults setObject:@(d3 ? @2 : @0) forKey:k_layout_key];
     [self applyLayout]; [self setNeedsLayout];
 }
 
@@ -155,8 +171,26 @@ static CGPoint side(CGRect s, int right, CGFloat dx, CGFloat y) { return CGPoint
 - (CGPoint)faceCenter { CGRect s = self.corner; CGFloat u = self.u; return side(s, 1, K_FACE_X * u, CGRectGetMaxY(s) - K_PAD_Y * u); }
 - (CGFloat)faceGap { return K_FACE_GAP * self.u; }
 - (CGFloat)faceR { return K_FACE_R * self.u; }
-- (CGPoint)facePos:(int)b { CGPoint c = self.faceCenter; CGFloat g = self.faceGap;
-    switch (b) { case B_A: return CGPointMake(c.x + g, c.y); case B_B: return CGPointMake(c.x, c.y + g); case B_X: return CGPointMake(c.x, c.y - g); default: return CGPointMake(c.x - g, c.y); } }
+- (CGPoint)facePos:(int)b {
+    if (_d3) {   // D3 技能环：攻=中心大键，2/3/4 扇形上开，B 环下（取消）
+        CGPoint c = self.faceCenter; CGFloat u = self.u;
+        CGPoint ring = CGPointMake(c.x - 36 * u, c.y - 14 * u); CGFloat g = 64 * u;
+        switch (b) {
+            case B_A: return ring;
+            case B_X: return CGPointMake(ring.x - g * 0.82, ring.y - g * 0.45);
+            case B_Y: return CGPointMake(ring.x, ring.y - g);
+            case B_R: return CGPointMake(ring.x + g * 0.82, ring.y - g * 0.45);
+            case B_B: return CGPointMake(ring.x, ring.y + g * 0.85);
+            default:  return ring;
+        }
+    }
+    CGPoint c = self.faceCenter; CGFloat g = self.faceGap;
+    switch (b) { case B_A: return CGPointMake(c.x + g, c.y); case B_B: return CGPointMake(c.x, c.y + g); case B_X: return CGPointMake(c.x, c.y - g); default: return CGPointMake(c.x - g, c.y); }
+}
+- (CGFloat)faceKeyR:(int)b {   // 键面半径（D3：中心键加大）
+    if (_d3) { CGFloat u = self.u; return b == B_A ? 44 * u : 27 * u; }
+    return self.faceR;
+}
 - (CGPoint)stickHome:(int)i { CGRect s = self.corner; CGFloat u = self.u;
     return i ? side(s, 1, K_LOW_X * u, CGRectGetMaxY(s) - K_LOW_Y * u) : side(s, 0, K_STICK_X * u, CGRectGetMaxY(s) - K_PAD_Y * u); }
 - (CGFloat)stickR:(int)i { return (i ? K_RSTICK_R : K_STICK_R) * self.u; }
@@ -189,7 +223,15 @@ static CGFloat dist(CGPoint a, CGPoint b) { return hypot(a.x - b.x, a.y - b.y); 
 }
 - (BOOL)inSwap:(CGPoint)p { return dist(p, self.swapCenter) <= K_SWAP_R * self.u * 1.6; }
 - (uint64_t)faceAt:(CGPoint)p {   // keys under the finger in the diamond (between two keys both count)
-    uint64_t m = 0; CGFloat r = self.faceR * 1.25;
+    uint64_t m = 0;
+    if (_d3) {   // 技能环：中心键大半径，环键小半径；只报一个最近的（技能环没有"两键之间"语义）
+        int best = -1; CGFloat bestd = 1e9;
+        for (int b = B_A; b <= B_Y; b++) { CGFloat d = dist(p, [self facePos:b]); if (d < bestd) { bestd = d; best = b; } }
+        CGFloat u = self.u;
+        if (best >= 0 && bestd <= (best == B_A ? 46 * u : 30 * u)) m |= 1ull << best;
+        return m;
+    }
+    CGFloat r = self.faceR * 1.25;
     for (int b = B_A; b <= B_Y; b++) if (dist(p, [self facePos:b]) <= r) m |= 1ull << b;
     return m;
 }
@@ -233,10 +275,8 @@ static CGFloat dist(CGPoint a, CGPoint b) { return hypot(a.x - b.x, a.y - b.y); 
         else if (c == C_DPAD) dpad |= [self dpadAt:[t locationInView:self]];
         else if (c == C_SWAP) swap = YES; }
     // 背包 / 菜单快捷键：包 = +（D3 的 + 打开背包/物品面板）、单 = −（系统菜单）——真机实测定标。
-    // B_BAG/B_MENU 自己的位（12/13）必须剔除：hle_hid 只取低 16 位直通 NpadButton，
-    // bit12/13 = 十字键左/上——上次发布两个键都叠发了十字方向。
-    // | Bag = Plus (opens the inventory panel), Menu = Minus — pinned by on-device testing.
-    // | Strip the shortcut keys' own bits (12/13): they pass through to NpadButton as D-pad Left/Up.
+    // B_BAG/B_MENU 自有位（16/17）虽已被 fill() 的 &0xffff 掩掉，仍显式剔除（latch 位图不积累）。
+    // | Bag = Plus, Menu = Minus (pinned on device); their own bits are stripped explicitly.
     if (btn & (1ull << B_BAG)) face |= 1ull << B_PLUS;
     if (btn & (1ull << B_MENU)) face |= 1ull << B_MINUS;
     btn &= ~(1ull << B_BAG | 1ull << B_MENU);
@@ -292,7 +332,9 @@ static CGFloat dist(CGPoint a, CGPoint b) { return hypot(a.x - b.x, a.y - b.y); 
         for (int i = 0; i < 2; i++) if (t == _stick[i]) _stick[i] = nil;
     }
     [self recompute];
-    if (swap) [self setFull:!_full];
+    if (swap) {   // 2D → 3D → D3 → 2D 循环（D3 为触控模式专用布局，见 docs/移动端虚拟按键设计.md）
+        if (_d3) [self setFull:NO]; else if (_full) [self setD3:YES]; else [self setFull:YES];
+    }
 }
 - (void)touchesEnded:(NSSet<UITouch *> *)ts withEvent:(UIEvent *)e { [self endTouches:ts tapped:YES]; }
 - (void)touchesCancelled:(NSSet<UITouch *> *)ts withEvent:(UIEvent *)e { [self endTouches:ts tapped:NO]; }
@@ -360,9 +402,9 @@ static UIImage *controlImage(CGSize size,CGFloat scale,void (^draw)(CGContextRef
     [self prepareControlArt];
     [CATransaction begin]; [CATransaction setDisableActions:YES];
     for(int b=0;b<B_N;b++)_label[b].contentsScale=_artScale;_swapLabel.contentsScale=_artScale;
-    for (int b = B_A; b <= B_Y; b++) { CGPoint c = [self facePos:b]; setPath(_key[b], circlePath(c, self.faceR));
-        _socket[b].frame=CGRectMake(c.x-self.faceR,c.y-self.faceR,2*self.faceR,2*self.faceR);_socket[b].contentsScale=_artScale;
-        placeLabel(_label[b], c, 20 * u); }
+    for (int b = B_A; b <= B_Y; b++) { CGPoint c = [self facePos:b]; CGFloat fr = [self faceKeyR:b]; setPath(_key[b], circlePath(c, fr));
+        if(b<=B_Y){_socket[b].frame=CGRectMake(c.x-fr,c.y-fr,2*fr,2*fr);_socket[b].contentsScale=_artScale;}
+        placeLabel(_label[b], c, (b == B_A ? 24 : 18) * u); }
     for (int i = 0; i < (int)(sizeof k_btns / sizeof *k_btns); i++) { int b = k_btns[i];
         if (isDrop(b)) {
             BOOL right = b == B_ZR || b == B_R; CGPoint c = [self dropCenter:b];
@@ -381,6 +423,29 @@ static UIImage *controlImage(CGSize size,CGFloat scale,void (^draw)(CGContextRef
         CGFloat radius=[self stickR:i];_ring[i].bounds=CGRectMake(0,0,2*radius,2*radius);_ring[i].position=[self stickHome:i];_ring[i].contentsScale=_artScale;
         CGFloat k = (i ? K_RKNOB_R : K_KNOB_R) * u; _knob[i].bounds = CGRectMake(0, 0, 2 * k, 2 * k);
         _knob[i].contentsScale=_artScale;CGPathRef shadow=circlePath(CGPointMake(k,k),k*.89);_knob[i].shadowPath=shadow;CGPathRelease(shadow);
+    }
+    if (_d3) {   // D3 语义标签 + 药水/城键重摆（键 = 真实手柄键，只改几何与标签；映射见 docs/移动端虚拟按键设计.md）
+        static NSString *const d3names[B_N] = {@"攻", @"B", @"2", @"3", @"L3", @"R3", @"L", @"4", @"药", @"城", @"+", @"−", @"包", @"单"};
+        for (int b = 0; b < B_N; b++) if (d3names[b]) _label[b].string = d3names[b];
+        // 药水（B_ZL）：左摇杆右上；城（B_ZR）：顶栏「单」右侧（泪滴改圆）
+        CGPoint pot = [self stickHome:0]; pot.x += 118 * u; pot.y -= 46 * u;
+        setPath(_key[B_ZL], circlePath(pot, 26 * u)); placeLabel(_label[B_ZL], pot, 18 * u);
+        CGPoint tp = [self pillRect:B_MENU].origin; tp.x += (K_PILL_W + 12) * u;
+        CGRect tpRect = CGRectMake(tp.x, tp.y, K_PILL_W * u, K_PILL_H * u);
+        setPath(_key[B_ZR], CGPathCreateWithRoundedRect(tpRect, tpRect.size.height / 2, tpRect.size.height / 2, NULL));
+        placeLabel(_label[B_ZR], CGPointMake(CGRectGetMidX(tpRect), CGRectGetMidY(tpRect)), 18 * u);
+        _key[B_ZR].hidden = NO; _label[B_ZR].hidden = NO;
+        // Skill4（B_R）在环上（k_btns 循环按顶部泪滴画过，这里重画到环位）
+        CGPoint r4 = [self facePos:B_R]; setPath(_key[B_R], circlePath(r4, 27 * u));
+        placeLabel(_label[B_R], r4, 18 * u); _key[B_R].hidden = NO; _label[B_R].hidden = NO;
+    } else {
+        static NSString *const names[B_N] = {@"A", @"B", @"X", @"Y", @"L3", @"R3", @"L", @"R", @"ZL", @"ZR", @"+", @"−", @"←", @"↑", @"→", @"↓", @"包", @"单"};
+        for (int b = 0; b < B_N; b++) if (names[b]) _label[b].string = names[b];
+        // 泪滴恢复（drop 形状在上方 k_btns 循环里按默认几何画过；这里恢复 ZL/ZR 位置为标准位）
+        for (int i = 0; i < (int)(sizeof k_btns / sizeof *k_btns); i++) { int b = k_btns[i];
+            if (!isDrop(b)) continue;
+            CGPoint c = [self dropCenter:b]; setPath(_key[b], dropPath(c, [self dropR:b], b == B_ZR || b == B_R ? -M_PI_4 : -3 * M_PI_4, 4 * u));
+            placeLabel(_label[b], c, 16 * u); }
     }
     [CATransaction commit];
     [self refresh];

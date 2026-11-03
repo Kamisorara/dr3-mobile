@@ -25,6 +25,13 @@ jobs:
         run: |
           pip install -r requirements.txt
           brew install xcodegen
+      - name: Cache bootstrapped upstream
+        uses: actions/cache@v4
+        with:
+          # 命中即跳过 API 树重建（一次重建几百次调用，是 403 限流的根源）；键 = 钉死提交 + 补丁摘要
+          # | A hit skips the API-heavy tree rebuild (hundreds of calls; the 403 source); key = pinned commit + patch digest
+          path: third_party/nxnative
+          key: nxnative-${{ hashFiles('third_party/nxnative/.dm-pinned', 'patches/nxnative.patch') }}
       - name: Bootstrap pinned upstream
         env:
           GITHUB_TOKEN: ${{ github.token }}   # 上游孤儿提交只能经 GitHub API 树重建 | the pinned orphan commit is rebuilt through the GitHub API
