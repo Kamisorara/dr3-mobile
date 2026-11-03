@@ -231,13 +231,13 @@ static CGFloat dist(CGPoint a, CGPoint b) { return hypot(a.x - b.x, a.y - b.y); 
         if (c == C_BTN) btn |= 1ull << (v >> 8);
         else if (c == C_DPAD) dpad |= [self dpadAt:[t locationInView:self]];
         else if (c == C_SWAP) swap = YES; }
-    // 背包 / 菜单快捷键 = Y / + 的重复入口：并进同一按键位（游戏内改键后语义跟随真实键）。
+    // 背包 / 菜单快捷键：包 = +（D3 的 + 打开背包/物品面板）、单 = −（系统菜单）——真机实测定标。
     // B_BAG/B_MENU 自己的位（12/13）必须剔除：hle_hid 只取低 16 位直通 NpadButton，
-    // bit12/13 = 十字键左/上——上次发布两个键都叠发了十字方向（包=十字左+Y、单=十字上++）。
-    // | Strip the shortcut keys' own bits (12/13): they pass through to NpadButton as
-    // | D-pad Left/Up, so both keys previously also pressed a D-pad direction.
-    if (btn & (1ull << B_BAG)) face |= 1ull << B_Y;
-    if (btn & (1ull << B_MENU)) face |= 1ull << B_PLUS;
+    // bit12/13 = 十字键左/上——上次发布两个键都叠发了十字方向。
+    // | Bag = Plus (opens the inventory panel), Menu = Minus — pinned by on-device testing.
+    // | Strip the shortcut keys' own bits (12/13): they pass through to NpadButton as D-pad Left/Up.
+    if (btn & (1ull << B_BAG)) face |= 1ull << B_PLUS;
+    if (btn & (1ull << B_MENU)) face |= 1ull << B_MINUS;
     btn &= ~(1ull << B_BAG | 1ull << B_MENU);
     int32_t ax[4] = {0};
     for (int i = 0; i < 2; i++) {
