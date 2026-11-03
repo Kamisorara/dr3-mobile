@@ -106,6 +106,20 @@ static int boot_env(void) {
     // | activates on the variable's PRESENCE (a value of 0 does not disable it), so off = unsetenv
     // | and on = setenv 1. An env.txt carrying the old default of 1 is revoked right here.
     if (![NSUserDefaults.standardUserDefaults boolForKey:@"LaunchMetalHUD"]) unsetenv("MTL_HUD_ENABLED");
+    // Documents/env.txt 不存在时生成一份带注释的模板：文件 App 里可见可编辑（iOS 没法新建纯文本），
+    // 常用开关已列进注释；改完重启游戏生效（boot_env 只在启动时读）。
+    // | Create a commented env.txt template in Documents when absent: visible and editable in the
+    // | Files app (iOS cannot create plain text files); common switches are listed in comments.
+    NSString *envf = [doc stringByAppendingPathComponent:@"env.txt"];
+    if (![fm fileExistsAtPath:envf]) {
+        NSString *tpl = [NSString stringWithFormat:
+            @"# DR3Mobile 环境开关：每行 KEY=VALUE，# 开头是注释；改完重启游戏生效。\n"
+             "# 常用开关已做进启动器界面（Metal HUD、触摸日志、MetalFX、局域网），一般不用改这里。\n"
+             "\n"
+             "# 触屏诊断：游戏每次读取触摸点记一行（进 Documents/log.txt）\n"
+             "#DM_TOUCH_LOG=1\n"];
+        [[tpl dataUsingEncoding:NSUTF8StringEncoding] writeToFile:envf atomically:YES];
+    }
     NSString *romfs = romfs_locate(fm, doc);
     if (!romfs) return 0;
     BOOL aocBuried = NO;
@@ -165,12 +179,13 @@ int front_ios_boot_ok(void) { return g_boot_ok; }
 @property (strong, nonatomic) UIWindow *window;
 @end
 @implementation SceneDelegate
-- (void)startMode:(NSInteger)mode hud:(BOOL)hud metalfx:(BOOL)metalfx lan:(BOOL)lan {
+- (void)startMode:(NSInteger)mode hud:(BOOL)hud metalfx:(BOOL)metalfx lan:(BOOL)lan touchLog:(BOOL)touchLog {
     if(g_launch_selected || !g_boot_ok)return;
     BOOL aspect = mode==2;
     if(aspect&&!aspect_available())return;
     BOOL fill = mode==1;
     if(hud)setenv("MTL_HUD_ENABLED","1",1);else unsetenv("MTL_HUD_ENABLED");   // 存在即激活，0 不算关 | presence activates it; 0 is not off
+    if(touchLog)setenv("DM_TOUCH_LOG","1",1);else unsetenv("DM_TOUCH_LOG");    // 同上（hle_touch 见变量即开） | same rule in hle_touch
     setenv("DM_METALFX",metalfx?"spatial":"off",1);
     setenv("DM_IOS_GRAPHICS_MODE","normal",1);   // 适配不换映像：参数槽在宿主，映像同一张 | aspect keeps the same image: the slots live in the host
     setenv("DM_GAME_RES","1280x720",1);
@@ -188,7 +203,7 @@ int front_ios_boot_ok(void) { return g_boot_ok; }
     BOOL lan=dr3_lan_supported&&dr3_lan_supported();
     LauncherViewController *launcher=[[LauncherViewController alloc] initWithWideAvailable:aspect_available() lanAvailable:lan ready:g_boot_ok reason:@"游戏和中文资源未准备完整，请完成传输后重新打开。"];
     __weak SceneDelegate *weakSelf=self;
-    launcher.onPlay=^(NSInteger mode,BOOL hud,BOOL metalfx,BOOL lan){[weakSelf startMode:mode hud:hud metalfx:metalfx lan:lan];};
+    launcher.onPlay=^(NSInteger mode,BOOL hud,BOOL metalfx,BOOL lan,BOOL touchLog){[weakSelf startMode:mode hud:hud metalfx:metalfx lan:lan touchLog:touchLog];};
     self.window.rootViewController=launcher;
     [self.window makeKeyAndVisible];
     UIApplication.sharedApplication.idleTimerDisabled=YES;

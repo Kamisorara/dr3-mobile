@@ -10,7 +10,7 @@ static NSString *text(NSString *zh, NSString *en) {
 @property (copy) NSString *reason;
 @property (strong) UITableView *table;
 @property (strong) UISegmentedControl *mode;
-@property (strong) UISwitch *hud, *metalfx, *lan;
+@property (strong) UISwitch *hud, *metalfx, *lan, *touch;
 @property (strong) UIButton *play;
 @end
 
@@ -31,7 +31,7 @@ static NSString *text(NSString *zh, NSString *en) {
     NSUserDefaults *defaults=NSUserDefaults.standardUserDefaults;
     // HUD 默认关：Apple 的 libMTLHud 见到 MTL_HUD_ENABLED 存在就可能挂上（0 也不算关，得 unsetenv），
     // 出厂默认必须是"变量不存在"；想要的人拨开关，onPlay 里 setenv 1。
-    [defaults registerDefaults:@{@"LaunchMetalHUD":@NO,@"LaunchMetalFX":@YES,@"LaunchLocalLAN":@YES}];
+    [defaults registerDefaults:@{@"LaunchMetalHUD":@NO,@"LaunchMetalFX":@YES,@"LaunchLocalLAN":@YES,@"LaunchTouchLog":@NO}];
     // 屏幕几何（横屏）：iPad ~1.44:1、iPhone ~1.9–2.2:1、16:9 屏正好 1.78。
     // 标准 = 16:9 完整；填充 = 放大裁边；适配 = 参数槽按屏幕比例原生渲染（零黑边零裁切，需要 pack 带 D3 参数槽）。
     CGSize nb=UIScreen.mainScreen.nativeBounds.size;
@@ -54,7 +54,10 @@ static NSString *text(NSString *zh, NSString *en) {
     self.metalfx.accessibilityIdentifier=@"metalfx";self.metalfx.accessibilityLabel=@"MetalFX";
     self.lan=[UISwitch new];self.lan.on=self.lanAvailable&&[defaults boolForKey:@"LaunchLocalLAN"];self.lan.enabled=self.lanAvailable;
     self.lan.accessibilityIdentifier=@"local-lan";self.lan.accessibilityLabel=text(@"本地 Wi-Fi 联机",@"Local Wi-Fi multiplayer");
-    for(UISwitch *s in @[self.hud,self.metalfx,self.lan])[s addTarget:self action:@selector(changed:) forControlEvents:UIControlEventValueChanged];
+    // 触摸日志：hle_touch 每次游戏读触摸点记一行（诊断触控用；写进 Documents/log.txt）
+    self.touch=[UISwitch new];self.touch.on=[defaults boolForKey:@"LaunchTouchLog"];
+    self.touch.accessibilityIdentifier=@"touch-log";self.touch.accessibilityLabel=text(@"触摸日志",@"Touch logging");
+    for(UISwitch *s in @[self.hud,self.metalfx,self.lan,self.touch])[s addTarget:self action:@selector(changed:) forControlEvents:UIControlEventValueChanged];
     UILabel *title=[self label:@"DR3 Mobile" style:UIFontTextStyleLargeTitle color:UIColor.labelColor];
     title.accessibilityTraits|=UIAccessibilityTraitHeader;
     UILabel *subtitle=[self label:text(@"启动设置",@"Launch settings") style:UIFontTextStyleTitle3 color:UIColor.secondaryLabelColor];
@@ -92,7 +95,7 @@ static NSString *text(NSString *zh, NSString *en) {
         [self.mode.heightAnchor constraintGreaterThanOrEqualToConstant:44]]];
 }
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)table {return 3;}
-- (NSInteger)tableView:(UITableView *)table numberOfRowsInSection:(NSInteger)section {return section==1?2:1;}
+- (NSInteger)tableView:(UITableView *)table numberOfRowsInSection:(NSInteger)section {return section==1?3:1;}
 - (NSString *)tableView:(UITableView *)table titleForHeaderInSection:(NSInteger)section {
     return section==0?text(@"画面模式",@"Display mode"):section==1?text(@"图形选项",@"Graphics"):text(@"局域网",@"Local network");
 }
@@ -116,9 +119,9 @@ static NSString *text(NSString *zh, NSString *en) {
             [self.mode.bottomAnchor constraintEqualToAnchor:cell.contentView.bottomAnchor constant:-8]]];
     } else {
         UIListContentConfiguration *content=[cell defaultContentConfiguration];
-        content.text=path.section==2?text(@"本地 Wi-Fi 联机",@"Local Wi-Fi multiplayer"):path.row==0?@"Metal HUD":text(@"MetalFX 超分",@"MetalFX upscaling");
+        content.text=path.section==2?text(@"本地 Wi-Fi 联机",@"Local Wi-Fi multiplayer"):path.row==0?@"Metal HUD":path.row==1?text(@"MetalFX 超分",@"MetalFX upscaling"):text(@"触摸日志（诊断）",@"Touch logging (diagnostics)");
         content.textProperties.numberOfLines=0;cell.contentConfiguration=content;
-        cell.accessoryView=path.section==2?self.lan:path.row==0?self.hud:self.metalfx;
+        cell.accessoryView=path.section==2?self.lan:path.row==0?self.hud:path.row==1?self.metalfx:self.touch;
         [cell.heightAnchor constraintGreaterThanOrEqualToConstant:56].active=YES;
     }
     return cell;
@@ -128,13 +131,14 @@ static NSString *text(NSString *zh, NSString *en) {
     [d setInteger:self.mode.selectedSegmentIndex forKey:@"LaunchMode"];
     [d setBool:self.hud.on forKey:@"LaunchMetalHUD"];
     [d setBool:self.metalfx.on forKey:@"LaunchMetalFX"];
+    [d setBool:self.touch.on forKey:@"LaunchTouchLog"];
     [d setBool:self.lan.on forKey:@"LaunchLocalLAN"];
     if(sender==self.mode||sender==self.metalfx)[self.table reloadData];
 }
 - (void)start:(UIButton *)sender {
     if(!self.ready||self.starting)return;
     self.starting=YES;sender.enabled=NO;[self changed:nil];
-    if(self.onPlay)self.onPlay(self.mode.selectedSegmentIndex,self.hud.on,self.metalfx.on,self.lan.on);
+    if(self.onPlay)self.onPlay(self.mode.selectedSegmentIndex,self.hud.on,self.metalfx.on,self.lan.on,self.touch.on);
     self.starting=NO;sender.enabled=self.ready;
 }
 - (BOOL)prefersStatusBarHidden {return YES;}
