@@ -44,7 +44,16 @@ CGRect dm_ios_game_frame(void) { return g_game_frame; }   // DmGamepad 触摸透
 - (void)layoutSubviews {
     [super layoutSubviews];
     CAMetalLayer *l = (CAMetalLayer *)self.layer;
-    if (g_metalfx) { l.drawableSize = CGSizeMake(2560, g_wide ? 1176 : 1440); return; }
+    // MetalFX 画布：适配模式按屏幕比例（2560×高），否则 16:9 / 宽屏固定——画布比例必须与
+    // layer（=屏幕）一致，否则出图被 aspect-fit 塞进 16:9 画布再拉伸到全屏（iPad 上两侧黑边+变形）。
+    // | MetalFX canvas: follow the screen ratio in aspect mode — the canvas must match the layer
+    // | (the screen) or the picture is fitted into a 16:9 canvas and then stretched back, leaving
+    // | side bars + distortion on the iPad.
+    if (g_metalfx) {
+        CGFloat h = g_aspect ? round(2560.0 / g_screen_aspect) : (g_wide ? 1176 : 1440);
+        l.drawableSize = CGSizeMake(2560, h);
+        return;
+    }
     // drawable 跟 layer 走但封顶 2560 宽（宽高比不变、无拉伸）：游戏本身 ≤1600×900，再高的分辨率只是
     // 把同一段画面放大；不封顶的话填充模式（layer 比屏幕大）和大屏 fit 模式都会造出巨型缓冲白占显存。
     // | The drawable follows the layer but is capped at 2560 wide (same aspect, no distortion): the game
