@@ -67,7 +67,7 @@ def main():
     font=gen/'dm/font';font.mkdir()
     shutil.copyfile('/System/Library/Fonts/Supplemental/Arial Unicode.ttf',font/'standard.ttf')
     subprocess.run([sys.executable,str(UPSTREAM/'dm/tools/make_ext_font.py'),str(font/'nintendo_ext.ttf')],check=True,stdout=subprocess.DEVNULL)
-    (gen/'dm/env.txt').write_text('DM_LANG=zh-Hans\nDM_OPMODE=0\nDM_NVN_UNIFORM_FORWARD=1\nDM_NVN_TBDR=0\nDM_PSO_MANIFEST=off\nMTL_HUD_ENABLED=1\nDM_NVN_TSV=performance.tsv\nDM_NVN_TSV_CALLS=0\nDM_HID_RECEIPT_LOG=controller.jsonl\nDM_HID_RECEIPT_LIMIT=65536\nDM_PAD_EVENT_LOG=controller-events.jsonl\n')
+    (gen/'dm/env.txt').write_text('DM_LANG=zh-Hans\nDM_OPMODE=0\nDM_NVN_UNIFORM_FORWARD=1\nDM_NVN_TBDR=0\nDM_PSO_MANIFEST=off\nDM_NVN_TSV=performance.tsv\nDM_NVN_TSV_CALLS=0\nDM_HID_RECEIPT_LOG=controller.jsonl\nDM_HID_RECEIPT_LIMIT=65536\nDM_PAD_EVENT_LOG=controller-events.jsonl\n')
     assets={}
     for kind,directory in [('romfs',WORK/'game/RomFS'),('aoc',WORK/'aoc')]:
         assets[kind]={p.relative_to(directory).as_posix():p.stat().st_size for p in directory.rglob('*') if p.is_file()}

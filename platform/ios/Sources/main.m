@@ -12,7 +12,7 @@ int dm_main(int argc, char **argv);   // dm/host/main.c compiled in with -Dmain=
 void dm_host_preload_start(int argc, char **argv);
 UIViewController *front_ios_root(void);
 void front_ios_focus_event(int ev);
-void front_ios_configure_display(int wide, int metalfx);
+void front_ios_configure_display(int wide, int metalfx, int fill);
 int dr3_lan_supported(void) __attribute__((weak_import));
 
 static char *g_argv[4]; static int g_argc;
@@ -96,6 +96,13 @@ static int boot_env(void) {
             if (!getenv(k.UTF8String)) { setenv(k.UTF8String, v.UTF8String, 0); fprintf(stderr, "boot: 环境 %s=%s（%s）\n", k.UTF8String, v.UTF8String, ef.lastPathComponent.UTF8String); }
         }
     }
+    // Metal HUD 的持久偏好提前生效（此时进程里还没碰过 Metal）：Apple 的 libMTLHud 看到
+    // MTL_HUD_ENABLED「存在」就可能挂上（值是 0 也不行），所以关 = unsetenv、开 = setenv 1。
+    // env.txt 若带了旧默认 1，这里随即撤掉——出厂默认必须是"变量不存在"。
+    // | Apply the persisted Metal-HUD preference before anything touches Metal: Apple's libMTLHud
+    // | activates on the variable's PRESENCE (a value of 0 does not disable it), so off = unsetenv
+    // | and on = setenv 1. An env.txt carrying the old default of 1 is revoked right here.
+    if (![NSUserDefaults.standardUserDefaults boolForKey:@"LaunchMetalHUD"]) unsetenv("MTL_HUD_ENABLED");
     NSString *romfs = romfs_locate(fm, doc);
     if (!romfs) return 0;
     BOOL aocBuried = NO;
@@ -155,16 +162,18 @@ int front_ios_boot_ok(void) { return g_boot_ok; }
 @property (strong, nonatomic) UIWindow *window;
 @end
 @implementation SceneDelegate
-- (void)startWide:(BOOL)wide hud:(BOOL)hud metalfx:(BOOL)metalfx lan:(BOOL)lan {
+- (void)startMode:(NSInteger)mode hud:(BOOL)hud metalfx:(BOOL)metalfx lan:(BOOL)lan {
     if(g_launch_selected || !g_boot_ok)return;
+    BOOL wide = mode==2;
     if(wide&&!wide_available())return;
-    setenv("MTL_HUD_ENABLED",hud?"1":"0",1);
+    BOOL fill = mode==1;
+    if(hud)setenv("MTL_HUD_ENABLED","1",1);else unsetenv("MTL_HUD_ENABLED");   // 存在即激活，0 不算关 | presence activates it; 0 is not off
     setenv("DM_METALFX",metalfx?"spatial":"off",1);
     setenv("DM_IOS_GRAPHICS_MODE",wide?"wide":"normal",1);
     setenv("DM_GAME_RES",wide?"1568x720":"1280x720",1);
     setenv("DM_DR3_LAN",lan?"1":"0",1);
-    fprintf(stderr,"boot: launch mode=%s render=%s HUD=%d MetalFX=%s LAN=%d\n",wide?"wide":"normal",getenv("DM_GAME_RES"),hud,metalfx?"spatial":"off",lan);
-    front_ios_configure_display(wide,metalfx);
+    fprintf(stderr,"boot: launch mode=%s render=%s HUD=%d MetalFX=%s LAN=%d\n",wide?"wide":fill?"fill":"normal",getenv("DM_GAME_RES"),hud,metalfx?"spatial":"off",lan);
+    front_ios_configure_display(wide,metalfx,fill);
     dm_host_preload_start(g_argc,g_argv);
     g_launch_selected=1;
     self.window.rootViewController=front_ios_root();
@@ -175,7 +184,7 @@ int front_ios_boot_ok(void) { return g_boot_ok; }
     BOOL lan=dr3_lan_supported&&dr3_lan_supported();
     LauncherViewController *launcher=[[LauncherViewController alloc] initWithWideAvailable:wide_available() lanAvailable:lan ready:g_boot_ok reason:@"游戏和中文资源未准备完整，请完成传输后重新打开。"];
     __weak SceneDelegate *weakSelf=self;
-    launcher.onPlay=^(BOOL wide,BOOL hud,BOOL metalfx,BOOL lan){[weakSelf startWide:wide hud:hud metalfx:metalfx lan:lan];};
+    launcher.onPlay=^(NSInteger mode,BOOL hud,BOOL metalfx,BOOL lan){[weakSelf startMode:mode hud:hud metalfx:metalfx lan:lan];};
     self.window.rootViewController=launcher;
     [self.window makeKeyAndVisible];
     UIApplication.sharedApplication.idleTimerDisabled=YES;

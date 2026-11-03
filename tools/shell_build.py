@@ -103,9 +103,12 @@ def main():
     game = UPSTREAM / 'dm/games' / TITLE
     for name in ('shader_map.tsv', 'c1_full.tsv', 'pso_manifest.tsv'):
         if (game / name).exists(): shutil.copyfile(game / name, dm / name)
-    # Same defaults as the normal build (tools/build_ios.py)
+    # Same defaults as the normal build (tools/build_ios.py)。不带 MTL_HUD_ENABLED：Apple 的 libMTLHud
+    # 见到变量「存在」就可能挂上（0 也不算关）——想要 HUD 的人用启动器开关（开 = setenv 1，关 = unsetenv）。
+    # | No MTL_HUD_ENABLED here: Apple's libMTLHud can attach on the variable's mere presence (a value
+    # | of 0 does not disable it) — the launcher switch owns it (on = setenv 1, off = unsetenv).
     (dm / 'env.txt').write_text('DM_LANG=zh-Hans\nDM_OPMODE=0\nDM_NVN_UNIFORM_FORWARD=1\nDM_NVN_TBDR=0\n'
-                                'DM_PSO_MANIFEST=off\nMTL_HUD_ENABLED=1\nDM_NVN_TSV=performance.tsv\n'
+                                'DM_PSO_MANIFEST=off\nDM_NVN_TSV=performance.tsv\n'
                                 'DM_NVN_TSV_CALLS=0\nDM_HID_RECEIPT_LOG=controller.jsonl\n'
                                 'DM_HID_RECEIPT_LIMIT=65536\nDM_PAD_EVENT_LOG=controller-events.jsonl\n')
     # The packer replaces these two (see shell_manifest.txt): the real graphics proof and the

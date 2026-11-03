@@ -17,8 +17,8 @@ void front_ios_boot(void);
 int front_ios_boot_ok(void);
 
 static CAMetalLayer *g_layer;
-static int g_wide,g_metalfx;
-void front_ios_configure_display(int wide,int metalfx) { g_wide=!!wide;g_metalfx=!!metalfx; }
+static int g_wide,g_metalfx,g_fill;
+void front_ios_configure_display(int wide,int metalfx,int fill) { g_wide=!!wide;g_metalfx=!!metalfx;g_fill=!!fill; }
 
 @interface DmGameView : UIView
 @end
@@ -36,7 +36,15 @@ void front_ios_configure_display(int wide,int metalfx) { g_wide=!!wide;g_metalfx
 - (void)layoutSubviews {
     [super layoutSubviews];
     CAMetalLayer *l = (CAMetalLayer *)self.layer;
-    l.drawableSize = g_metalfx?CGSizeMake(2560,g_wide?1176:1440):CGSizeMake(round(self.bounds.size.width*l.contentsScale),round(self.bounds.size.height*l.contentsScale));
+    if (g_metalfx) { l.drawableSize = CGSizeMake(2560, g_wide ? 1176 : 1440); return; }
+    // drawable 跟 layer 走但封顶 2560 宽（宽高比不变、无拉伸）：游戏本身 ≤1600×900，再高的分辨率只是
+    // 把同一段画面放大；不封顶的话填充模式（layer 比屏幕大）和大屏 fit 模式都会造出巨型缓冲白占显存。
+    // | The drawable follows the layer but is capped at 2560 wide (same aspect, no distortion): the game
+    // | renders at <=1600x900, so anything higher only upscales; uncapped, fill mode (layer larger than
+    // | the screen) and large fitted layers would allocate huge buffers for pixels nobody sees sharper.
+    CGSize s = CGSizeMake(round(self.bounds.size.width*l.contentsScale), round(self.bounds.size.height*l.contentsScale));
+    if (s.width > 2560) { s = CGSizeMake(2560, round(s.height*2560.0/s.width)); }
+    l.drawableSize = s;
 }
 @end
 
@@ -71,6 +79,12 @@ void front_ios_configure_display(int wide,int metalfx) { g_wide=!!wide;g_metalfx
     if(!g_wide || fabs(w/h/aspect-1.0)>=0.01) {
         if(w/h>aspect)w=h*aspect;else h=w/aspect;
     }
+    // 填充模式：16:9 画面放大到铺满（cover），超出屏幕的边缘被裁掉——iPad（约 1.44:1）裁左右各约一成，
+    // 比上下黑边少占约 30% 屏幕面积。画面内容仍按 16:9 渲染，只是显示几何变化。
+    // | Fill mode: scale the 16:9 picture up to cover the screen; overflow is cropped — on an
+    // | iPad (~1.44:1) that trims about a tenth off each side. The render stays native 16:9;
+    // | only the presentation geometry changes.
+    if(g_fill) { CGFloat s=fmax(b.size.width/w,b.size.height/h); w*=s; h*=s; }
     self.game.frame = CGRectMake(floor((b.size.width - w) / 2), floor((b.size.height - h) / 2), w, h);
 }
 - (void)viewDidAppear:(BOOL)a { [super viewDidAppear:a]; front_ios_boot(); }

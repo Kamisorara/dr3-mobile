@@ -1,4 +1,5 @@
 #import "LauncherViewController.h"
+#include <math.h>
 
 static NSString *text(NSString *zh, NSString *en) {
     return [NSLocale.preferredLanguages.firstObject hasPrefix:@"zh"] ? zh : en;
@@ -28,10 +29,24 @@ static NSString *text(NSString *zh, NSString *en) {
     self.view.backgroundColor=UIColor.systemGroupedBackgroundColor;
     self.view.tintColor=UIColor.systemIndigoColor;
     NSUserDefaults *defaults=NSUserDefaults.standardUserDefaults;
-    [defaults registerDefaults:@{@"LaunchWide":@YES,@"LaunchMetalHUD":@YES,@"LaunchMetalFX":@YES,@"LaunchLocalLAN":@YES}];
-    self.mode=[[UISegmentedControl alloc] initWithItems:@[text(@"正常",@"Normal"),text(@"宽屏",@"Wide")]];
-    self.mode.selectedSegmentIndex=self.wideAvailable&&[defaults boolForKey:@"LaunchWide"]?1:0;
-    [self.mode setEnabled:self.wideAvailable forSegmentAtIndex:1];
+    // HUD 默认关：Apple 的 libMTLHud 见到 MTL_HUD_ENABLED 存在就可能挂上（0 也不算关，得 unsetenv），
+    // 出厂默认必须是"变量不存在"；想要的人拨开关，onPlay 里 setenv 1。
+    [defaults registerDefaults:@{@"LaunchMetalHUD":@NO,@"LaunchMetalFX":@YES,@"LaunchLocalLAN":@YES}];
+    // 屏幕几何（横屏）：iPad ~1.44:1、iPhone ~1.9–2.2:1、16:9 屏正好 1.78——填充选项只对非 16:9 屏有意义，
+    // 宽屏映像 (1568×720≈2.18:1) 只在够宽的屏幕上提供。
+    CGSize nb=UIScreen.mainScreen.nativeBounds.size;
+    CGFloat aspect=fmax(nb.width,nb.height)/fmin(nb.width,nb.height);
+    BOOL fillAvailable=fabs(aspect/(16.0/9.0)-1.0)>=0.02;
+    BOOL wideHere=self.wideAvailable&&aspect>2.0;
+    self.mode=[[UISegmentedControl alloc] initWithItems:@[text(@"标准",@"Standard"),text(@"填充",@"Fill"),text(@"宽屏",@"Wide")]];
+    NSInteger mode=0;
+    if([defaults objectForKey:@"LaunchMode"]){mode=[defaults integerForKey:@"LaunchMode"];}
+    else if([defaults boolForKey:@"LaunchWide"]){mode=2;}   // 旧版本只存过 LaunchWide
+    if(mode==1&&!fillAvailable)mode=0;
+    if(mode==2&&!wideHere)mode=0;
+    self.mode.selectedSegmentIndex=mode;
+    [self.mode setEnabled:fillAvailable forSegmentAtIndex:1];
+    [self.mode setEnabled:wideHere forSegmentAtIndex:2];
     self.mode.accessibilityIdentifier=@"display-mode";
     [self.mode addTarget:self action:@selector(changed:) forControlEvents:UIControlEventValueChanged];
     self.hud=[UISwitch new];self.hud.on=[defaults boolForKey:@"LaunchMetalHUD"];
@@ -85,10 +100,10 @@ static NSString *text(NSString *zh, NSString *en) {
 - (NSString *)tableView:(UITableView *)table titleForFooterInSection:(NSInteger)section {
     if(section==2)return self.lanAvailable?text(@"在同一 Wi-Fi 内使用游戏的本地联机入口。",@"Use the game’s local multiplayer mode on the same Wi-Fi network."):text(@"此构建未包含本地联机。",@"Local multiplayer is unavailable in this build.");
     if(section==1)return self.metalfx.on?text(@"720p 渲染，MetalFX 超分至 2K 输出。HUD 显示帧率与 GPU 数据。",@"Render at 720p and use MetalFX for 2K output. HUD shows frame rate and GPU data."):text(@"720p 渲染，直接适配屏幕。HUD 显示帧率与 GPU 数据。",@"Render at 720p and fit the display directly. HUD shows frame rate and GPU data.");
-    if(!self.wideAvailable)return text(@"当前构建未包含宽屏模式。",@"This build does not include wide mode.");
-    return self.mode.selectedSegmentIndex==1?
-        text(@"扩大左右视野并适配 HUD；图形负载会增加。",@"Expand the horizontal view and adapt the HUD. Increases GPU load."):
-        text(@"保留原版 16:9 画面，屏幕两侧可能留有黑边。",@"Keep the original 16:9 picture. Side margins may remain.");
+    switch(self.mode.selectedSegmentIndex){
+        case 1:return text(@"放大铺满屏幕，画面边缘被裁掉（不丢存档，只裁显示）。",@"Scale up to fill the screen; picture edges are cropped (display only).");
+        case 2:return text(@"扩大左右视野并适配 HUD；图形负载会增加。",@"Expand the horizontal view and adapt the HUD. Increases GPU load.");
+        default:return text(@"原版 16:9 画面完整保留，屏幕比例不匹配处留黑边。",@"Keep the full original 16:9 picture; bars remain where the screen ratio differs.");}
 }
 - (UITableViewCell *)tableView:(UITableView *)table cellForRowAtIndexPath:(NSIndexPath *)path {
     UITableViewCell *cell=[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
@@ -111,7 +126,7 @@ static NSString *text(NSString *zh, NSString *en) {
 }
 - (void)changed:(id)sender {
     NSUserDefaults *d=NSUserDefaults.standardUserDefaults;
-    [d setBool:self.mode.selectedSegmentIndex==1 forKey:@"LaunchWide"];
+    [d setInteger:self.mode.selectedSegmentIndex forKey:@"LaunchMode"];
     [d setBool:self.hud.on forKey:@"LaunchMetalHUD"];
     [d setBool:self.metalfx.on forKey:@"LaunchMetalFX"];
     [d setBool:self.lan.on forKey:@"LaunchLocalLAN"];
@@ -120,7 +135,7 @@ static NSString *text(NSString *zh, NSString *en) {
 - (void)start:(UIButton *)sender {
     if(!self.ready||self.starting)return;
     self.starting=YES;sender.enabled=NO;[self changed:nil];
-    if(self.onPlay)self.onPlay(self.mode.selectedSegmentIndex==1,self.hud.on,self.metalfx.on,self.lan.on);
+    if(self.onPlay)self.onPlay(self.mode.selectedSegmentIndex,self.hud.on,self.metalfx.on,self.lan.on);
     self.starting=NO;sender.enabled=self.ready;
 }
 - (BOOL)prefersStatusBarHidden {return YES;}
