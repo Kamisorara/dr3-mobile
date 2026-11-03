@@ -203,6 +203,28 @@ Power 脚本 VM 的原生注册表（另一套，1123 项 ×0x30：
    写值来源 = 启动器配置（左上/右上偏移量）
 4. 验收：iPad 触摸模式四角 HUD 上移；插手柄原位；拔手柄再移位
 
+### 7.1 实施进度（2026-11-04，9c332cc）
+
+**第一步已实施**：`hle_hudmove.c`（宿主扫描/校准框架）。
+
+- 运行时查找节点的原语已定位：**main+0x347CF0 = 按相对路径查节点**
+  （实证：0x200D00 处 `0x347cf0(obj, ".LayoutRoot.ItemVisual", &sret)`，结果存 obj+0xA0；
+  ARM64 x8 = 结构体返回地址）。对象从全局单例 `main+0x114A8D0` 的链（→0x93D0 id 解析 →
+  [+0x198] 哈希表，条目 0x360 步长）获得——即触控记录 §5.1 的同一条管理器链。
+- 当前框架走**内存扫描**而非函数调用（调用约定/对象获取还差一环）：
+  `DM_HUDMOVE=1` 开 → 游戏线程每次读手柄时打点（5 秒节流）→ guest 地址空间
+  1 MB 步进探测可读性 → 搜锚串 `ConsoleHUD_main.LayoutRoot.Globes`（血球容器）与
+  `ConsoleHUD_main.LayoutRoot`（布局根）的运行时副本 → 第二遍搜引用该地址的
+  8 字节指针（节点记录持有者）→ `DM_HUDMOVE_DUMP=1` 时 dump 记录周边 0x180 字节
+  （带 float 对注解：x≤1280/y≤720 的相邻对）到 log。
+- presence 管线已接：iOS GameController 插拔回调（physical_present）→
+  `dm_hudmove_set_controller` 原子标志。校准后的移位/还原据此切换。
+- **校准流程**：装机 → env 打开 `DM_HUDMOVE` + `DM_HUDMOVE_DUMP` → 进主城 →
+  log 的 dump 段发回 → 定位置字段偏移 → 下一步实现写值与还原。
+- 静态侧补充发现：SinglePlayerFrame.ui 数据区有 **0x170 字节步长的记录周期**
+  （61 项小值 flags 区）+ `{hash64, 字符串切片 offset+len}` 属性条目流——
+  哈希非 FNV-1a/1 64（完整路径候选已测不中，算法待定）。
+
 ## 八、暂缓项（记录待续）
 
 - **菜单/背包快捷键**：包=+、单=− 已实测定标（30cd774）；进一步减按钮（低频键隐藏）
