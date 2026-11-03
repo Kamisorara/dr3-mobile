@@ -1,0 +1,12 @@
+# Patches must stay LF on every platform: git apply rejects CRLF, and Windows
+# checkouts (core.autocrlf=true) would otherwise rewrite patches on checkout.
+*.patch text eol=lf
+*.yml text eol=lf
+*.sh text eol=lf
+*.py text eol=lf
+*.m text eol=lf
+*.c text eol=lf
+*.h text eol=lf
+*.tsv text eol=lf
+*.json text eol=lf
+*.md text eol=lf
