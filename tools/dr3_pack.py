@@ -144,7 +144,15 @@ def main():
                 run([sys.executable, UPSTREAM / 'dm/verify' / script, WORK / 'rewrite', n,
                      WORK / 'game/ExeFS' / n] + (['--jobs', '4', '--seed', '1', '--mutate', '100'] if 'equiv' in script else []),
                     log=WORK / 'logs' / f'pack-verify-{n}-{Path(script).stem}.log')
-        (WORK / 'verification.json').write_text(json.dumps(dict(passed=True, skipped=False, mode='pack')))
+        # 记录要与 dr3.py 全量验证同构：宽屏画像校验（mobile_graphics_profile）要核对 profile_sha256
+        # 与 rewrite 产物指纹，桩里缺这两个字段它永远过不去。
+        # | The record must match dr3.py's full-verification shape: the graphics-profile check needs
+        # | profile_sha256 and the rewrite artifact fingerprints; without them it can never pass.
+        profile_src = ROOT / 'config' / 'diablo3-2.7.7.json'
+        suffixes = ('patched.bin', 'fixups.tsv', 'gates.tsv', 'sites.tsv', 'cuts.tsv', 'obs.tsv', 'params.tsv')
+        (WORK / 'verification.json').write_text(json.dumps(dict(
+            passed=True, skipped=False, mode='pack', profile_sha256=sha(profile_src),
+            artifacts={f'{n}.{s}': sha(WORK / 'rewrite' / f'{n}.{s}') for n in mods for s in suffixes})))
 
     if not args.skip_verify:
         step('改写等价验证', lambda: (WORK / 'verification.json').exists(), do_verify)
@@ -217,6 +225,13 @@ def main():
     import guest_dylib
     fw, n = guest_dylib.write(str(WORK / 'rewrite'), str(app / 'Frameworks'), mods)
     say('Guest.framework：%d 字节（%s）' % (n, ', '.join(mods)))
+    # 改写元数据表（fixups/gates/sites/cuts/obs/params）：装载器启动时按模块名读 <App>/dm/<名>.tsv；
+    # 壳（CI 无游戏文件）里没有，pack 必须补——d2r-mobile 的壳模式同理（清单里列了这些项）。
+    # | Rewrite metadata tables: the loader reads <App>/dm/<module>.tsv at boot; the shell does not
+    # | carry them (CI has no game files) and the pack must supply them, exactly like d2r-mobile's shell.
+    for path in sorted((WORK / 'rewrite').glob('*.tsv')):
+        shutil.copy2(path, app / 'dm' / path.name)
+    say('改写元数据表：%d 份已入 dm/' % len(list((WORK / 'rewrite').glob('*.tsv'))))
     # 缺的内容：着色器源码库、真实图形表、真实资源清单
     msl_src = WORK / 'build/cache/metal_shader_cache' / ('b-' + chain)
     msl_dst = app / 'msl' / ('b-' + chain); msl_dst.parent.mkdir(parents=True, exist_ok=True)
@@ -234,6 +249,18 @@ def main():
         binary.write_bytes(bindata)
         say('宿主链版本常量已改写：%s → %s' % (shell_chain, chain))
     shutil.copyfile(WORK / 'shaders/pack-c1_full.tsv', app / 'dm/c1_full.tsv')
+    # 着色器映射表：运行时按 Switch 控制段哈希查 PC 着色器（DM_NVN_SHMAP 指向 <App>/dm/shader_map.tsv，
+    # c1_full.tsv 也在同目录一起读）。壳里是占位表（0 条映射），shader_packages 阶段已把真实表写进游戏
+    # 档案，这里必须覆盖——不覆盖第一个绘制调用就 FATAL Missing original shader。
+    # | Shader map: runtime looks PC shaders up by Switch control-section hash (DM_NVN_SHMAP points at
+    # | <App>/dm/shader_map.tsv; c1_full.tsv is read from the same directory). The shell carries the
+    # | placeholder with zero rows; shader_packages has already written the real table into the game
+    # | profile and it must replace the placeholder, or the first draw dies on Missing original shader.
+    real_map = UPSTREAM / 'dm/games' / TITLE / 'shader_map.tsv'
+    map_rows = [l for l in real_map.read_text(encoding='utf-8').splitlines() if l and not l.startswith('#')]
+    if len(map_rows) < 100: die('真实着色器映射表不对劲：%s 只有 %d 行映射（还是占位表？）' % (real_map, len(map_rows)))
+    shutil.copyfile(real_map, app / 'dm/shader_map.tsv')
+    say('着色器映射表：%d 条映射入 dm/（覆盖壳占位表）' % len(map_rows))
     (app / 'dm/mobile-graphics.json').write_text(json.dumps(graphics, indent=1) + '\n')
     assets = {}
     for kind, directory in [('romfs', romfs), ('aoc', game / 'aoc')]:
