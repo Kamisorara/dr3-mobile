@@ -32,12 +32,48 @@ static BOOL wide_available(void) {
 
 #include "../../../native/asset_inventory.h"
 
-static NSString *romfs_locate(void) {
-    NSFileManager *fm = NSFileManager.defaultManager;
-    NSString *doc = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES)[0];
-    for (NSString *d in @[[doc stringByAppendingPathComponent:@"romfs"], [NSBundle.mainBundle.resourcePath stringByAppendingPathComponent:@"romfs"]])
-        if ([fm fileExistsAtPath:[d stringByAppendingPathComponent:@DM_GAME_ROMFS_MARKER]]) return d;   // only a directory containing the game profile's romfs_marker path counts (Mario: System/Resource, the resource size table)
+// 资源根定位（含容错，逐个试）：
+//   Documents/<sub>             标准位置（资源文件夹整个拷进来）
+//   Documents                   资源的内容直接放进 Documents（没有 <sub> 这一层）
+//   bundle/<sub>                包内（--embed-assets 构建才有）
+//   Documents/<sub>/<一级子目录>   把整个解包目录拖了进来（如 Documents/解包资源/RomFS/…）：唯一的匹配者自动下钻；
+//                               多个匹配者不算数（不猜），由调用方的诊断把目录内容亮出来让用户自己挪。
+// marker = 这类资源目录必须含的文件（RomFS：CPKs/CoreCommon.cpk；中文 DLC：11/ztCN_CoreCommon.cpk）。
+static NSString *resource_locate(NSFileManager *fm, NSString *doc, NSString *res, NSString *sub, NSString *marker, BOOL *buried) {
+    *buried = NO;
+    for (NSString *base in @[[doc stringByAppendingPathComponent:sub], doc, [res stringByAppendingPathComponent:sub]])
+        if ([fm fileExistsAtPath:[base stringByAppendingPathComponent:marker]]) return base;
+    NSString *primary = [doc stringByAppendingPathComponent:sub];
+    NSMutableArray *found = [NSMutableArray array];
+    for (NSString *entry in [fm contentsOfDirectoryAtPath:primary error:nil]) {
+        if (asset_junk(entry)) continue;   // Finder / Windows 的杂物不算层级
+        NSString *candidate = [primary stringByAppendingPathComponent:entry];
+        if ([fm fileExistsAtPath:[candidate stringByAppendingPathComponent:marker]]) [found addObject:candidate];
+    }
+    if (found.count == 1) { *buried = YES; return found[0]; }
     return nil;
+}
+
+static void dump_dir(NSFileManager *fm, NSString *dir, const char *label) {
+    if (![fm fileExistsAtPath:dir]) { fprintf(stderr, "boot: %s 不存在 | %s does not exist\n", label, label); return; }
+    NSArray *entries = asset_top_entries(fm, dir, 8);
+    fprintf(stderr, "boot: %s 顶层（%lu 项）| %s top level (%lu entries):", label, (unsigned long)entries.count, label, (unsigned long)entries.count);
+    for (NSString *e in entries) fprintf(stderr, " %s", e.UTF8String);
+    fprintf(stderr, "\n");
+}
+
+static NSString *romfs_locate(NSFileManager *fm, NSString *doc) {
+    BOOL buried = NO;
+    NSString *romfs = resource_locate(fm, doc, NSBundle.mainBundle.resourcePath, @"romfs", @DM_GAME_ROMFS_MARKER, &buried);
+    if (!romfs) {   // 都没中：把 Documents 与 Documents/romfs 的顶层亮出来，用户对照着挪
+        fprintf(stderr, "boot: 没找到游戏文件——需要能沿着 %s 找到（以下任一位置）| the game files were not found; %s must resolve in one of:\n", DM_GAME_ROMFS_MARKER, DM_GAME_ROMFS_MARKER);
+        fprintf(stderr, "boot:   Documents/romfs/… · Documents/…（资源内容直接放 Documents）· Documents/romfs/<某目录>/…（整个解包目录拖进来）\n");
+        dump_dir(fm, doc, "Documents");
+        dump_dir(fm, [doc stringByAppendingPathComponent:@"romfs"], "Documents/romfs");
+        return nil;
+    }
+    if (buried) fprintf(stderr, "boot: 游戏文件在 Documents/romfs 的一级子目录里（已自动定位）| game files sit one level inside Documents/romfs (located automatically)\n");
+    return romfs;
 }
 
 // Boot prerequisites (done before UIApplicationMain): directories / environment variables / log -- the host's early load reads these
@@ -60,12 +96,18 @@ static int boot_env(void) {
             if (!getenv(k.UTF8String)) { setenv(k.UTF8String, v.UTF8String, 0); fprintf(stderr, "boot: 环境 %s=%s（%s）\n", k.UTF8String, v.UTF8String, ef.lastPathComponent.UTF8String); }
         }
     }
-    NSString *romfs = romfs_locate();
-    if (!romfs) { fprintf(stderr, "boot: 没找到游戏文件（<App>/romfs 或 Documents/romfs）\n"); return 0; }
-    NSString *aoc = nil;
-    for (NSString *candidate in @[[doc stringByAppendingPathComponent:@"aoc"],[res stringByAppendingPathComponent:@"aoc"]]) {
-        if ([fm fileExistsAtPath:[candidate stringByAppendingPathComponent:@"11/ztCN_CoreCommon.cpk"]]) { aoc=candidate; break; }
+    NSString *romfs = romfs_locate(fm, doc);
+    if (!romfs) return 0;
+    BOOL aocBuried = NO;
+    NSString *aoc = resource_locate(fm, doc, res, @"aoc", @"11/ztCN_CoreCommon.cpk", &aocBuried);
+    if (!aoc) {   // 中文 DLC 没定位到：同样把候选位置亮出来（缺失只影响中文语音/文本，但校验不过不启动）
+        fprintf(stderr, "boot: 没找到中文 DLC——需要 11/ztCN_CoreCommon.cpk 能在以下位置之一解析 | the Chinese DLC was not found; 11/ztCN_CoreCommon.cpk must resolve in one of:\n");
+        fprintf(stderr, "boot:   Documents/aoc/… · Documents/…（内容直接放）· Documents/aoc/<某目录>/…（整个 DLC 目录拖进来）\n");
+        dump_dir(fm, doc, "Documents");
+        dump_dir(fm, [doc stringByAppendingPathComponent:@"aoc"], "Documents/aoc");
+        return 0;
     }
+    if (aocBuried) fprintf(stderr, "boot: 中文 DLC 在 Documents/aoc 的一级子目录里（已自动定位）| the Chinese DLC sits one level inside Documents/aoc (located automatically)\n");
     NSData *manifestData = [NSData dataWithContentsOfFile:[res stringByAppendingPathComponent:@"dm/private-assets.json"]];
     NSDictionary *inventory = manifestData ? [NSJSONSerialization JSONObjectWithData:manifestData options:0 error:nil] : nil;
     if (![inventory isKindOfClass:NSDictionary.class] || !assets_ready(romfs,inventory[@"romfs"],@"RomFS") || !assets_ready(aoc,inventory[@"aoc"],@"Chinese DLC")) return 0;
