@@ -118,8 +118,18 @@ def bootstrap(_):
 
             def api(path):
                 req = urllib.request.Request('https://api.github.com' + path, headers={'Authorization': f'Bearer {token}', 'User-Agent': 'dr3-bootstrap'})
-                with urllib.request.urlopen(req, timeout=120) as resp:
-                    return json.loads(resp.read())
+                import time as _time
+                for attempt in range(4):   # GitHub API 偶发 5xx/断流：退避重试，别让一次抖动毁掉整次构建 | GitHub API throws sporadic 5xx: back off and retry so one hiccup does not kill the build
+                    try:
+                        with urllib.request.urlopen(req, timeout=120) as resp:
+                            return json.loads(resp.read())
+                    except urllib.error.HTTPError as err:
+                        if err.code < 500 and err.code != 429 or attempt == 3: raise
+                        _time.sleep(2 ** attempt * 2)
+                    except (urllib.error.URLError, TimeoutError, ConnectionError) as err:
+                        if attempt == 3: raise
+                        _time.sleep(2 ** attempt * 2)
+                raise RuntimeError('unreachable')
 
             tree = api(f'/repos/seedds/nxnative/git/trees/{COMMIT}?recursive=1')
             if tree.get('truncated'):
