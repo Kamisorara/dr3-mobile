@@ -2,38 +2,18 @@
 // The game files (RomFS) ship inside the App at <App>/romfs; Documents/romfs placed through the Files app is also accepted (lets you swap them without reinstalling).
 #import <UIKit/UIKit.h>
 #import "LauncherViewController.h"
-#include <dlfcn.h>
-#include <mach-o/dyld.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
-#include <string.h>
 #include <unistd.h>
 #include "game_profile.h"   // game profile constants (the RomFS marker path)
 
 int dm_main(int argc, char **argv);   // dm/host/main.c compiled in with -Dmain=dm_main
 void dm_host_preload_start(int argc, char **argv);
-void dm_set_game_image_header(const void *mh);   // dm/host/loader.c: read the module sections from this image instead of the executable
 UIViewController *front_ios_root(void);
 void front_ios_focus_event(int ev);
 void front_ios_configure_display(int wide, int metalfx);
 int dr3_lan_supported(void) __attribute__((weak_import));
-
-// Shell build (tools/shell_build.py, compiled with -DDM_SHELL): the rewritten module images are not in this executable; they live in
-// Frameworks/Guest.framework/Guest -- a segments-only dynamic library that tools/dr3_pack.py writes from the user's own game files
-// (tools/guest_dylib.py, section layout identical to the embedded approach). Load it and hand its image header to the loader.
-// Without it the shell cannot boot; the message tells the user what the package is missing.
-static void guest_image_load(void) {
-#ifdef DM_SHELL
-    NSString *p = [NSBundle.mainBundle.resourcePath stringByAppendingPathComponent:@"Frameworks/Guest.framework/Guest"];
-    if (!dlopen(p.fileSystemRepresentation, RTLD_NOW)) { fprintf(stderr, "boot: 这个安装包里还没有游戏程序（%s）：先用 tools/dr3_pack.py 把你自己的游戏文件做进安装包再装（docs/SHELL_BUILD.zh-CN.md）。系统的说法：%s\n", p.UTF8String, dlerror()); exit(3); }
-    const struct mach_header_64 *mh = NULL;
-    for (uint32_t i = 0; i < _dyld_image_count(); i++) if (strstr(_dyld_get_image_name(i), "/Guest.framework/Guest")) mh = (const struct mach_header_64 *)_dyld_get_image_header(i);
-    if (!mh) { fprintf(stderr, "boot: Guest 已加载但找不到它的映像头\n"); exit(3); }
-    dm_set_game_image_header(mh);
-    fprintf(stderr, "boot: 模块映像取自 Guest 动态库 %s\n", p.UTF8String);
-#endif
-}
 
 static char *g_argv[4]; static int g_argc;
 static int g_launch_selected;
@@ -108,7 +88,6 @@ static int g_boot_ok;
 static void *boot_thread(void *p) {
     (void)p;
     static char alt[65536]; stack_t ss = {.ss_sp = alt, .ss_size = sizeof alt}; sigaltstack(&ss, 0);   // crash printing must work on the host thread too
-    guest_image_load();
     int rc = dm_main(g_argc, g_argv);
     fprintf(stderr, "boot: dm_main 返回 %d\n", rc);
     return NULL;

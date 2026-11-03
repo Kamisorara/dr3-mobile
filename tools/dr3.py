@@ -78,23 +78,99 @@ def copy_native():
     for name in native_fingerprints():shutil.copyfile(ROOT/'native'/name,UPSTREAM/'dm/host'/name)
 
 
+def upstream_head():
+    return subprocess.run(['git', '-C', str(UPSTREAM), 'rev-parse', 'HEAD'], capture_output=True, text=True).stdout.strip()
+
+
 def bootstrap(_):
     if not UPSTREAM.exists():
-        run(['git', 'clone', 'https://github.com/seedds/nxnative.git', UPSTREAM], WORK / 'logs/clone.log')
-        run(['git', 'checkout', COMMIT], WORK / 'logs/checkout.log', cwd=UPSTREAM)
-    actual = subprocess.check_output(['git', '-C', str(UPSTREAM), 'rev-parse', 'HEAD'], text=True).strip()
+        cloned = False
+        if shutil.which('git'):
+            try:
+                run(['git', 'clone', 'https://github.com/seedds/nxnative.git', UPSTREAM], WORK / 'logs/clone.log')
+                run(['git', 'checkout', COMMIT], WORK / 'logs/checkout.log', cwd=UPSTREAM)
+                cloned = upstream_head() == COMMIT
+            except Exception:
+                cloned = False
+        if not cloned:
+            # 上游把 9579030e force-push 丢了（孤儿提交）：clone / fetch 拿不到，tarball 端点会静默回退成默认分支的内容（实测）。
+            # git trees API 却按 SHA 返回这棵树的真 blob 清单；其中大多数文件与默认分支一致（内容哈希相同），
+            # 所以：浅克隆默认分支当底 → trees API 逐路径比对 blob SHA → 只有对不上的少数文件走 contents API（ref=孤儿 SHA，实测能拿到真对象）取回。
+            # Upstream force-pushed 9579030e away (an orphan commit): clone/fetch cannot get it, and the tarball endpoint silently serves
+            # the default branch instead (measured). The git trees API still lists the orphan tree's true blob SHAs; most files hash the
+            # same as the default branch, so: shallow-clone the default branch as the base, compare per-path blob SHAs against the trees
+            # API, and fetch only the differing files through the contents API (ref=<orphan SHA>), which serves the real objects.
+            import base64
+            import json
+            import stat
+            import urllib.request
+
+            def _force_remove(func, path, _exc):
+                try: os.chmod(path, stat.S_IWRITE)
+                except OSError: pass
+                func(path)
+            shutil.rmtree(UPSTREAM, ignore_errors=False, onerror=_force_remove)
+            UPSTREAM.parent.mkdir(parents=True, exist_ok=True)
+            run(['git', 'clone', '--depth', '1', 'https://github.com/seedds/nxnative.git', UPSTREAM], WORK / 'logs/clone-default.log')
+            token = os.environ.get('GITHUB_TOKEN') or subprocess.run(['gh', 'auth', 'token'], capture_output=True, text=True).stdout.strip()
+            if not token:
+                raise ValueError('需要 GITHUB_TOKEN 或 gh 登录：上游孤儿提交只能经 GitHub API 重建')
+
+            def api(path):
+                req = urllib.request.Request('https://api.github.com' + path, headers={'Authorization': f'Bearer {token}', 'User-Agent': 'dr3-bootstrap'})
+                with urllib.request.urlopen(req, timeout=120) as resp:
+                    return json.loads(resp.read())
+
+            tree = api(f'/repos/seedds/nxnative/git/trees/{COMMIT}?recursive=1')
+            if tree.get('truncated'):
+                raise ValueError('上游树过大，trees API 截断了；换别的办法重建')
+            local = {}
+            for line in subprocess.check_output(['git', '-C', str(UPSTREAM), 'ls-tree', '-r', 'HEAD'], text=True).splitlines():
+                meta, path = line.split('\t', 1)
+                mode, kind, sha_ = meta.split()
+                local[path] = (mode, kind, sha_)
+            fetched = 0
+            for entry in tree['tree']:
+                path = UPSTREAM / entry['path']
+                if entry['type'] != 'blob':
+                    continue   # 子模块（commit）与本仓库无关；目录自动存在
+                want = entry['sha']
+                have = local.get(entry['path'])
+                if have and have[2] == want:
+                    continue   # 与默认分支逐字节相同：保留浅克隆的文件
+                if have is None:
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                elif path.exists() and not have[1] == 'blob':
+                    die(f'上游孤儿树里 {entry["path"]} 的类型变了，不再自动处理')
+                blob = api(f'/repos/seedds/nxnative/git/blobs/{want}')
+                data = base64.b64decode(blob['content'])
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(data)
+                fetched += 1
+            orphan_paths = {e['path'] for e in tree['tree'] if e['type'] == 'blob'}
+            for path_str in local.keys() - orphan_paths:
+                (UPSTREAM / path_str).unlink(missing_ok=True)   # 孤儿树里已删除的文件
+            print(f'上游孤儿提交重建：{len(tree["tree"])} 项，从 API 取回 {fetched} 个文件', flush=True)
+            run(['git', 'init', '-q'], WORK / 'logs/upstream-init.log', cwd=UPSTREAM)
+            run(['git', 'add', '-A'], WORK / 'logs/upstream-add.log', cwd=UPSTREAM)
+            run(['git', '-c', 'user.name=dr3-bootstrap', '-c', 'user.email=bootstrap@local',
+                 'commit', '-qm', f'nxnative pinned snapshot {COMMIT[:12]}'], WORK / 'logs/upstream-commit.log', cwd=UPSTREAM)
+            (UPSTREAM / '.dm-pinned').write_text(COMMIT + '\n')
+            run(['git', 'init', '-q'], WORK / 'logs/upstream-init.log', cwd=UPSTREAM)
+            run(['git', 'add', '-A'], WORK / 'logs/upstream-add.log', cwd=UPSTREAM)
+            run(['git', '-c', 'user.name=dr3-bootstrap', '-c', 'user.email=bootstrap@local',
+                 'commit', '-qm', f'nxnative pinned snapshot {COMMIT[:12]}'], WORK / 'logs/upstream-commit.log', cwd=UPSTREAM)
+            (UPSTREAM / '.dm-pinned').write_text(COMMIT + '\n')
+    actual = upstream_head()
     if actual != COMMIT:
-        raise ValueError('Upstream commit mismatch; use the pinned clean checkout')
+        pinned = (UPSTREAM / '.dm-pinned')
+        if not (pinned.exists() and pinned.read_text().strip() == COMMIT and actual):
+            raise ValueError(f'Upstream commit mismatch (HEAD={actual or "none"}); use the pinned clean checkout')
     patch = ROOT / 'patches/nxnative.patch'
     applied = subprocess.run(['git', 'apply', '--reverse', '--check', str(patch)], cwd=UPSTREAM, capture_output=True).returncode == 0
     if not applied:
         run(['git', 'apply', '--check', patch], WORK / 'logs/patch-check.log', cwd=UPSTREAM)
         run(['git', 'apply', patch], WORK / 'logs/patch.log', cwd=UPSTREAM)
-    shell_patch = ROOT / 'patches/shell.patch'
-    shell_done = subprocess.run(['git', 'apply', '--reverse', '--check', str(shell_patch)], cwd=UPSTREAM, capture_output=True).returncode == 0
-    if not shell_done:
-        run(['git', 'apply', '--check', shell_patch], WORK / 'logs/shell-patch-check.log', cwd=UPSTREAM)
-        run(['git', 'apply', shell_patch], WORK / 'logs/shell-patch.log', cwd=UPSTREAM)
     copy_native()
     game = UPSTREAM / 'dm/games' / TITLE
     game.mkdir(exist_ok=True)

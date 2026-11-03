@@ -10,7 +10,7 @@
 # 需要：Python 3.12+ 与 requirements.txt 里的包（pillow numpy lz4 capstone unicorn fonttools）；.NET SDK（着色器翻译工具）；
 #   spirv-cross；先跑过 tools/dr3.py bootstrap。缺什么开头逐项报。
 # 着色器：本工具按「没有苹果编译器」的模式跑出库链（gfx/tools/nometal_run.py），「库文件」里放的是 MSL 源码；
-#   壳（DM_SHELL 构建，patches/shell.patch）在设备上第一次用到每个着色器时现编，系统缓存后不再耗时。
+#   壳（DM_SHELL 构建，该分支随 patches/nxnative.patch 自带）在设备上第一次用到每个着色器时现编，系统缓存后不再耗时。
 # 先跑本工具前壳与仓库要同源：壳里 shell_info.txt 的 CHAIN/PATCH 与本地 dmsh_chain 链版本、补丁指纹对不上会当场拒绝。
 import argparse, json, os, re, shutil, subprocess, sys, time, zipfile
 from pathlib import Path

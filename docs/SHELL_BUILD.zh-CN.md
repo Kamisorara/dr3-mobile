@@ -17,7 +17,7 @@ result with a sideloading tool. Shaders are compiled on device at first launch a
    （`platform/ios/Sources/main.m` 的 `DM_SHELL` 分支负责加载并交出映像头）。
 2. **着色器**：壳里没有着色器库。`dr3_pack.py` 按「没有苹果编译器」模式跑出库链
    (`tools/nometal_run.py`)，「库文件」里放的是翻译出的 MSL 源码；壳的图形层
-   （`patches/shell.patch` 的 `DM_SHELL` 分支）发现库不是编好的（无 MTLB 头）就在设备上现编，
+   （`patches/nxnative.patch` 自带的 `DM_SHELL` 分支）发现库不是编好的（无 MTLB 头）就在设备上现编，
    系统缓存后第二次启动起不再编。实测同类机制（d2r-mobile）：冷启动平均约 80 ms 一个着色器。
 3. **图形表与资源清单**：`c1_full.tsv`（着色器构建产物）、`mobile-graphics.json`（画像证明）、
    `private-assets.json`（你的 RomFS/DLC 清单，App 启动时按它核对文件齐不齐）。

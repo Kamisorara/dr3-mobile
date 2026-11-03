@@ -46,10 +46,11 @@ def precheck():
     actual = subprocess.check_output(['git', '-C', str(UPSTREAM), 'rev-parse', 'HEAD'], text=True).strip()
     if actual != COMMIT:
         die('upstream commit mismatch; run: python3 tools/dr3.py bootstrap')
-    for patch in ('patches/nxnative.patch', 'patches/shell.patch'):
-        if subprocess.run(['git', '-C', str(UPSTREAM), 'apply', '--reverse', '--check', str(ROOT / patch)],
-                          capture_output=True).returncode != 0:
-            die(f'{patch} not applied to third_party/nxnative; run: python3 tools/dr3.py bootstrap')
+    # The DM_SHELL branches (Guest-framework loader + on-device shader compile) ship inside
+    # patches/nxnative.patch itself; make sure the pinned patch is really applied.
+    if subprocess.run(['git', '-C', str(UPSTREAM), 'apply', '--reverse', '--check', str(ROOT / 'patches/nxnative.patch')],
+                      capture_output=True).returncode != 0:
+        die('patches/nxnative.patch not applied to third_party/nxnative; run: python3 tools/dr3.py bootstrap')
     for tool in ('xcodegen', 'xcodebuild', 'otool'):
         if not shutil.which(tool):
             die(f'{tool} not on PATH')
@@ -89,7 +90,7 @@ def main():
     config = subprocess.check_output([sys.executable, str(UPSTREAM / 'dm/ios/tools/gen_build.py'),
                                       str(UPSTREAM / 'dm/host'), str(gen)], env=settings, text=True)
     # The shell embeds no module images: no -segprot link flags for them, and the graphics layer's
-    # DM_SHELL branch (patches/shell.patch) is compiled in so shader sources are compiled on device.
+    # DM_SHELL branch (ships in patches/nxnative.patch) is compiled in so shader sources are compiled on device.
     config = re.sub(r'^(OTHER_CFLAGS = .*)$', r'\1 -DDM_SHELL', config, flags=re.M)
     assert '-DDM_SHELL' in config, 'DM_SHELL flag not injected'
     (gen / 'dm.xcconfig').write_text(config + '\nOTHER_LDFLAGS = $(inherited) $(DM_FRAMEWORKS)\n')
