@@ -80,3 +80,4 @@ third_party/nxnative/
 *.ttf
 *.heic
 *.mov
+_scratch/

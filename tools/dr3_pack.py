@@ -200,6 +200,13 @@ def main():
     # | placeholder and the app starts at plain 16:9.
     graphics = dict(mode='d3-mobile-graphics', startup_selection=False,
                     limitations=['Shell pack without rewrite verification: no graphics proof; normal 16:9 only.'])
+    # 适配模式可用性：改写器带 D3 参数槽（main.params.tsv 有数据行）→ 宿主按屏幕比例给渲染分辨率。
+    # | Aspect mode availability: the rewrite carries the D3 parameter slots (main.params.tsv has data
+    # | rows) so the host can feed the render resolution from the screen ratio.
+    params_rows = [l for l in (WORK / 'rewrite/main.params.tsv').read_text(encoding='utf-8').splitlines()
+                   if l and not l.startswith('#')] if (WORK / 'rewrite/main.params.tsv').exists() else []
+    graphics['runtime_aspect'] = bool(params_rows)
+    if params_rows: say('D3 参数槽：%d 位（适配模式可用）' % len(params_rows))
     if not args.skip_verify:
         proof_dir = WORK / 'ios-profiles/pack'
         def graphics_done(): return (proof_dir / 'graphics.json').exists()

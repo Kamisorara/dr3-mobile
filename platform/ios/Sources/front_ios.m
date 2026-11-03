@@ -17,8 +17,14 @@ void front_ios_boot(void);
 int front_ios_boot_ok(void);
 
 static CAMetalLayer *g_layer;
-static int g_wide,g_metalfx,g_fill;
+static int g_wide,g_metalfx,g_fill,g_aspect;
+static CGFloat g_screen_aspect;
 void front_ios_configure_display(int wide,int metalfx,int fill) { g_wide=!!wide;g_metalfx=!!metalfx;g_fill=!!fill; }
+void front_ios_configure_aspect(int on) {   // 适配模式：渲染分辨率按屏幕比例（参数槽），画面天然铺满
+    g_aspect=!!on;
+    CGSize nb=UIScreen.mainScreen.nativeBounds.size;
+    g_screen_aspect=fmax(nb.width,nb.height)/fmin(nb.width,nb.height);
+}
 
 @interface DmGameView : UIView
 @end
@@ -74,9 +80,10 @@ void front_ios_configure_display(int wide,int metalfx,int fill) { g_wide=!!wide;
     [super viewDidLayoutSubviews];
     CGRect b = self.view.bounds; if (!self.game) return;
     CGFloat w = b.size.width, h = b.size.height;
-    CGFloat aspect=g_wide?1568.0/720.0:16.0/9.0;
+    CGFloat aspect=g_aspect?g_screen_aspect:g_wide?1568.0/720.0:16.0/9.0;
     // Fill the matching Air panel; preserve geometry on differently shaped iPads.
-    if(!g_wide || fabs(w/h/aspect-1.0)>=0.01) {
+    // 适配模式的比例 = 屏幕比例 → fit 计算天然铺满整屏（零黑边零裁切）。
+    if(!g_aspect && (!g_wide || fabs(w/h/aspect-1.0)>=0.01)) {
         if(w/h>aspect)w=h*aspect;else h=w/aspect;
     }
     // 填充模式：16:9 画面放大到铺满（cover），超出屏幕的边缘被裁掉——iPad（约 1.44:1）裁左右各约一成，
@@ -96,7 +103,17 @@ void front_ios_configure_display(int wide,int metalfx,int fill) { g_wide=!!wide;
 UIViewController *front_ios_root(void) { return [DmRootVC new]; }
 
 void *front_metal_layer(void) { return (__bridge void *)g_layer; }
-uint64_t front_game_res(int docked) { return g_wide?(720ull<<32|1568):docked?(900ull<<32|1600):(720ull<<32|1280); }
+// 适配模式：KRES 参数槽给「高 720、宽按屏幕比例」——游戏按原生比例渲染，UI 投影随尺寸走，
+// 画面天然铺满（同 D2R 的参数槽先例：帧比例=屏幕比例，drawable 同比例无变形）。
+// | Aspect mode: the KRES slots get height 720 and the width from the screen ratio — the game
+// | renders at the native ratio and the picture fills the screen (same precedent as D2R).
+uint64_t front_game_res(int docked) {
+    if (g_aspect) {
+        unsigned w = (unsigned)(720.0 * g_screen_aspect + 0.5);
+        return 720ull << 32 | w;
+    }
+    return g_wide?(720ull<<32|1568):docked?(900ull<<32|1600):(720ull<<32|1280);
+}
 void front_run(void (*guest)(void)) { guest(); }   // Already on main.m's big-stack thread
 
 // Software keyboard: show a UIAlertController on the main thread, the calling thread waits for the result

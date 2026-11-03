@@ -13,6 +13,7 @@ void dm_host_preload_start(int argc, char **argv);
 UIViewController *front_ios_root(void);
 void front_ios_focus_event(int ev);
 void front_ios_configure_display(int wide, int metalfx, int fill);
+void front_ios_configure_aspect(int on);
 int dr3_lan_supported(void) __attribute__((weak_import));
 
 static char *g_argv[4]; static int g_argc;
@@ -24,10 +25,12 @@ static NSDictionary *graphics_profile(void) {
     id value=data?[NSJSONSerialization JSONObjectWithData:data options:0 error:nil]:nil;
     return [value isKindOfClass:NSDictionary.class]?value:@{};
 }
-static BOOL wide_available(void) {
-    NSDictionary *profile=graphics_profile(),*p=profile[@"parameters"];
-    return [profile[@"startup_selection"] boolValue] && [profile[@"mode"] isEqual:@"d3-mobile-graphics"] &&
-           [p[@"width"] intValue]==1568 && [p[@"height"] intValue]==720;
+// 适配模式可用性：pack 产物带 D3 参数槽（main.params.tsv 有数据行）→ 宿主能按屏幕比例给渲染分辨率。
+// | Aspect mode availability: the pack carries the D3 parameter slots (main.params.tsv has data rows),
+// | so the host can feed the render resolution from the screen ratio.
+static BOOL aspect_available(void) {
+    NSDictionary *profile=graphics_profile();
+    return [profile[@"runtime_aspect"] boolValue];
 }
 
 #include "../../../native/asset_inventory.h"
@@ -164,16 +167,17 @@ int front_ios_boot_ok(void) { return g_boot_ok; }
 @implementation SceneDelegate
 - (void)startMode:(NSInteger)mode hud:(BOOL)hud metalfx:(BOOL)metalfx lan:(BOOL)lan {
     if(g_launch_selected || !g_boot_ok)return;
-    BOOL wide = mode==2;
-    if(wide&&!wide_available())return;
+    BOOL aspect = mode==2;
+    if(aspect&&!aspect_available())return;
     BOOL fill = mode==1;
     if(hud)setenv("MTL_HUD_ENABLED","1",1);else unsetenv("MTL_HUD_ENABLED");   // 存在即激活，0 不算关 | presence activates it; 0 is not off
     setenv("DM_METALFX",metalfx?"spatial":"off",1);
-    setenv("DM_IOS_GRAPHICS_MODE",wide?"wide":"normal",1);
-    setenv("DM_GAME_RES",wide?"1568x720":"1280x720",1);
+    setenv("DM_IOS_GRAPHICS_MODE","normal",1);   // 适配不换映像：参数槽在宿主，映像同一张 | aspect keeps the same image: the slots live in the host
+    setenv("DM_GAME_RES","1280x720",1);
     setenv("DM_DR3_LAN",lan?"1":"0",1);
-    fprintf(stderr,"boot: launch mode=%s render=%s HUD=%d MetalFX=%s LAN=%d\n",wide?"wide":fill?"fill":"normal",getenv("DM_GAME_RES"),hud,metalfx?"spatial":"off",lan);
-    front_ios_configure_display(wide,metalfx,fill);
+    fprintf(stderr,"boot: launch mode=%s HUD=%d MetalFX=%s LAN=%d\n",aspect?"aspect":fill?"fill":"normal",hud,metalfx?"spatial":"off",lan);
+    front_ios_configure_display(0,metalfx,fill);
+    front_ios_configure_aspect(aspect);
     dm_host_preload_start(g_argc,g_argv);
     g_launch_selected=1;
     self.window.rootViewController=front_ios_root();
@@ -182,7 +186,7 @@ int front_ios_boot_ok(void) { return g_boot_ok; }
 - (void)scene:(UIScene *)scene willConnectToSession:(UISceneSession *)session options:(UISceneConnectionOptions *)o {
     self.window = [[UIWindow alloc] initWithWindowScene:(UIWindowScene *)scene];
     BOOL lan=dr3_lan_supported&&dr3_lan_supported();
-    LauncherViewController *launcher=[[LauncherViewController alloc] initWithWideAvailable:wide_available() lanAvailable:lan ready:g_boot_ok reason:@"游戏和中文资源未准备完整，请完成传输后重新打开。"];
+    LauncherViewController *launcher=[[LauncherViewController alloc] initWithWideAvailable:aspect_available() lanAvailable:lan ready:g_boot_ok reason:@"游戏和中文资源未准备完整，请完成传输后重新打开。"];
     __weak SceneDelegate *weakSelf=self;
     launcher.onPlay=^(NSInteger mode,BOOL hud,BOOL metalfx,BOOL lan){[weakSelf startMode:mode hud:hud metalfx:metalfx lan:lan];};
     self.window.rootViewController=launcher;

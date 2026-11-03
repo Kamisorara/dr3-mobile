@@ -307,223 +307,6 @@ index d4c3531..de5f4f5 100644
 +    if (!(CTX(t)->d.flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET)))
 +        mtl_tex_cpu_written(CTX(t));
 +}
-diff --git a/dm/gfx/nvn/nvn_command_copy.h b/dm/gfx/nvn/nvn_command_copy.h
-new file mode 100644
-index 0000000..06df5cf
---- /dev/null
-+++ b/dm/gfx/nvn/nvn_command_copy.h
-@@ -0,0 +1,55 @@
-+// Bounded command-copy planner. Control-flow records are flattened before the
-+// destination allocator runs, so source memory can alias a destination grant.
-+#pragma once
-+#include <stdlib.h>
-+#include <stdint.h>
-+#include <string.h>
-+
-+typedef struct { uint8_t *bytes; size_t size, capacity; uint32_t records; } nvn_copy_plan;
-+typedef int (*nvn_copy_range_fn)(const void *, size_t);
-+typedef int (*nvn_copy_handle_fn)(uint64_t);
-+static inline int nvn_copy_append(nvn_copy_plan *plan, const void *bytes, uint32_t size) {
-+    const size_t limit = 64u << 20;
-+    if (size > limit - plan->size || plan->records >= 1000000) return 0;
-+    if (plan->size + size > plan->capacity) {
-+        size_t cap = plan->capacity ? plan->capacity : 1024;
-+        while (cap < plan->size + size) cap *= 2;
-+        void *p = realloc(plan->bytes, cap); if (!p) return 0;
-+        plan->bytes = p; plan->capacity = cap;
-+    }
-+    memcpy(plan->bytes + plan->size, bytes, size); plan->size += size; plan->records++; return 1;
-+}
-+static inline int nvn_copy_collect(nvn_copy_plan *plan, uint64_t handle,
-+                                   nvn_copy_range_fn range, nvn_copy_handle_fn known,
-+                                   uint64_t active[16], unsigned depth) {
-+    if (depth >= 16 || !known(handle)) return 0;
-+    for (unsigned i = 0; i < depth; i++) if (active[i] == handle) return 0;
-+    active[depth] = handle;
-+    const uint8_t *p = (const uint8_t *)(uintptr_t)handle;
-+    if (!range(p, 8)) return 0;
-+    op_hdr first; memcpy(&first, p, 8);
-+    if (first.op != OP_BEGIN || first.size != 8) return 0;
-+    for (unsigned guard = 0; guard < 1000000; guard++) {
-+        if (((uintptr_t)p & 7) || !range(p, 8)) return 0;
-+        op_hdr h; memcpy(&h, p, 8);
-+        if (h.op >= OP_COUNT_ || h.size < 8 || (h.size & 7) || !range(p, h.size)) return 0;
-+        if (h.op == OP_BEGIN) { if (h.size != 8) return 0; }
-+        else if (h.op == OP_END) return h.size == 8;
-+        else if (h.op == OP_JUMP || h.op == OP_CALL) {
-+            if (h.size != 16) return 0;
-+            uint64_t target; memcpy(&target, p + 8, 8);
-+            if (h.op == OP_JUMP) { p = (const uint8_t *)(uintptr_t)target; continue; }
-+            if (!nvn_copy_collect(plan, target, range, known, active, depth + 1)) return 0;
-+        } else {
-+            if (h.op == OP_BIND_PROGRAM && h.size < 8 + sizeof(p_bind_program)) return 0;
-+            if (h.op == OP_UPDATE_UB) {
-+                uint64_t n; if (h.size < 24) return 0; memcpy(&n, p + 16, 8);
-+                if (n > h.size - 24) return 0;
-+            }
-+            if (h.op == OP_WAIT_SYNC && h.size != 16) return 0;
-+            if (!nvn_copy_append(plan, p, h.size)) return 0;
-+        }
-+        p += h.size;
-+    }
-+    return 0;
-+}
-diff --git a/dm/gfx/nvn/nvn_metalfx_spatial.h b/dm/gfx/nvn/nvn_metalfx_spatial.h
-new file mode 100644
-index 0000000..54cdfbe
---- /dev/null
-+++ b/dm/gfx/nvn/nvn_metalfx_spatial.h
-@@ -0,0 +1,150 @@
-+// Real MetalFX Spatial, isolated from guest render-target identity and shaders.
-+// Owned by the presentation thread. Reuse a slot only after its present ticket
-+// completes: Metal 4 does not retain its resources until GPU completion.
-+#pragma once
-+#import <Metal/Metal.h>
-+#import <MetalFX/MetalFX.h>
-+#import <Foundation/Foundation.h>
-+#include <stdatomic.h>
-+#include <math.h>
-+#include <stdio.h>
-+
-+typedef struct { NSUInteger x,y,width,height; } nvn_fx_rect;
-+typedef void (^nvn_fx_resource_hook)(id<MTLResource> resource);
-+
-+@interface NVNSpatialUpscaler:NSObject {
-+    id<MTLDevice> _device;
-+    id<MTLCommandQueue> _queue;
-+    id<MTL4CommandQueue> _queue4;
-+    id<MTLSharedEvent> _bridge;
-+    uint64_t _tick;
-+    id<MTLFXSpatialScaler> _scalers[3];
-+    id<MTLTexture> _inputs[3],_outputs[3];
-+    id<MTLRenderPipelineState> _copyPipeline;
-+    id<MTLSamplerState> _nearest;
-+    nvn_fx_resource_hook _add,_remove;
-+    dispatch_block_t _commit;
-+    _Atomic int _failed;
-+    _Atomic uint64_t _completed,_gpuSpanNs;
-+}
-+- (instancetype)initWithDevice:(id<MTLDevice>)device queue:(id<MTLCommandQueue>)queue queue4:(id<MTL4CommandQueue>)queue4
-+                   resourceAdd:(nvn_fx_resource_hook)add resourceRemove:(nvn_fx_resource_hook)remove resourceCommit:(dispatch_block_t)commit;
-+- (id<MTLTexture>)encodeSource:(id<MTLTexture>)source crop:(nvn_fx_rect)crop canvasWidth:(NSUInteger)width canvasHeight:(NSUInteger)height slot:(unsigned)slot error:(NSError **)error;
-+- (NSDictionary *)diagnosticsForSlot:(unsigned)slot;
-+@end
-+
-+@implementation NVNSpatialUpscaler
-+static void nvn_fx_error(NSError **error,NSString *message) {
-+    if(error)*error=[NSError errorWithDomain:@"NVNMetalFXSpatial" code:1 userInfo:@{NSLocalizedDescriptionKey:message}];
-+}
-+- (instancetype)initWithDevice:(id<MTLDevice>)device queue:(id<MTLCommandQueue>)queue queue4:(id<MTL4CommandQueue>)queue4
-+                   resourceAdd:(nvn_fx_resource_hook)add resourceRemove:(nvn_fx_resource_hook)remove resourceCommit:(dispatch_block_t)commit {
-+    if(!(self=[super init]))return nil;
-+    if(!device || !queue || !queue4 || ![MTLFXSpatialScalerDescriptor supportsDevice:device])return nil;
-+    _device=device;_queue=queue;_queue4=queue4;_add=[add copy];_remove=[remove copy];_commit=[commit copy];
-+    _bridge=[device newSharedEvent];if(!_bridge)return nil;
-+    NSString *source=@"#include <metal_stdlib>\nusing namespace metal;\n"
-+      "struct V {float4 p [[position]];float2 uv;};\n"
-+      "vertex V copy_vs(uint id [[vertex_id]]){float2 uv=float2((id<<1)&2,id&2);V o;o.p=float4(uv*float2(2,-2)+float2(-1,1),0,1);o.uv=uv;return o;}\n"
-+      "fragment float4 copy_fs(V in [[stage_in]],texture2d<float> t [[texture(0)]],sampler s [[sampler(0)]],constant float4& r [[buffer(0)]]){return float4(t.sample(s,in.uv*r.zw+r.xy).rgb,1);}\n";
-+    NSError *error=nil;id<MTLLibrary> library=[device newLibraryWithSource:source options:nil error:&error];
-+    if(!library)return nil;
-+    MTLRenderPipelineDescriptor *pd=[MTLRenderPipelineDescriptor new];
-+    pd.vertexFunction=[library newFunctionWithName:@"copy_vs"];pd.fragmentFunction=[library newFunctionWithName:@"copy_fs"];
-+    pd.colorAttachments[0].pixelFormat=MTLPixelFormatBGRA8Unorm;
-+    _copyPipeline=[device newRenderPipelineStateWithDescriptor:pd error:&error];if(!_copyPipeline)return nil;
-+    MTLSamplerDescriptor *sd=[MTLSamplerDescriptor new];sd.minFilter=sd.magFilter=MTLSamplerMinMagFilterNearest;
-+    sd.sAddressMode=sd.tAddressMode=MTLSamplerAddressModeClampToEdge;_nearest=[device newSamplerStateWithDescriptor:sd];
-+    if(!_nearest)return nil;return self;
-+}
-+- (id<MTLTexture>)encodeSource:(id<MTLTexture>)source crop:(nvn_fx_rect)crop canvasWidth:(NSUInteger)width canvasHeight:(NSUInteger)height slot:(unsigned)slot error:(NSError **)error {
-+    if(atomic_load(&_failed)){nvn_fx_error(error,@"A previous MetalFX GPU command failed; using normal presentation");return nil;}
-+    if(!source || slot>=3 || !crop.width || !crop.height || !width || !height ||
-+       crop.x>source.width || crop.width>source.width-crop.x || crop.y>source.height || crop.height>source.height-crop.y) {
-+        nvn_fx_error(error,@"Invalid MetalFX source/content/output dimensions");return nil;
-+    }
-+    if(source.textureType!=MTLTextureType2D || (source.pixelFormat!=MTLPixelFormatBGRA8Unorm && source.pixelFormat!=MTLPixelFormatRGBA8Unorm)) {
-+        nvn_fx_error(error,@"MetalFX SDR input must be an ordinary 2D raw Unorm scan-out view");return nil;
-+    }
-+    // A native-wide source fills a matching drawable. Fit an actually different
-+    // aspect instead of stretching a 16:9 scene and calling it native widescreen.
-+    double aspectError=fabs(((double)width/height)/((double)crop.width/crop.height)-1);
-+    NSUInteger outputWidth=width,outputHeight=height;
-+    if(aspectError>=0.01) {
-+        double scale=fmin((double)width/crop.width,(double)height/crop.height);
-+        outputWidth=(NSUInteger)llround(crop.width*scale);outputHeight=(NSUInteger)llround(crop.height*scale);
-+    }
-+    if(outputWidth<=crop.width || outputHeight<=crop.height) {
-+        nvn_fx_error(error,@"Output does not upscale both content dimensions");return nil;
-+    }
-+    id<MTLFXSpatialScaler> scaler=_scalers[slot];
-+    if(!scaler || scaler.inputWidth!=crop.width || scaler.inputHeight!=crop.height || scaler.outputWidth!=outputWidth || scaler.outputHeight!=outputHeight) {
-+        // The caller has waited for this slot's old present completion.
-+        if(_inputs[slot] && _remove)_remove(_inputs[slot]);
-+        if(_outputs[slot] && _remove)_remove(_outputs[slot]);
-+        _scalers[slot]=nil;_inputs[slot]=nil;_outputs[slot]=nil;
-+        MTLFXSpatialScalerDescriptor *descriptor=[MTLFXSpatialScalerDescriptor new];
-+        descriptor.inputWidth=crop.width;descriptor.inputHeight=crop.height;
-+        descriptor.outputWidth=outputWidth;descriptor.outputHeight=outputHeight;
-+        descriptor.colorTextureFormat=descriptor.outputTextureFormat=MTLPixelFormatBGRA8Unorm;
-+        // The guest scan-out and present_raw_src are perceptual encoded bytes.
-+        // Unorm textures prevent a second sRGB decode/encode across this stage.
-+        descriptor.colorProcessingMode=MTLFXSpatialScalerColorProcessingModePerceptual;
-+        scaler=[descriptor newSpatialScalerWithDevice:_device];
-+        if(!scaler){atomic_store(&_failed,1);nvn_fx_error(error,@"MetalFX spatial scaler creation failed; disabled for this run");return nil;}
-+        MTLTextureDescriptor *td=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:crop.width height:crop.height mipmapped:NO];
-+        td.storageMode=MTLStorageModePrivate;td.usage=scaler.colorTextureUsage|MTLTextureUsageRenderTarget|MTLTextureUsageShaderRead;
-+        id<MTLTexture> input=[_device newTextureWithDescriptor:td];
-+        td.width=outputWidth;td.height=outputHeight;td.usage=scaler.outputTextureUsage|MTLTextureUsageShaderRead;
-+        id<MTLTexture> output=[_device newTextureWithDescriptor:td];
-+        if(!input || !output){atomic_store(&_failed,1);nvn_fx_error(error,@"MetalFX staging/output texture allocation failed; disabled for this run");return nil;}
-+        input.label=[NSString stringWithFormat:@"DR3 MetalFX %lux%lu input slot%u",(unsigned long)crop.width,(unsigned long)crop.height,slot];
-+        output.label=[NSString stringWithFormat:@"DR3 MetalFX %lux%lu output slot%u",(unsigned long)outputWidth,(unsigned long)outputHeight,slot];
-+        _scalers[slot]=scaler;_inputs[slot]=input;_outputs[slot]=output;
-+        if(_add){_add(input);_add(output);}if(_commit)_commit();
-+        fprintf(stderr,"[dm] [metalfx] Spatial slot=%u content=%lux%lu output=%lux%lu canvas=%lux%lu perceptual input-usage=%lu output-usage=%lu aspect-fit=%d\n",slot,(unsigned long)crop.width,(unsigned long)crop.height,(unsigned long)outputWidth,(unsigned long)outputHeight,(unsigned long)width,(unsigned long)height,(unsigned long)input.usage,(unsigned long)output.usage,aspectError>=0.01);
-+    }
-+    // This GPU event bridges the ordered Metal 4 rendering queue and the public
-+    // classic MetalFX encoder. There is no CPU wait or undocumented API.
-+    uint64_t ready=++_tick,finished=++_tick;[_queue4 signalEvent:_bridge value:ready];
-+    id<MTLCommandBuffer> command=[_queue commandBuffer];command.label=@"DR3 MetalFX Spatial upscale";
-+    [command encodeWaitForEvent:_bridge value:ready];
-+    MTLRenderPassDescriptor *rp=[MTLRenderPassDescriptor renderPassDescriptor];
-+    rp.colorAttachments[0].texture=_inputs[slot];rp.colorAttachments[0].loadAction=MTLLoadActionDontCare;rp.colorAttachments[0].storeAction=MTLStoreActionStore;
-+    id<MTLRenderCommandEncoder> encoder=[command renderCommandEncoderWithDescriptor:rp];
-+    if(!encoder){atomic_store(&_failed,1);nvn_fx_error(error,@"MetalFX scan-out staging encoder unavailable; disabled for this run");return nil;}
-+    [encoder setRenderPipelineState:_copyPipeline];[encoder setFragmentTexture:source atIndex:0];[encoder setFragmentSamplerState:_nearest atIndex:0];
-+    float rect[4]={(float)crop.x/source.width,(float)crop.y/source.height,(float)crop.width/source.width,(float)crop.height/source.height};
-+    [encoder setFragmentBytes:rect length:sizeof rect atIndex:0];
-+    [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];[encoder endEncoding];
-+    scaler.inputContentWidth=crop.width;scaler.inputContentHeight=crop.height;
-+    scaler.colorTexture=_inputs[slot];scaler.outputTexture=_outputs[slot];
-+    [scaler encodeToCommandBuffer:command];[command encodeSignalEvent:_bridge value:finished];
-+    id<MTLSharedEvent> event=_bridge;
-+    [command addCompletedHandler:^(id<MTLCommandBuffer> completed){
-+        if(completed.error) {
-+            atomic_store(&self->_failed,1);
-+            fprintf(stderr,"[dm] [metalfx] GPU failure; normal presentation on following frames: %s\n",completed.error.description.UTF8String);
-+            // A failed buffer may not execute its event signal. Unblock the
-+            // Metal 4 presenter rather than hanging every future frame.
-+            if(event.signaledValue<finished)event.signaledValue=finished;
-+        } else if(completed.GPUEndTime>completed.GPUStartTime && completed.GPUStartTime>0) {
-+            uint64_t ns=(uint64_t)((completed.GPUEndTime-completed.GPUStartTime)*1e9);
-+            uint64_t total=atomic_fetch_add(&self->_gpuSpanNs,ns)+ns;
-+            uint64_t count=atomic_fetch_add(&self->_completed,1)+1;
-+            if(count==1 || count%300==0)fprintf(stderr,"[dm] [metalfx] completed=%llu average-command-GPU-span=%.3fms (staging+FX command, not isolated scaler cost)\n",(unsigned long long)count,(double)total/count/1e6);
-+        }
-+    }];
-+    [command commit];[_queue4 waitForEvent:_bridge value:finished];return _outputs[slot];
-+}
-+- (NSDictionary *)diagnosticsForSlot:(unsigned)slot {
-+    if(slot>=3 || !_scalers[slot])return @{};
-+    id<MTLFXSpatialScaler> s=_scalers[slot];
-+    return @{@"input_width":@(s.inputWidth),@"input_height":@(s.inputHeight),@"output_width":@(s.outputWidth),@"output_height":@(s.outputHeight),
-+             @"color_mode":@(s.colorProcessingMode),@"input_usage":@(_inputs[slot].usage),@"required_input_usage":@(s.colorTextureUsage),
-+             @"output_usage":@(_outputs[slot].usage),@"required_output_usage":@(s.outputTextureUsage),@"output_storage":@(_outputs[slot].storageMode)};
-+}
-+- (void)dealloc {
-+    for(unsigned i=0;i<3;i++){if(_inputs[i] && _remove)_remove(_inputs[i]);if(_outputs[i] && _remove)_remove(_outputs[i]);}
-+}
-+@end
 diff --git a/dm/gfx/nvn/nvn_mtl.h b/dm/gfx/nvn/nvn_mtl.h
 index ac77b3c..0756c83 100644
 --- a/dm/gfx/nvn/nvn_mtl.h
@@ -1379,135 +1162,6 @@ index fa314c4..d99e1c4 100644
  typedef struct { int32_t kind; uint8_t bytes[0x18]; } p_bind_state;      // kind: 0 blend 1 color 2 chmask 3 ms 4 poly 5 ds
  typedef struct { int32_t first, n; uint32_t st[16]; } p_bind_vattr;
  typedef struct { int32_t first, n; vs_st st[16]; } p_bind_vstream;
-diff --git a/dm/gfx/nvn/nvn_uniform_forward.h b/dm/gfx/nvn/nvn_uniform_forward.h
-new file mode 100644
-index 0000000..45ca651
---- /dev/null
-+++ b/dm/gfx/nvn/nvn_uniform_forward.h
-@@ -0,0 +1,53 @@
-+// Exact-range uniform versions. Guest writes are deferred only while every
-+// intervening GPU reader is either disjoint or redirected to a complete version.
-+#pragma once
-+#include <stdint.h>
-+#include <stddef.h>
-+#include <string.h>
-+#define UF_MAX 64
-+typedef struct { uint64_t dst, size, offset, gpu; void *buffer; } uf_version;
-+typedef struct { uf_version v[UF_MAX]; unsigned n; } uf_plan;
-+static inline int uf_overlap(uint64_t a, uint64_t n, uint64_t b, uint64_t m) {
-+    if (!n || !m) return 0;
-+    if (a > UINT64_MAX - n || b > UINT64_MAX - m) return 1;
-+    return a < b + m && b < a + n;
-+}
-+static inline int uf_slot(const uf_plan *p, uint64_t dst, uint64_t size) {
-+    if (!size || dst > UINT64_MAX - size) return -1;
-+    for (unsigned i=0;i<p->n;i++) {
-+        if (p->v[i].dst == dst && p->v[i].size == size) return (int)i;
-+        if (uf_overlap(dst,size,p->v[i].dst,p->v[i].size)) return -1;
-+    }
-+    return p->n < UF_MAX ? (int)p->n : -1;
-+}
-+static inline int uf_put(uf_plan *p, uf_version v) {
-+    int slot=uf_slot(p,v.dst,v.size); if(slot<0)return 0;
-+    p->v[slot]=v; if((unsigned)slot==p->n)p->n++; return 1;
-+}
-+static inline int uf_hits(const uf_plan *p,uint64_t addr,uint64_t size) {
-+    for(unsigned i=0;i<p->n;i++)if(uf_overlap(addr,size,p->v[i].dst,p->v[i].size))return 1;
-+    return 0;
-+}
-+static inline const uf_version *uf_find(const uf_plan *p,uint64_t addr,uint64_t size) {
-+    if(!size || addr>UINT64_MAX-size)return NULL;
-+    for(unsigned i=0;i<p->n;i++)if(addr>=p->v[i].dst && addr+size<=p->v[i].dst+p->v[i].size)return &p->v[i];
-+    return NULL;
-+}
-+
-+// A forwarded uniform no longer forces the original copy/render boundary.
-+// Preserve visibility when a later draw samples a previously written attachment.
-+typedef struct { uint64_t serial, address, size; } uf_attachment;
-+static inline int uf_attachment_alias(uf_attachment a, uf_attachment b) {
-+    if (a.serial && a.serial == b.serial) return 1;
-+    if (!a.address || !b.address) return 0; // Distinct host-only storage.
-+    if (!a.size || !b.size) return 1;      // Unknown guest-backed extent.
-+    return uf_overlap(a.address,a.size,b.address,b.size);
-+}
-+static inline unsigned uf_attachment_dependencies(uf_attachment sampled,
-+                                                  const uf_attachment *attachments,
-+                                                  unsigned n, unsigned written) {
-+    unsigned hits=0;
-+    for(unsigned i=0;i<n && i<9;i++)
-+        if((written & (1u<<i)) && uf_attachment_alias(sampled,attachments[i]))hits|=1u<<i;
-+    return hits;
-+}
-diff --git a/dm/gfx/nvn/nvn_vertex_fetch.h b/dm/gfx/nvn/nvn_vertex_fetch.h
-new file mode 100644
-index 0000000..c2b4657
---- /dev/null
-+++ b/dm/gfx/nvn/nvn_vertex_fetch.h
-@@ -0,0 +1,64 @@
-+// Entry interfaces follow the actual vertex fetch format. Internal registers
-+// retain the original translator's bit interpretation, including signed extension.
-+#pragma once
-+#import <Foundation/Foundation.h>
-+#include <stdint.h>
-+
-+#define NVN_VERTEX_FETCH_REVISION 1
-+enum { NVN_FETCH_FLOAT=0, NVN_FETCH_UINT=1, NVN_FETCH_INT=2, NVN_FETCH_UNKNOWN=255 };
-+
-+static inline int nvn_vertex_fetch_type(unsigned format) {
-+    switch(format) {
-+        case 0x03:case 0x08:case 0x0b:case 0x0f:case 0x14:case 0x17:
-+        case 0x1b:case 0x20:case 0x23:case 0x27:case 0x2c:case 0x2f:return NVN_FETCH_UINT;
-+        case 0x04:case 0x09:case 0x0c:case 0x10:case 0x15:case 0x18:
-+        case 0x1c:case 0x21:case 0x24:case 0x28:case 0x2d:case 0x30:return NVN_FETCH_INT;
-+        case 0x01:case 0x02:case 0x05:case 0x06:case 0x07:case 0x0a:
-+        case 0x0d:case 0x0e:case 0x11:case 0x12:case 0x13:case 0x16:
-+        case 0x19:case 0x1a:case 0x1d:case 0x1e:case 0x1f:case 0x22:
-+        case 0x25:case 0x26:case 0x29:case 0x2a:case 0x2b:case 0x2e:
-+        case 0x3d:case 0x69:case 0x3f:case 0x9a:return NVN_FETCH_FLOAT;
-+        default:return NVN_FETCH_UNKNOWN;
-+    }
-+}
-+
-+// 0 means unchanged; desired type + 1 occupies two bits for each Metal location.
-+static inline uint64_t nvn_vertex_fetch_set(uint64_t signature,unsigned location,unsigned type) {
-+    if(location>=32 || type>2)return signature;
-+    return (signature & ~(UINT64_C(3)<<(location*2))) | ((uint64_t)(type+1)<<(location*2));
-+}
-+
-+static NSString *nvn_vertex_fetch_adapt(NSString *source,uint64_t signature,NSString **why) {
-+    if(!signature)return source;
-+    NSRegularExpression *structure=[NSRegularExpression regularExpressionWithPattern:@"struct\\s+main0_in\\s*\\{([\\s\\S]*?)\\};" options:0 error:nil];
-+    NSTextCheckingResult *input=[structure firstMatchInString:source options:0 range:NSMakeRange(0,source.length)];
-+    NSRange entry=[source rangeOfString:@"vertex main0_out main0("];
-+    if(!input || entry.location==NSNotFound) {if(why)*why=@"unrecognized generated vertex entry";return nil;}
-+    NSRange brace=[source rangeOfString:@"{" options:0 range:NSMakeRange(entry.location,source.length-entry.location)];
-+    if(brace.location==NSNotFound) {if(why)*why=@"vertex body absent";return nil;}
-+    NSMutableString *head=[[source substringToIndex:brace.location+1] mutableCopy];
-+    NSMutableString *body=[[source substringFromIndex:brace.location+1] mutableCopy];
-+    NSMutableString *aliases=[NSMutableString string];uint64_t seen=0;
-+    NSRegularExpression *attribute=[NSRegularExpression regularExpressionWithPattern:@"\\b(float|uint|int)([234]?)\\s+(\\w+)\\s*\\[\\[attribute\\((\\d+)\\)\\]\\]" options:0 error:nil];
-+    NSArray<NSTextCheckingResult *> *matches=[attribute matchesInString:source options:0 range:[input rangeAtIndex:1]];
-+    const char *types[]={"float","uint","int"};
-+    for(NSTextCheckingResult *m in matches.reverseObjectEnumerator) {
-+        unsigned loc=(unsigned)[[source substringWithRange:[m rangeAtIndex:4]] intValue];
-+        if(loc>=32)continue;
-+        unsigned requested=(unsigned)((signature>>(loc*2))&3);if(!requested)continue;
-+        if(seen&(UINT64_C(3)<<(loc*2))) {if(why)*why=@"duplicate vertex attribute";return nil;}
-+        seen|=(uint64_t)requested<<(loc*2);
-+        NSString *original=[source substringWithRange:[m rangeAtIndex:1]], *width=[source substringWithRange:[m rangeAtIndex:2]], *member=[source substringWithRange:[m rangeAtIndex:3]];
-+        NSString *newType=[NSString stringWithUTF8String:types[requested-1]];
-+        if([newType isEqualToString:original]) {if(why)*why=@"redundant requested attribute transform";return nil;}
-+        NSString *alias=[@"dm_fetch_" stringByAppendingString:member];
-+        if([source rangeOfString:alias].location!=NSNotFound) {if(why)*why=@"vertex alias collision";return nil;}
-+        NSRegularExpression *use=[NSRegularExpression regularExpressionWithPattern:[NSString stringWithFormat:@"\\bin\\.%@\\b",[NSRegularExpression escapedPatternForString:member]] options:0 error:nil];
-+        if(![use numberOfMatchesInString:body options:0 range:NSMakeRange(0,body.length)]) {if(why)*why=@"attribute access is not recognized";return nil;}
-+        body=[[use stringByReplacingMatchesInString:body options:0 range:NSMakeRange(0,body.length) withTemplate:alias] mutableCopy];
-+        [aliases appendFormat:@"\n    %@%@ %@ = as_type<%@%@>(in.%@);",original,width,alias,original,width,member];
-+        [head replaceCharactersInRange:[m rangeAtIndex:1] withString:newType];
-+    }
-+    if(seen!=signature) {if(why)*why=@"requested vertex location is absent";return nil;}
-+    return [[head stringByAppendingString:aliases] stringByAppendingString:body];
-+}
 diff --git a/dm/gfx/tests/t_nvn.c b/dm/gfx/tests/t_nvn.c
 index d21874c..926334d 100644
 --- a/dm/gfx/tests/t_nvn.c
@@ -1610,46 +1264,18 @@ index 31b4420..51cec58 100644
 -	clang $(CFLAGS) -I../gfx/nvn/include -I$(dir $(GAME_H)) -I$(GAME_DIR) -I$(VPX) -I../third_party/stb_vorbis -fobjc-arc -o $@ $(SRC) $(GFX) $(VPX_LIB) -framework Cocoa -framework QuartzCore -framework Metal -framework AudioToolbox -framework ImageIO -framework UniformTypeIdentifiers
 +dmhost: $(SRC) $(GFX) dm.h hle.h dm_input.h front.h touch_mac.h ../ios/Sources/dm_touch_controls.[ch] $(GFX_H) controller_effects.h lan_native.h dm_d3_graphics.h $(GAME_H) $(GAME_DIR)/dmsh_chain.h $(GAME_STAMP) $(VPX_LIB)
 +	clang $(CFLAGS) -I../gfx/nvn/include -I$(dir $(GAME_H)) -I$(GAME_DIR) -I$(VPX) -I../third_party/stb_vorbis -fobjc-arc -o $@ $(SRC) $(GFX) $(VPX_LIB) -framework Cocoa -framework GameController -framework CoreHaptics -framework QuartzCore -framework Metal -framework MetalFX -framework AudioToolbox -framework ImageIO -framework UniformTypeIdentifiers
-diff --git a/dm/host/dm_d3_graphics.h b/dm/host/dm_d3_graphics.h
-new file mode 100644
-index 0000000..c6da2da
---- /dev/null
-+++ b/dm/host/dm_d3_graphics.h
-@@ -0,0 +1,34 @@
-+// D3 exact-build signed-image selection. No executable bytes are written.
-+#pragma once
-+#include <stdint.h>
-+#include <stddef.h>
-+#include <string.h>
-+#define DM_D3_MAIN_BUILD_ID "2607a74f5df7754cc0357b5df7e49693"
-+static inline const char *dm_d3_graphics_image(const char *mode,const char *module,const char *build_id) {
-+    if(!module)return NULL;
-+    if(strcmp(module,"main"))return module;
-+    if(!mode||!strcmp(mode,"normal"))return module;
-+    if(strcmp(mode,"wide")||!build_id||strcmp(build_id,DM_D3_MAIN_BUILD_ID))return NULL;
-+    return "mainwide";
-+}
-+static inline int dm_d3_wide_text_valid(const uint8_t *text,size_t length) {
-+    // Fixed packaged profile: 1568x720 in both modes, aspect 98/45, authored
-+    // 16:9 constraint predicate disabled. This is not a generic image patcher.
-+    static const struct { size_t offset;uint32_t word; } expected[]={
-+        {0xe7858,0xd280c408},{0xe785c,0xd280c409},
-+        {0xe7860,0xf2c05a08},{0xe7864,0xf2c05a09},
-+        {0xe7868,0x528c16ca},{0xe786c,0x72a8016a},
-+        {0xe7870,0xb90012ca},{0xe7874,0xa90026c8},
-+        {0xebb48,0x1e2e1001},
-+        {0x29b480,0x52800000},{0x29b484,0xd65f03c0},
-+        {0x29b7e8,0x1e2a1802},{0x29b854,0x1e211881},
-+        {0x29b914,0xbd000000},{0x29b918,0x1e211840},{0x29b91c,0xbd001400},
-+    };
-+    if(!text)return 0;
-+    for(size_t i=0;i<sizeof expected/sizeof expected[0];i++) {
-+        if(expected[i].offset>length||length-expected[i].offset<4)return 0;
-+        uint32_t word;memcpy(&word,text+expected[i].offset,4);
-+        if(word!=expected[i].word)return 0;
-+    }
-+    return 1;
-+}
+diff --git a/dm/host/dm.h b/dm/host/dm.h
+index fda33ac..b8e3445 100644
+--- a/dm/host/dm.h
++++ b/dm/host/dm.h
+@@ -46,6 +46,7 @@ extern module_t g_mod[MAX_MOD];
+ extern int g_nmod;
+ // main's build ID (empty if none). DM_D2R_BUILD = the D2R build that the code inherited from d2r-mobile belongs to: code with fixed D2R addresses or that edits D2R saves runs only on it
+ #define DM_D2R_BUILD "db0507f36b84200ac05f75d76ed5026f"
++#define DM_D3_BUILD "2607a74f5df7754cc0357b5df7e49693"   // Diablo III 2.7.7: parameter slots (KRES*/KASPECT) feed the camera directly
+ static inline const char *dm_main_build(void) { for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) return g_mod[i].build_id; return ""; }
+ // Four thread-local slots: K18 = the Switch's x18, KTLS = tpidr_el0, KTLR = tpidrro_el0 (ThreadLocalRegion), KGATE = host gate entry; the actual key numbers are written into the key page by the loader
+ extern pthread_key_t g_key18, g_keytls, g_keytlr, g_keygate;
 diff --git a/dm/host/dm_input.h b/dm/host/dm_input.h
 index 933c85b..6dfad7a 100644
 --- a/dm/host/dm_input.h
@@ -1972,800 +1598,6 @@ index 561a3c8..e126dcf 100644
 +    if(!v)return;memset(v,0,sizeof *v);int device=rumble_device(h);
 +    if(device>=0 && &dm_controller_rumble_applied)dm_controller_rumble_applied((unsigned)device,v);
 +}
-diff --git a/dm/host/hle_lan_hooks.c b/dm/host/hle_lan_hooks.c
-new file mode 100644
-index 0000000..fc64595
---- /dev/null
-+++ b/dm/host/hle_lan_hooks.c
-@@ -0,0 +1,129 @@
-+/* Exact DR3 Horizon imports, guarded to the surveyed main build. Other profiles retain offline hooks. */
-+#include "hle.h"
-+#include "lan_native.h"
-+#include <arpa/inet.h>
-+#include <stdatomic.h>
-+#if DM_GAME_PROGRAM_ID == 0x01001B300B9BE000ull
-+/* The shared big-stack registry macro casts a function label through const void*. */
-+#pragma clang diagnostic push
-+#pragma clang diagnostic ignored "-Wincompatible-pointer-types-discards-qualifiers"
-+static int allowed(void){return !strcmp(dm_main_build(),"2607a74f5df7754cc0357b5df7e49693")&&(!getenv("DM_DR3_LAN")||atoi(getenv("DM_DR3_LAN")));}
-+static Result rr(int value){return value==0?RES_OK:RES_FAIL;}
-+static int sk_off(void){dm_lan_socket_set_errno(100);return -1;}
-+static int ready(void){uint32_t ip,mask;return allowed()&&!dm_lan_ipv4(&ip,&mask);}
-+/* Bounded setup diagnostics: integers only, never guest packet/key buffers. */
-+static _Atomic unsigned setup_logs;
-+static int setup_result(const char*op,int result,int a,int b,int c){
-+    unsigned n=atomic_fetch_add(&setup_logs,1);
-+    if(n<128)LOG("[lan-setup] %s result=%d errno=%d a=%d b=%d c=%d",op,result,result<0?dm_lan_socket_errno():0,a,b,c);
-+    return result;
-+}
-+static long data_result(const char*op,long result,int fd,uint64_t size,int flags){
-+    int error=result<0?dm_lan_socket_errno():0;
-+    if(result<0&&error!=11)setup_result(op,(int)result,fd,(int)size,flags);
-+    return result;
-+}
-+static _Atomic(void *) state_event;
-+static void event(void){void *ev=atomic_load(&state_event);if(ev)hle_signal_system_event(ev);}
-+static Result operation(int value){event();return rr(value);}
-+#define LF(symbol,ret,name,...) HLE_FORCE_BIG(symbol,"DR3 native Wi-Fi LAN; exact locked SDK ABI",ret,name,__VA_ARGS__)
-+/* Actual LocalCommunication startup calls this before it opens room data sockets.
-+ * The original SDK lazily contacts csrng through sm:, which does not exist here.
-+ * Use Apple's CSPRNG directly; never the optional deterministic replay entropy. */
-+HLE_FORCE_BIG("_ZN2nn6crypto36GenerateCryptographicallyRandomBytesEPvm",
-+    "D3 local-network setup: native CSPRNG instead of Nintendo csrng service",
-+    void,lan_crypto_random,void*out,uint64_t size){if(size)arc4random_buf(out,(size_t)size);}
-+LF("_ZN2nn3ldn10InitializeEv",Result,lan_initialize,void){if(!allowed())return RES_FAIL;Result r=rr(dm_lan_initialize());LOG("[lan] LDN Initialize result=%x",r);return r;}
-+LF("_ZN2nn3ldn8FinalizeEv",void,lan_finalize,void){dm_lan_set_change_handler(NULL);atomic_store(&state_event,NULL);dm_lan_finalize();}
-+LF("_ZN2nn3ldn8GetStateEv",int,lan_state,void){return allowed()?dm_lan_state():0;}
-+LF("_ZN2nn3ldn22AttachStateChangeEventEPNS_2os15SystemEventTypeE",void,lan_attach,void*ev){hle_bind_system_event(ev,1);atomic_store(&state_event,ev);dm_lan_set_change_handler(event);}
-+LF("_ZN2nn3ldn11OpenStationEv",Result,lan_open_station,void){return ready()?operation(dm_lan_open(0)):RES_FAIL;}
-+LF("_ZN2nn3ldn12CloseStationEv",Result,lan_close_station,void){return operation(dm_lan_close(0));}
-+LF("_ZN2nn3ldn15OpenAccessPointEv",Result,lan_open_ap,void){return ready()?operation(dm_lan_open(1)):RES_FAIL;}
-+LF("_ZN2nn3ldn16CloseAccessPointEv",Result,lan_close_ap,void){return operation(dm_lan_close(1));}
-+LF("_ZN2nn3ldn14DestroyNetworkEv",Result,lan_destroy,void){return operation(dm_lan_disconnect(1));}
-+LF("_ZN2nn3ldn10DisconnectEv",Result,lan_disconnect,void){return operation(dm_lan_disconnect(0));}
-+LF("_ZN2nn3ldn16SetAdvertiseDataEPKvm",Result,lan_advertise,const void*p,uint64_t n){return ready()?rr(dm_lan_advertise(p,n)):RES_FAIL;}
-+LF("_ZN2nn3ldn13CreateNetworkERKNS0_13NetworkConfigERKNS0_14SecurityConfigERKNS0_10UserConfigE",Result,lan_create,const dm_lan_network_config*c,const dm_lan_security*s,const dm_lan_user*u){if(!ready()||!c)return RES_FAIL;dm_lan_network_config config=*c;if(config.intent.communication_id==-1)config.intent.communication_id=DM_GAME_PROGRAM_ID;Result r=operation(dm_lan_create(&config,s,u));LOG("[lan] CreateNetwork result=%x max=%d version=%d scene=%u",r,config.max_nodes,config.version,config.intent.scene_id);return r;}
-+LF("_ZN2nn3ldn4ScanEPNS0_11NetworkInfoEPiiRKNS0_10ScanFilterEi",Result,lan_scan,dm_lan_network_info*out,int*count,int max,const dm_lan_scan_filter*f,int channel){if(count)*count=0;if(!ready()||!f)return RES_FAIL;dm_lan_scan_filter filter=*f;filter.flags&=0x37;if(filter.id.intent.communication_id==-1)filter.id.intent.communication_id=DM_GAME_PROGRAM_ID;Result r=rr(dm_lan_scan(out,count,max,&filter,channel));static unsigned calls;if(++calls<8||(count&&*count))LOG("[lan] Scan result=%x count=%d flags=%x",r,count?*count:0,filter.flags);return r;}
-+LF("_ZN2nn3ldn7ConnectERKNS0_11NetworkInfoERKNS0_14SecurityConfigERKNS0_10UserConfigEiNS0_13ConnectOptionE",Result,lan_connect,const dm_lan_network_info*n,const dm_lan_security*s,const dm_lan_user*u,int version,int option){if(!ready())return RES_FAIL;Result r=operation(dm_lan_connect(n,s,u,version,option));LOG("[lan] Connect result=%x version=%d",r,version);return r;}
-+LF("_ZN2nn3ldn14GetNetworkInfoEPNS0_11NetworkInfoEPNS0_16NodeLatestUpdateEi",Result,lan_info3,dm_lan_network_info*out,dm_lan_node_update*updates,int count){return ready()?rr(dm_lan_info(out,updates,count)):RES_FAIL;}
-+LF("_ZN2nn3ldn14GetNetworkInfoEPNS0_11NetworkInfoE",Result,lan_info1,dm_lan_network_info*out){return ready()?rr(dm_lan_info(out,NULL,0)):RES_FAIL;}
-+LF("_ZN2nn3ldn14GetIpv4AddressEPNS0_11Ipv4AddressEPNS0_10SubnetMaskE",Result,lan_ip,uint32_t*ip,uint32_t*mask){return allowed()?rr(dm_lan_ipv4(ip,mask)):RES_FAIL;}
-+LF("_ZN2nn3ldn19GetDisconnectReasonEv",int,lan_reason,void){return dm_lan_disconnect_reason();}
-+LF("_ZN2nn3ldn22SetStationAcceptPolicyENS0_12AcceptPolicyE",Result,lan_policy,int policy){return rr(dm_lan_set_accept_policy(policy));}
-+/* Unsupported private/whitelist modes remain unavailable, rather than claiming success. */
-+LF("_ZN2nn3ldn11ScanPrivateEPNS0_11NetworkInfoEPiiRKNS0_10ScanFilterEi",Result,lan_private_scan,void*out,int*count,int max,const void*f,int ch){(void)out;(void)max;(void)f;(void)ch;if(count)*count=0;return RES_FAIL;}
-+
-+LF("_ZN2nn6socket10InitializeERKNS0_6ConfigE",Result,socket_init,const void*config){(void)config;if(allowed())(void)dm_lan_initialize();return RES_OK;}
-+LF("_ZN2nn6socket10InitializeEPvmmi",Result,socket_init4,void*mem,uint64_t a,uint64_t b,int c){(void)mem;(void)a;(void)b;(void)c;if(allowed())(void)dm_lan_initialize();return RES_OK;}
-+LF("_ZN2nn6socket8FinalizeEv",Result,socket_fini,void){dm_lan_socket_finalize();return RES_OK;}
-+#define SOCKET3(symbol,name) LF(symbol,int,name,int a,int b,int c){return setup_result("Socket",ready()?dm_lan_socket(a,b,c):sk_off(),a,b,c);}
-+SOCKET3("_ZN2nn6socket6SocketEiii",socket_create)
-+SOCKET3("nnsocketSocket",socket_create_c)
-+#define BIND3(symbol,name,fn) LF(symbol,int,name,int fd,const void*a,unsigned n){return setup_result(#name,ready()?fn(fd,a,n):sk_off(),fd,n,0);}
-+BIND3("_ZN2nn6socket4BindEiPK8sockaddrj",socket_bind,dm_lan_socket_bind)
-+BIND3("nnsocketBind",socket_bind_c,dm_lan_socket_bind)
-+BIND3("_ZN2nn6socket7ConnectEiPK8sockaddrj",socket_connect,dm_lan_socket_connect)
-+BIND3("nnsocketConnect",socket_connect_c,dm_lan_socket_connect)
-+#define CLOSE1(symbol,name) LF(symbol,int,name,int fd){return setup_result("Close",allowed()?dm_lan_socket_close(fd):sk_off(),fd,0,0);}
-+CLOSE1("_ZN2nn6socket5CloseEi",socket_close)
-+CLOSE1("nnsocketClose",socket_close_c)
-+#define LISTEN2(symbol,name) LF(symbol,int,name,int fd,int n){return setup_result("Listen",ready()?dm_lan_socket_listen(fd,n):sk_off(),fd,n,0);}
-+LISTEN2("_ZN2nn6socket6ListenEii",socket_listen)
-+LISTEN2("nnsocketListen",socket_listen_c)
-+#define ACCEPT3(symbol,name) LF(symbol,int,name,int fd,void*a,unsigned*n){return ready()?dm_lan_socket_accept(fd,a,n):sk_off();}
-+ACCEPT3("_ZN2nn6socket6AcceptEiP8sockaddrPj",socket_accept)
-+ACCEPT3("nnsocketAccept",socket_accept_c)
-+#define SHUT2(symbol,name) LF(symbol,int,name,int fd,int how){return ready()?dm_lan_socket_shutdown(fd,how):sk_off();}
-+SHUT2("_ZN2nn6socket8ShutdownEii",socket_shutdown)
-+SHUT2("nnsocketShutdown",socket_shutdown_c)
-+#define SEND4(symbol,name) LF(symbol,long,name,int fd,const void*p,uint64_t n,int f){return data_result("Send",ready()?dm_lan_socket_send(fd,p,n,f):sk_off(),fd,n,f);}
-+SEND4("_ZN2nn6socket4SendEiPKvmi",socket_send)
-+SEND4("nnsocketSend",socket_send_c)
-+#define RECV4(symbol,name) LF(symbol,long,name,int fd,void*p,uint64_t n,int f){return data_result("Recv",ready()?dm_lan_socket_recv(fd,p,n,f):sk_off(),fd,n,f);}
-+RECV4("_ZN2nn6socket4RecvEiPvmi",socket_recv)
-+RECV4("nnsocketRecv",socket_recv_c)
-+LF("_ZN2nn6socket6SendToEiPKvmiPK8sockaddrj",long,socket_sendto,int fd,const void*p,uint64_t n,int f,const void*a,unsigned l){return data_result("SendTo",ready()?dm_lan_socket_sendto(fd,p,n,f,a,l):sk_off(),fd,n,f);}
-+LF("_ZN2nn6socket8RecvFromEiPvmiP8sockaddrPj",long,socket_recvfrom,int fd,void*p,uint64_t n,int f,void*a,unsigned*l){return data_result("RecvFrom",ready()?dm_lan_socket_recvfrom(fd,p,n,f,a,l):sk_off(),fd,n,f);}
-+#define FCNTL3(symbol,name) LF(symbol,int,name,int fd,int c,int v){return setup_result("Fcntl",ready()?dm_lan_socket_fcntl(fd,c,v):sk_off(),fd,c,v);}
-+FCNTL3("_ZN2nn6socket5FcntlEiiz",socket_fcntl)
-+FCNTL3("nnsocketFcntl",socket_fcntl_c)
-+#define POLL3(symbol,name) LF(symbol,int,name,void*p,uint64_t n,int t){return ready()?dm_lan_socket_poll(p,n,t):sk_off();}
-+POLL3("_ZN2nn6socket4PollEP6pollfdmi",socket_poll)
-+POLL3("nnsocketPoll",socket_poll_c)
-+LF("_ZN2nn6socket6SelectEiP6fd_setS2_S2_P7timeval",int,socket_select,int n,void*r,void*w,void*e,void*t){return ready()?dm_lan_socket_select(n,r,w,e,t):sk_off();}
-+#define SETOPT(symbol,name) LF(symbol,int,name,int fd,int level,int opt,const void*p,unsigned n){return setup_result("SetSockOpt",ready()?dm_lan_socket_option(fd,level,opt,(void*)p,&n,1):sk_off(),fd,level,opt);}
-+SETOPT("_ZN2nn6socket10SetSockOptEiiiPKvj",socket_setopt)
-+SETOPT("nnsocketSetSockOpt",socket_setopt_c)
-+#define GETOPT(symbol,name) LF(symbol,int,name,int fd,int level,int opt,void*p,unsigned*n){return setup_result("GetSockOpt",ready()?dm_lan_socket_option(fd,level,opt,p,n,0):sk_off(),fd,level,opt);}
-+GETOPT("_ZN2nn6socket10GetSockOptEiiiPvPj",socket_getopt)
-+GETOPT("nnsocketGetSockOpt",socket_getopt_c)
-+LF("nnsocketGetPeerName",int,socket_peer,int fd,void*a,unsigned*n){return ready()?dm_lan_socket_name(fd,a,n,1):sk_off();}
-+LF("nnsocketGetSockName",int,socket_name,int fd,void*a,unsigned*n){return ready()?dm_lan_socket_name(fd,a,n,0):sk_off();}
-+LF("_ZN2nn6socket12GetLastErrnoEv",int,socket_errno,void){return allowed()?dm_lan_socket_errno():100;}
-+LF("nnsocketGetLastErrno",int,socket_errno_c,void){return allowed()?dm_lan_socket_errno():100;}
-+LF("nnsocketSetLastErrno",void,socket_seterrno,int e){dm_lan_socket_set_errno(e);}
-+#define GAI4(symbol,name) LF(symbol,int,name,const char*h,const char*s,const void*hint,void**out){if(!ready()){if(out)*out=NULL;return 4;}return dm_lan_getaddrinfo(h,s,hint,out);}
-+GAI4("_ZN2nn6socket11GetAddrInfoEPKcS2_PK8addrinfoPPS3_",socket_gai)
-+GAI4("nnsocketGetAddrInfo",socket_gai_c)
-+LF("_ZN2nn6socket12FreeAddrInfoEP8addrinfo",void,socket_freeai,void*p){dm_lan_freeaddrinfo(p);}
-+LF("nnsocketFreeAddrInfo",void,socket_freeai_c,void*p){dm_lan_freeaddrinfo(p);}
-+LF("_ZN2nn6socket13GetHostByNameEPKc",void*,socket_host,const char*h){return ready()?dm_lan_gethostbyname(h):NULL;}
-+LF("nnsocketGetHostByNameWithOptions",void*,socket_host_options,const char*h,const void*o,uint64_t n){(void)o;(void)n;return ready()?dm_lan_gethostbyname(h):NULL;}
-+LF("nnsocketResolverGetOption",int,socket_resolver_get,void*o,int k){(void)o;(void)k;return sk_off();}
-+LF("nnsocketResolverSetOption",int,socket_resolver_set,const void*o){(void)o;return sk_off();}
-+
-+LF("_ZN2nn4nifm10InitializeEv",Result,nifm_init,void){return RES_OK;}
-+LF("_ZN2nn4nifm18IsNetworkAvailableEv",int,nifm_available,void){return ready();}
-+LF("_ZN2nn4nifm20SubmitNetworkRequestEv",void,nifm_submit,void){}
-+LF("_ZN2nn4nifm27SubmitNetworkRequestAndWaitEv",void,nifm_submit_wait,void){}
-+LF("_ZN2nn4nifm20CancelNetworkRequestEv",void,nifm_cancel,void){}
-+LF("_ZN2nn4nifm22IsNetworkRequestOnHoldEv",int,nifm_hold,void){return 0;}
-+LF("_ZN2nn4nifm31HandleNetworkRequestErrorResultEv",Result,nifm_error,void){return ready()?RES_OK:RES_FAIL;}
-+LF("_ZN2nn4nifm26GetCurrentPrimaryIpAddressEP7in_addr",Result,nifm_ip,uint32_t*out){uint32_t ip=0,mask=0;int r=ready()?dm_lan_ipv4(&ip,&mask):-1;if(out)*out=htonl(ip);return rr(r);}
-+LF("_ZN2nn4nifm22GetCurrentIpConfigInfoEP7in_addrS2_S2_S2_S2_",Result,nifm_config,uint32_t*a,uint32_t*b,uint32_t*c,uint32_t*d,uint32_t*e){uint32_t ip=0,mask=0;int r=ready()?dm_lan_ipv4(&ip,&mask):-1;if(a)*a=htonl(ip);if(b)*b=htonl(mask);if(c)*c=0;if(d)*d=0;if(e)*e=0;return rr(r);}
-+LF("_ZN2nn4nifm22GetCurrentProxySettingEPNS0_12ProxySettingE",Result,nifm_proxy,void*p){(void)p;return RES_FAIL;}
-+LF("_ZN2nn4nifm19SetLocalNetworkModeEb",void,nifm_local,unsigned on){(void)on;}
-+#pragma clang diagnostic pop
-+#endif
-diff --git a/dm/host/hle_lan_native.c b/dm/host/hle_lan_native.c
-new file mode 100644
-index 0000000..9f01fc2
---- /dev/null
-+++ b/dm/host/hle_lan_native.c
-@@ -0,0 +1,156 @@
-+/* Wi-Fi room control. No Switch IPC, UI, guest addresses or public-network dial. */
-+#include "lan_native.h"
-+#include <arpa/inet.h>
-+#include <CommonCrypto/CommonHMAC.h>
-+#include <errno.h>
-+#include <fcntl.h>
-+#include <ifaddrs.h>
-+#include <net/if.h>
-+#include <poll.h>
-+#include <pthread.h>
-+#include <stdio.h>
-+#include <stdlib.h>
-+#include <string.h>
-+#include <sys/socket.h>
-+#include <time.h>
-+#include <unistd.h>
-+
-+enum { QUERY=1, ANNOUNCE, JOIN, JOINED, HEARTBEAT, ROSTER, LEAVE, DESTROY,
-+       HEADER=40, MAC=32, MAX_PACKET=HEADER+0x480+MAC, MAX_TARGETS=32 };
-+typedef struct { struct sockaddr_in address; dm_lan_network_info info; uint64_t seen; } candidate;
-+typedef struct { uint64_t id, seen; struct sockaddr_in address; } peer;
-+static struct {
-+    pthread_mutex_t mutex; pthread_cond_t changed; pthread_t thread;
-+    int initialized,stop,suspended,state,fd,discovery,reason,joining,join_result;
-+    uint32_t ip,mask; uint16_t port; uint64_t identity,request,last_host;
-+    dm_lan_network_info info; dm_lan_security security; dm_lan_user user;
-+    uint8_t changes[8]; peer peers[8];
-+    candidate targets[MAX_TARGETS]; unsigned target_count;
-+    struct sockaddr_in host; uint8_t pending_session[16]; void (*change_handler)(void);
-+} L={.mutex=PTHREAD_MUTEX_INITIALIZER,.changed=PTHREAD_COND_INITIALIZER,.fd=-1};
-+void dm_lan_set_change_handler(void (*handler)(void)){pthread_mutex_lock(&L.mutex);L.change_handler=handler;pthread_mutex_unlock(&L.mutex);}
-+static void change_locked(void){pthread_cond_broadcast(&L.changed);if(L.change_handler)L.change_handler();}
-+static uint64_t clock_ms(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t); return (uint64_t)t.tv_sec*1000+t.tv_nsec/1000000; }
-+static struct timespec deadline(unsigned ms) { struct timespec t;clock_gettime(CLOCK_REALTIME,&t);t.tv_sec+=ms/1000;t.tv_nsec+=(ms%1000)*1000000L;if(t.tv_nsec>=1000000000L){t.tv_sec++;t.tv_nsec-=1000000000L;}return t; }
-+static uint16_t get16(const uint8_t *p){return ((uint16_t)p[0]<<8)|p[1];}
-+static uint32_t get32(const uint8_t *p){return ((uint32_t)get16(p)<<16)|get16(p+2);}
-+static uint64_t get64(const uint8_t *p){return ((uint64_t)get32(p)<<32)|get32(p+4);}
-+static void put16(uint8_t *p,uint16_t v){p[0]=v>>8;p[1]=v;}
-+static void put32(uint8_t *p,uint32_t v){put16(p,v>>16);put16(p+2,v);}
-+static void put64(uint8_t *p,uint64_t v){put32(p,v>>32);put32(p+4,v);}
-+static int equal(const void *aa,const void *bb,size_t n){const uint8_t*a=aa,*b=bb;unsigned diff=0;while(n--)diff|=*a++^*b++;return diff==0;}
-+static int same_address(const struct sockaddr_in*a,const struct sockaddr_in*b){return a->sin_addr.s_addr==b->sin_addr.s_addr&&a->sin_port==b->sin_port;}
-+static int local_subnet(uint32_t ip){if((ntohl(ip)>>24)==127)return 1;struct ifaddrs*list=NULL;if(getifaddrs(&list))return 0;int allowed=0;for(struct ifaddrs*p=list;p;p=p->ifa_next)if(p->ifa_addr&&p->ifa_netmask&&p->ifa_addr->sa_family==AF_INET&&(p->ifa_flags&IFF_UP)&&!(p->ifa_flags&IFF_POINTOPOINT)){uint32_t local=((struct sockaddr_in*)p->ifa_addr)->sin_addr.s_addr,mask=((struct sockaddr_in*)p->ifa_netmask)->sin_addr.s_addr;if(ip==local||(mask&&(ip&mask)==(local&mask)&&ip!=(local|~mask))){allowed=1;break;}}freeifaddrs(list);return allowed;}
-+static void encode_info(uint8_t *p,const dm_lan_network_info*n){
-+    memcpy(p,n,sizeof(*n));put64(p,(uint64_t)n->id.intent.communication_id);put16(p+10,n->id.intent.scene_id);
-+    put16(p+0x48,n->common.channel);put16(p+0x60,n->security_mode);put16(p+0x26a,n->advertise_size);
-+    for(int i=0;i<8;i++){put32(p+0x68+i*64,n->nodes[i].ipv4);put16(p+0x68+i*64+46,n->nodes[i].version);}
-+}
-+static int decode_info(dm_lan_network_info*n,const uint8_t*p,size_t size){
-+    if(size!=sizeof(*n))return -1;memcpy(n,p,size);
-+    n->id.intent.communication_id=(int64_t)get64(p);n->id.intent.scene_id=get16(p+10);
-+    n->common.channel=(int16_t)get16(p+0x48);n->security_mode=get16(p+0x60);n->advertise_size=get16(p+0x26a);
-+    if(n->node_count_max<1||n->node_count_max>8||n->node_count>n->node_count_max||n->advertise_size>384||n->common.ssid.length>32||n->common.ssid.text[n->common.ssid.length]||n->common.type!=2)return -1;
-+    int count=0;for(int i=0;i<8;i++){n->nodes[i].ipv4=get32(p+0x68+i*64);n->nodes[i].version=(int16_t)get16(p+0x68+i*64+46);if(n->nodes[i].connected){if(n->nodes[i].id!=i||!n->nodes[i].ipv4||!memchr(n->nodes[i].name,0,33))return -1;count++;}}
-+    return count==n->node_count&&n->nodes[0].connected?0:-1;
-+}
-+static void mac_for(uint8_t out[32],const uint8_t*p,size_t n){CCHmac(kCCHmacAlgSHA256,L.security.passphrase,L.security.passphrase_size,p,n,out);}
-+static int authenticated(const uint8_t*p,size_t n){uint8_t mac[32];if(n<HEADER+MAC||L.security.passphrase_size<16||L.security.passphrase_size>64)return 0;mac_for(mac,p,n-MAC);return equal(mac,p+n-MAC,MAC);}
-+static void send_message(int type,const struct sockaddr_in*to,uint64_t request,const uint8_t session[16],const void*body,size_t size,int sign){
-+    if(size>0x480||L.fd<0)return;uint8_t p[MAX_PACKET]={0};memcpy(p,"DR3L",4);p[4]=1;p[5]=type;put16(p+6,size);put64(p+8,request);if(session)memcpy(p+16,session,16);put64(p+32,L.identity);
-+    if(body&&size)memcpy(p+HEADER,body,size);if(sign)mac_for(p+HEADER+size,p,HEADER+size);
-+    (void)sendto(L.fd,p,HEADER+size+MAC,0,(const struct sockaddr*)to,sizeof(*to));
-+}
-+static void send_info(int type,const struct sockaddr_in*to,uint64_t request){uint8_t body[0x480];encode_info(body,&L.info);send_message(type,to,request,L.info.id.session,body,sizeof(body),type!=ANNOUNCE);}
-+static void node_set(int i,uint32_t ipv4,const dm_lan_user*user,int version,uint64_t id){
-+    dm_lan_node*n=&L.info.nodes[i];memset(n,0,sizeof(*n));n->ipv4=ipv4;n->mac[0]=2;for(int j=1;j<6;j++)n->mac[j]=id>>(8*(j-1));n->id=i;n->connected=1;memcpy(n->name,user->name,32);n->name[32]=0;n->version=version;L.changes[i]|=1;
-+}
-+static void roster_changed(const dm_lan_network_info*next){
-+    for(int i=0;i<8;i++){const dm_lan_node*a=&L.info.nodes[i],*b=&next->nodes[i];if(a->connected&&(!b->connected||a->ipv4!=b->ipv4)){L.changes[i]|=2;dm_lan_socket_revoke(htonl(a->ipv4));}if(b->connected&&(!a->connected||a->ipv4!=b->ipv4))L.changes[i]|=1;}
-+    if(memcmp(&L.info,next,sizeof(*next))){L.info=*next;change_locked();}
-+}
-+static void remove_peer(int i){if(i<1||i>7||!L.info.nodes[i].connected)return;dm_lan_socket_revoke(htonl(L.info.nodes[i].ipv4));L.info.nodes[i].connected=0;L.info.node_count--;L.changes[i]|=2;memset(&L.peers[i],0,sizeof(peer));change_locked();}
-+static int add_target(const struct sockaddr_in*address){
-+    if(!address->sin_port||!address->sin_addr.s_addr)return -1;
-+    if(address->sin_addr.s_addr==L.ip&&address->sin_port==L.port)return -1;
-+    for(unsigned i=0;i<L.target_count;i++)if(same_address(address,&L.targets[i].address))return i;
-+    if(L.target_count==MAX_TARGETS)return -1;unsigned i=L.target_count++;memset(&L.targets[i],0,sizeof(candidate));L.targets[i].address=*address;return i;
-+}
-+void dm_lan_discovered(uint32_t ip,uint16_t port){if(!local_subnet(ip))return;struct sockaddr_in a={.sin_len=sizeof(a),.sin_family=AF_INET,.sin_addr.s_addr=ip,.sin_port=port};pthread_mutex_lock(&L.mutex);int i=L.initialized?add_target(&a):-1;if(i>=0)send_message(QUERY,&a,0,NULL,NULL,0,0);pthread_mutex_unlock(&L.mutex);}
-+void dm_lan_discovery_status(int ready,const char*reason){pthread_mutex_lock(&L.mutex);L.discovery=ready;int failed=ready<0&&L.state==DM_LAN_AP_CREATED;pthread_cond_broadcast(&L.changed);pthread_mutex_unlock(&L.mutex);if(failed)dm_lan_disconnect(1);if(reason)fprintf(stderr,"[lan] discovery %s: %s\n",ready>0?"ready":"unavailable",reason);}
-+__attribute__((weak)) void dm_lan_discovery_start(uint16_t port){(void)port;dm_lan_discovery_status(getenv("DM_LAN_PEER")?1:-1,"Bonjour bridge absent; explicit peer required");}
-+__attribute__((weak)) void dm_lan_discovery_publish(int on,uint16_t port,const char*name){(void)on;(void)port;(void)name;}
-+__attribute__((weak)) void dm_lan_discovery_stop(void){}
-+__attribute__((weak)) int dm_lan_discovery_available(void){return 0;}
-+int dr3_lan_supported(void){return dm_lan_discovery_available();}
-+static int valid_security(const dm_lan_security*s){return s&&s->mode>=1&&s->mode<=3&&s->passphrase_size>=16&&s->passphrase_size<=64;}
-+static void receive_message(const uint8_t*p,size_t size,const struct sockaddr_in*from){
-+    if(size<HEADER+MAC||size>MAX_PACKET||memcmp(p,"DR3L",4)||p[4]!=1||get16(p+6)!=size-HEADER-MAC)return;
-+    int type=p[5];uint64_t identity=get64(p+32),request=get64(p+8);const uint8_t*body=p+HEADER;size_t length=size-HEADER-MAC;
-+    if(!identity||identity==L.identity||L.suspended)return;
-+    if(type==QUERY&&length==0){if(L.state==DM_LAN_AP_CREATED)send_info(ANNOUNCE,from,request);return;}
-+    if(type==ANNOUNCE){dm_lan_network_info n;if(decode_info(&n,body,length)||n.nodes[0].ipv4!=ntohl(from->sin_addr.s_addr)||memcmp(n.id.session,p+16,16))return;int i=add_target(from);if(i>=0){L.targets[i].info=n;L.targets[i].seen=clock_ms();pthread_cond_broadcast(&L.changed);}return;}
-+    if(type==JOIN&&L.state==DM_LAN_AP_CREATED&&length==56&&equal(p+16,L.info.id.session,16)&&authenticated(p,size)){
-+        int version=get16(body+48);if(version!=L.info.nodes[0].version||!memchr(body,0,33)||L.info.accept_policy!=0)return;
-+        int slot=-1;for(int i=1;i<L.info.node_count_max;i++)if(L.peers[i].id==identity&&same_address(from,&L.peers[i].address)){slot=i;break;}
-+        if(slot<0){for(int i=1;i<L.info.node_count_max;i++)if(!L.info.nodes[i].connected){slot=i;break;}if(slot<0)return;for(int i=0;i<8;i++)if(L.info.nodes[i].connected&&L.info.nodes[i].ipv4==ntohl(from->sin_addr.s_addr))return;dm_lan_user u;memcpy(&u,body,sizeof(u));node_set(slot,ntohl(from->sin_addr.s_addr),&u,version,identity);L.info.node_count++;}
-+        L.peers[slot]=(peer){.id=identity,.seen=clock_ms(),.address=*from};send_info(JOINED,from,request);change_locked();return;
-+    }
-+    if((type==JOINED||type==ROSTER)&&same_address(from,&L.host)&&((L.joining&&request==L.request&&equal(p+16,L.pending_session,16))||(L.state==DM_LAN_CONNECTED&&equal(p+16,L.info.id.session,16)))&&authenticated(p,size)){
-+        dm_lan_network_info n;if(decode_info(&n,body,length)||memcmp(n.id.session,p+16,16)||n.nodes[0].ipv4!=ntohl(from->sin_addr.s_addr))return;
-+        int self=0;for(int i=1;i<8;i++)if(n.nodes[i].connected&&n.nodes[i].ipv4==ntohl(L.ip))self++;
-+        if(self!=1)return;roster_changed(&n);L.last_host=clock_ms();L.state=DM_LAN_CONNECTED;L.join_result=1;pthread_cond_broadcast(&L.changed);return;
-+    }
-+    if(type==DESTROY&&L.state==DM_LAN_CONNECTED&&length==0&&same_address(from,&L.host)&&equal(p+16,L.info.id.session,16)&&authenticated(p,size)){L.state=DM_LAN_STATION;L.reason=3;for(int i=0;i<8;i++)if(L.info.nodes[i].connected){dm_lan_socket_revoke(htonl(L.info.nodes[i].ipv4));L.info.nodes[i].connected=0;L.changes[i]|=2;}L.info.node_count=0;change_locked();return;}
-+    if((type==HEARTBEAT||type==LEAVE)&&length==0&&L.state==DM_LAN_AP_CREATED&&equal(p+16,L.info.id.session,16)&&authenticated(p,size))for(int i=1;i<8;i++)if(L.peers[i].id==identity&&same_address(from,&L.peers[i].address)){if(type==LEAVE)remove_peer(i);else{L.peers[i].seen=clock_ms();send_info(ROSTER,from,request);}return;}
-+}
-+static void*worker(void*unused){(void)unused;uint64_t last=0;uint8_t p[MAX_PACKET+1];for(;;){pthread_mutex_lock(&L.mutex);int stop=L.stop,fd=L.fd;pthread_mutex_unlock(&L.mutex);if(stop)break;struct pollfd pollfd={.fd=fd,.events=POLLIN};if(poll(&pollfd,1,100)>0){struct sockaddr_in from;socklen_t n=sizeof(from);ssize_t got=recvfrom(fd,p,sizeof(p),0,(struct sockaddr*)&from,&n);if(got>0&&n==sizeof(from)&&from.sin_family==AF_INET&&local_subnet(from.sin_addr.s_addr)){pthread_mutex_lock(&L.mutex);receive_message(p,(size_t)got,&from);pthread_mutex_unlock(&L.mutex);}}
-+        uint64_t now=clock_ms();if(now-last<500)continue;last=now;pthread_mutex_lock(&L.mutex);if(!L.suspended){for(unsigned i=0;i<L.target_count;i++)send_message(QUERY,&L.targets[i].address,0,NULL,NULL,0,0);if(L.state==DM_LAN_AP_CREATED){for(int i=1;i<8;i++)if(L.info.nodes[i].connected){if(now-L.peers[i].seen>4000)remove_peer(i);else send_info(ROSTER,&L.peers[i].address,0);}}else if(L.state==DM_LAN_CONNECTED){if(now-L.last_host>4000){L.state=DM_LAN_STATION;L.reason=6;for(int i=0;i<8;i++)if(L.info.nodes[i].connected){dm_lan_socket_revoke(htonl(L.info.nodes[i].ipv4));L.info.nodes[i].connected=0;L.changes[i]|=2;}L.info.node_count=0;change_locked();}else send_message(HEARTBEAT,&L.host,0,L.info.id.session,NULL,0,1);}}pthread_mutex_unlock(&L.mutex);
-+    }return NULL;}
-+static int interface_address(uint32_t*ip,uint32_t*mask){
-+    const char*forced=getenv("DM_LAN_BIND_IP");if(forced){struct in_addr a;if(inet_pton(AF_INET,forced,&a)!=1)return -1;*ip=a.s_addr;*mask=htonl(0xff000000u);return 0;}
-+    struct ifaddrs*list=NULL;if(getifaddrs(&list))return -1;int found=0;
-+    for(struct ifaddrs*p=list;p;p=p->ifa_next){if(!p->ifa_addr||p->ifa_addr->sa_family!=AF_INET||!(p->ifa_flags&IFF_UP)||(p->ifa_flags&(IFF_LOOPBACK|IFF_POINTOPOINT))||strncmp(p->ifa_name,"en",2))continue;*ip=((struct sockaddr_in*)p->ifa_addr)->sin_addr.s_addr;*mask=p->ifa_netmask?((struct sockaddr_in*)p->ifa_netmask)->sin_addr.s_addr:htonl(0xffffff00u);found=1;if(!strcmp(p->ifa_name,"en0"))break;}freeifaddrs(list);return found?0:-1;
-+}
-+int dm_lan_initialize(void){
-+    if(getenv("DM_DR3_LAN")&&!atoi(getenv("DM_DR3_LAN")))return -1;
-+    pthread_mutex_lock(&L.mutex);if(L.initialized){pthread_mutex_unlock(&L.mutex);return 0;}
-+    if(interface_address(&L.ip,&L.mask)){pthread_mutex_unlock(&L.mutex);return -1;}
-+    int fd=socket(AF_INET,SOCK_DGRAM,0);struct sockaddr_in bindaddr={.sin_len=sizeof(bindaddr),.sin_family=AF_INET,.sin_addr.s_addr=L.ip};
-+    if(fd<0||bind(fd,(struct sockaddr*)&bindaddr,sizeof(bindaddr))){if(fd>=0)close(fd);pthread_mutex_unlock(&L.mutex);return -1;}socklen_t len=sizeof(bindaddr);if(getsockname(fd,(struct sockaddr*)&bindaddr,&len)){close(fd);pthread_mutex_unlock(&L.mutex);return -1;}
-+    L.fd=fd;L.port=bindaddr.sin_port;arc4random_buf(&L.identity,sizeof(L.identity));if(!L.identity)L.identity=1;L.stop=L.suspended=L.reason=0;L.target_count=0;L.state=DM_LAN_INITIALIZED;L.initialized=1;L.discovery=0;
-+    if(pthread_create(&L.thread,NULL,worker,NULL)){close(fd);L.fd=-1;L.initialized=0;L.state=0;pthread_mutex_unlock(&L.mutex);return -1;}
-+    uint16_t port=L.port;pthread_mutex_unlock(&L.mutex);dm_lan_discovery_start(ntohs(port));
-+    const char*manual=getenv("DM_LAN_PEER");if(manual){char buf[64];snprintf(buf,sizeof(buf),"%s",manual);char*colon=strrchr(buf,':');struct in_addr a;if(colon){*colon++=0;long value=strtol(colon,NULL,10);if(value>0&&value<=65535&&inet_pton(AF_INET,buf,&a)==1){dm_lan_discovered(a.s_addr,htons((uint16_t)value));dm_lan_discovery_status(1,"explicit peer");}}}
-+    fprintf(stderr,"[lan] native interface=%08x control_port=%u state=initialized\n",ntohl(L.ip),ntohs(port));return 0;
-+}
-+void dm_lan_finalize(void){pthread_mutex_lock(&L.mutex);if(!L.initialized){pthread_mutex_unlock(&L.mutex);return;}L.stop=1;pthread_mutex_unlock(&L.mutex);dm_lan_disconnect(1);dm_lan_discovery_stop();pthread_join(L.thread,NULL);pthread_mutex_lock(&L.mutex);close(L.fd);L.fd=-1;L.initialized=0;L.state=0;L.target_count=0;memset(&L.security,0,sizeof(L.security));pthread_mutex_unlock(&L.mutex);dm_lan_socket_finalize();}
-+int dm_lan_state(void){pthread_mutex_lock(&L.mutex);int s=L.state;pthread_mutex_unlock(&L.mutex);return s;}
-+uint16_t dm_lan_control_port(void){pthread_mutex_lock(&L.mutex);uint16_t p=ntohs(L.port);pthread_mutex_unlock(&L.mutex);return p;}
-+int dm_lan_open(int ap){pthread_mutex_lock(&L.mutex);int ok=L.initialized&&!L.suspended&&L.state==DM_LAN_INITIALIZED;if(ok)L.state=ap?DM_LAN_AP:DM_LAN_STATION;pthread_mutex_unlock(&L.mutex);return ok?0:-1;}
-+int dm_lan_close(int ap){pthread_mutex_lock(&L.mutex);int ok=L.state==(ap?DM_LAN_AP:DM_LAN_STATION);if(ok)L.state=DM_LAN_INITIALIZED;pthread_mutex_unlock(&L.mutex);return ok?0:-1;}
-+int dm_lan_create(const dm_lan_network_config*c,const dm_lan_security*s,const dm_lan_user*u){
-+    if(!c||!u||!valid_security(s)||c->max_nodes<1||c->max_nodes>8||c->version<0||!memchr(u->name,0,33))return -1;
-+    pthread_mutex_lock(&L.mutex);if(L.state!=DM_LAN_AP||L.suspended||L.discovery<0){pthread_mutex_unlock(&L.mutex);return -1;}
-+    uint8_t adv[384];memcpy(adv,L.info.advertise,384);uint16_t advsize=L.info.advertise_size;memset(&L.info,0,sizeof(L.info));memcpy(L.info.advertise,adv,384);L.info.advertise_size=advsize;L.security=*s;L.user=*u;L.info.id.intent=c->intent;L.info.common.channel=c->channel?c->channel:6;L.info.common.link_level=3;L.info.common.type=2;L.info.security_mode=s->mode;L.info.version=1;L.info.node_count_max=c->max_nodes;L.info.node_count=1;arc4random_buf(L.info.id.session,16);arc4random_buf(L.info.server_random,16);memset(L.changes,0,8);memset(L.peers,0,sizeof(L.peers));node_set(0,ntohl(L.ip),u,c->version,L.identity);memcpy(L.info.common.bssid,L.info.nodes[0].mac,6);char name[33];snprintf(name,sizeof(name),"DR3-%016llx",(unsigned long long)L.identity);L.info.common.ssid.length=strlen(name);memcpy(L.info.common.ssid.text,name,strlen(name)+1);L.state=DM_LAN_AP_CREATED;uint16_t port=ntohs(L.port);pthread_mutex_unlock(&L.mutex);dm_lan_discovery_publish(1,port,name);return 0;
-+}
-+int dm_lan_advertise(const void*p,size_t n){if(n>384||(!p&&n))return -1;pthread_mutex_lock(&L.mutex);int ok=L.state==DM_LAN_AP||L.state==DM_LAN_AP_CREATED;if(ok){memset(L.info.advertise,0,384);if(n)memcpy(L.info.advertise,p,n);L.info.advertise_size=n;change_locked();}pthread_mutex_unlock(&L.mutex);return ok?0:-1;}
-+static int filter_matches(const dm_lan_network_info*n,const dm_lan_scan_filter*f,int channel){uint32_t flags=f->flags;if(flags&~0x37u)return 0;if(channel&&channel!=n->common.channel)return 0;if((flags&1)&&f->id.intent.communication_id!=n->id.intent.communication_id)return 0;if((flags&2)&&memcmp(f->id.session,n->id.session,16))return 0;if((flags&4)&&f->type!=n->common.type)return 0;if((flags&16)&&(f->ssid.length!=n->common.ssid.length||f->ssid.length>32||memcmp(f->ssid.text,n->common.ssid.text,f->ssid.length)))return 0;if((flags&32)&&f->id.intent.scene_id!=n->id.intent.scene_id)return 0;return 1;}
-+int dm_lan_scan(dm_lan_network_info*out,int*count,int max,const dm_lan_scan_filter*f,int channel){if(!out||!count||!f||max<1||max>24)return -1;*count=0;pthread_mutex_lock(&L.mutex);if(!L.initialized||L.suspended||L.discovery<0){pthread_mutex_unlock(&L.mutex);return -1;}for(unsigned i=0;i<L.target_count;i++)send_message(QUERY,&L.targets[i].address,0,NULL,NULL,0,0);struct timespec until=deadline(150);pthread_cond_timedwait(&L.changed,&L.mutex,&until);uint64_t now=clock_ms();for(unsigned i=0;i<L.target_count&&*count<max;i++)if(L.targets[i].seen&&now-L.targets[i].seen<2500&&filter_matches(&L.targets[i].info,f,channel))out[(*count)++]=L.targets[i].info;pthread_mutex_unlock(&L.mutex);return 0;}
-+int dm_lan_connect(const dm_lan_network_info*n,const dm_lan_security*s,const dm_lan_user*u,int version,int option){
-+    if(!n||!u||!valid_security(s)||n->security_mode!=s->mode||version<0||version>32767||option&~1||!memchr(u->name,0,33))return -1;
-+    pthread_mutex_lock(&L.mutex);if(L.state!=DM_LAN_STATION||L.suspended){pthread_mutex_unlock(&L.mutex);return -1;}int target=-1;for(unsigned i=0;i<L.target_count;i++)if(L.targets[i].seen&&equal(n->id.session,L.targets[i].info.id.session,16)&&n->nodes[0].ipv4==ntohl(L.targets[i].address.sin_addr.s_addr)){target=i;break;}if(target<0){pthread_mutex_unlock(&L.mutex);return -1;}L.host=L.targets[target].address;L.security=*s;L.user=*u;memcpy(L.pending_session,n->id.session,16);arc4random_buf(&L.request,8);L.join_result=0;L.joining=1;
-+    uint8_t body[56]={0};memcpy(body,u,48);put16(body+48,version);for(int attempt=0;attempt<5&&!L.join_result;attempt++){send_message(JOIN,&L.host,L.request,L.pending_session,body,sizeof(body),1);struct timespec until=deadline(300);pthread_cond_timedwait(&L.changed,&L.mutex,&until);if(L.suspended||!L.initialized)break;}L.joining=0;int ok=L.join_result&&L.state==DM_LAN_CONNECTED;pthread_mutex_unlock(&L.mutex);return ok?0:-1;
-+}
-+int dm_lan_disconnect(int destroy){pthread_mutex_lock(&L.mutex);int state=L.state;fprintf(stderr,"[lan] room disconnect destroy=%d state=%d\n",destroy,state);if(state==DM_LAN_AP_CREATED&&destroy){for(int i=1;i<8;i++)if(L.info.nodes[i].connected)send_message(DESTROY,&L.peers[i].address,0,L.info.id.session,NULL,0,1);L.state=DM_LAN_AP;L.reason=3;}else if(state==DM_LAN_CONNECTED){send_message(LEAVE,&L.host,0,L.info.id.session,NULL,0,1);L.state=DM_LAN_STATION;L.reason=1;}else{pthread_mutex_unlock(&L.mutex);return -1;}for(int i=0;i<8;i++)if(L.info.nodes[i].connected){dm_lan_socket_revoke(htonl(L.info.nodes[i].ipv4));L.info.nodes[i].connected=0;L.changes[i]|=2;}L.info.node_count=0;pthread_cond_broadcast(&L.changed);pthread_mutex_unlock(&L.mutex);if(state==DM_LAN_AP_CREATED)dm_lan_discovery_publish(0,0,NULL);return 0;}
-+int dm_lan_info(dm_lan_network_info*out,dm_lan_node_update*updates,int count){if(!out||(updates&&count!=8))return -1;pthread_mutex_lock(&L.mutex);if(L.state!=DM_LAN_AP_CREATED&&L.state!=DM_LAN_CONNECTED){pthread_mutex_unlock(&L.mutex);return -1;}*out=L.info;if(updates){memset(updates,0,count*sizeof(*updates));for(int i=0;i<8;i++){updates[i].changed=L.changes[i];L.changes[i]=0;}}pthread_mutex_unlock(&L.mutex);return 0;}
-+int dm_lan_ipv4(uint32_t*ip,uint32_t*mask){pthread_mutex_lock(&L.mutex);int ok=L.initialized&&!L.suspended;if(ip)*ip=ok?ntohl(L.ip):0;if(mask)*mask=ok?ntohl(L.mask):0;pthread_mutex_unlock(&L.mutex);return ok?0:-1;}
-+int dm_lan_disconnect_reason(void){pthread_mutex_lock(&L.mutex);int r=L.reason;pthread_mutex_unlock(&L.mutex);return r;}
-+int dm_lan_set_accept_policy(int policy){if(policy<0||policy>1)return -1;pthread_mutex_lock(&L.mutex);L.info.accept_policy=policy;pthread_mutex_unlock(&L.mutex);return 0;}
-+void dm_lan_suspend(int on){
-+    if(on){dm_lan_disconnect(1);pthread_mutex_lock(&L.mutex);L.suspended=1;L.joining=0;L.join_result=0;change_locked();pthread_mutex_unlock(&L.mutex);dm_lan_discovery_stop();dm_lan_socket_finalize();return;}
-+    pthread_mutex_lock(&L.mutex);int initialized=L.initialized;uint32_t old_ip=L.ip;uint16_t port=ntohs(L.port);pthread_mutex_unlock(&L.mutex);if(!initialized)return;
-+    uint32_t ip=0,mask=0;if(interface_address(&ip,&mask)||ip!=old_ip){dm_lan_finalize();(void)dm_lan_initialize();return;}
-+    pthread_mutex_lock(&L.mutex);L.suspended=0;change_locked();pthread_mutex_unlock(&L.mutex);dm_lan_discovery_start(port);
-+}
-+int dm_lan_peer_allowed(uint32_t ip,int broadcast){pthread_mutex_lock(&L.mutex);int ok=0;if(L.initialized&&!L.suspended){if((ntohl(ip)>>24)==127||ip==L.ip)ok=1;else if(L.state==DM_LAN_AP_CREATED||L.state==DM_LAN_CONNECTED){for(int i=0;i<8;i++)if(L.info.nodes[i].connected&&L.info.nodes[i].ipv4==ntohl(ip))ok=1;if(broadcast&&(ip==INADDR_BROADCAST||ip==(L.ip|~L.mask)))ok=1;}}pthread_mutex_unlock(&L.mutex);return ok;}
-diff --git a/dm/host/hle_lan_socket.c b/dm/host/hle_lan_socket.c
-new file mode 100644
-index 0000000..d90be06
---- /dev/null
-+++ b/dm/host/hle_lan_socket.c
-@@ -0,0 +1,491 @@
-+/* Horizon BSD ABI -> independently owned native LAN sockets (never guest fd == OS fd). */
-+#include "lan_native.h"
-+#include <arpa/inet.h>
-+#include <errno.h>
-+#include <fcntl.h>
-+#include <limits.h>
-+#include <netdb.h>
-+#include <poll.h>
-+#include <pthread.h>
-+#include <stdio.h>
-+#include <stdlib.h>
-+#include <string.h>
-+#include <sys/socket.h>
-+#include <sys/time.h>
-+#include <unistd.h>
-+
-+enum { MAX_GUEST_FDS=1024, G_NONBLOCK=0x800 };
-+static pthread_mutex_t socket_mutex=PTHREAD_MUTEX_INITIALIZER;
-+static int sockets[MAX_GUEST_FDS]; /* native fd+1; zero is unused */
-+static __thread int socket_error=100;
-+/* Original main+0x1147800 errno-name table (resolved through RELA) uses the
-+ * Horizon/Linux numbers; Apple errno values must never cross the guest ABI.
-+ * Unknown Apple-only errors become guest EIO, not an unrelated valid number. */
-+static int guest_errno(int native){switch(native){case 0:return 0;
-+#ifdef EPERM
-+case EPERM:return 1;
-+#endif
-+#ifdef ENOENT
-+case ENOENT:return 2;
-+#endif
-+#ifdef ESRCH
-+case ESRCH:return 3;
-+#endif
-+#ifdef EINTR
-+case EINTR:return 4;
-+#endif
-+#ifdef EIO
-+case EIO:return 5;
-+#endif
-+#ifdef ENXIO
-+case ENXIO:return 6;
-+#endif
-+#ifdef E2BIG
-+case E2BIG:return 7;
-+#endif
-+#ifdef ENOEXEC
-+case ENOEXEC:return 8;
-+#endif
-+#ifdef EBADF
-+case EBADF:return 9;
-+#endif
-+#ifdef ECHILD
-+case ECHILD:return 10;
-+#endif
-+#ifdef EWOULDBLOCK
-+case EWOULDBLOCK:return 11;
-+#endif
-+#ifdef ENOMEM
-+case ENOMEM:return 12;
-+#endif
-+#ifdef EACCES
-+case EACCES:return 13;
-+#endif
-+#ifdef EFAULT
-+case EFAULT:return 14;
-+#endif
-+#ifdef ENOTBLK
-+case ENOTBLK:return 15;
-+#endif
-+#ifdef EBUSY
-+case EBUSY:return 16;
-+#endif
-+#ifdef EEXIST
-+case EEXIST:return 17;
-+#endif
-+#ifdef EXDEV
-+case EXDEV:return 18;
-+#endif
-+#ifdef ENODEV
-+case ENODEV:return 19;
-+#endif
-+#ifdef ENOTDIR
-+case ENOTDIR:return 20;
-+#endif
-+#ifdef EISDIR
-+case EISDIR:return 21;
-+#endif
-+#ifdef EINVAL
-+case EINVAL:return 22;
-+#endif
-+#ifdef ENFILE
-+case ENFILE:return 23;
-+#endif
-+#ifdef EMFILE
-+case EMFILE:return 24;
-+#endif
-+#ifdef ENOTTY
-+case ENOTTY:return 25;
-+#endif
-+#ifdef ETXTBSY
-+case ETXTBSY:return 26;
-+#endif
-+#ifdef EFBIG
-+case EFBIG:return 27;
-+#endif
-+#ifdef ENOSPC
-+case ENOSPC:return 28;
-+#endif
-+#ifdef ESPIPE
-+case ESPIPE:return 29;
-+#endif
-+#ifdef EROFS
-+case EROFS:return 30;
-+#endif
-+#ifdef EMLINK
-+case EMLINK:return 31;
-+#endif
-+#ifdef EPIPE
-+case EPIPE:return 32;
-+#endif
-+#ifdef EDOM
-+case EDOM:return 33;
-+#endif
-+#ifdef ERANGE
-+case ERANGE:return 34;
-+#endif
-+#ifdef EDEADLK
-+case EDEADLK:return 35;
-+#endif
-+#ifdef ENAMETOOLONG
-+case ENAMETOOLONG:return 36;
-+#endif
-+#ifdef ENOLCK
-+case ENOLCK:return 37;
-+#endif
-+#ifdef ENOSYS
-+case ENOSYS:return 38;
-+#endif
-+#ifdef ENOTEMPTY
-+case ENOTEMPTY:return 39;
-+#endif
-+#ifdef ELOOP
-+case ELOOP:return 40;
-+#endif
-+#ifdef ENOMSG
-+case ENOMSG:return 42;
-+#endif
-+#ifdef EIDRM
-+case EIDRM:return 43;
-+#endif
-+#ifdef ECHRNG
-+case ECHRNG:return 44;
-+#endif
-+#ifdef EL2NSYNC
-+case EL2NSYNC:return 45;
-+#endif
-+#ifdef EL3HLT
-+case EL3HLT:return 46;
-+#endif
-+#ifdef EL3RST
-+case EL3RST:return 47;
-+#endif
-+#ifdef ELNRNG
-+case ELNRNG:return 48;
-+#endif
-+#ifdef EUNATCH
-+case EUNATCH:return 49;
-+#endif
-+#ifdef ENOCSI
-+case ENOCSI:return 50;
-+#endif
-+#ifdef EL2HLT
-+case EL2HLT:return 51;
-+#endif
-+#ifdef EBADE
-+case EBADE:return 52;
-+#endif
-+#ifdef EBADR
-+case EBADR:return 53;
-+#endif
-+#ifdef EXFULL
-+case EXFULL:return 54;
-+#endif
-+#ifdef ENOANO
-+case ENOANO:return 55;
-+#endif
-+#ifdef EBADRQC
-+case EBADRQC:return 56;
-+#endif
-+#ifdef EBADSLT
-+case EBADSLT:return 57;
-+#endif
-+#ifdef EBFONT
-+case EBFONT:return 59;
-+#endif
-+#ifdef ENOSTR
-+case ENOSTR:return 60;
-+#endif
-+#ifdef ENODATA
-+case ENODATA:return 61;
-+#endif
-+#ifdef ETIME
-+case ETIME:return 62;
-+#endif
-+#ifdef ENOSR
-+case ENOSR:return 63;
-+#endif
-+#ifdef ENONET
-+case ENONET:return 64;
-+#endif
-+#ifdef ENOPKG
-+case ENOPKG:return 65;
-+#endif
-+#ifdef EREMOTE
-+case EREMOTE:return 66;
-+#endif
-+#ifdef ENOLINK
-+case ENOLINK:return 67;
-+#endif
-+#ifdef EADV
-+case EADV:return 68;
-+#endif
-+#ifdef ESRMNT
-+case ESRMNT:return 69;
-+#endif
-+#ifdef ECOMM
-+case ECOMM:return 70;
-+#endif
-+#ifdef EPROTO
-+case EPROTO:return 71;
-+#endif
-+#ifdef EMULTIHOP
-+case EMULTIHOP:return 72;
-+#endif
-+#ifdef EDOTDOT
-+case EDOTDOT:return 73;
-+#endif
-+#ifdef EBADMSG
-+case EBADMSG:return 74;
-+#endif
-+#ifdef EOVERFLOW
-+case EOVERFLOW:return 75;
-+#endif
-+#ifdef ENOTUNIQ
-+case ENOTUNIQ:return 76;
-+#endif
-+#ifdef EBADFD
-+case EBADFD:return 77;
-+#endif
-+#ifdef EREMCHG
-+case EREMCHG:return 78;
-+#endif
-+#ifdef ELIBACC
-+case ELIBACC:return 79;
-+#endif
-+#ifdef ELIBBAD
-+case ELIBBAD:return 80;
-+#endif
-+#ifdef ELIBSCN
-+case ELIBSCN:return 81;
-+#endif
-+#ifdef ELIBMAX
-+case ELIBMAX:return 82;
-+#endif
-+#ifdef ELIBEXEC
-+case ELIBEXEC:return 83;
-+#endif
-+#ifdef EILSEQ
-+case EILSEQ:return 84;
-+#endif
-+#ifdef ERESTART
-+case ERESTART:return 85;
-+#endif
-+#ifdef ESTRPIPE
-+case ESTRPIPE:return 86;
-+#endif
-+#ifdef EUSERS
-+case EUSERS:return 87;
-+#endif
-+#ifdef ENOTSOCK
-+case ENOTSOCK:return 88;
-+#endif
-+#ifdef EDESTADDRREQ
-+case EDESTADDRREQ:return 89;
-+#endif
-+#ifdef EMSGSIZE
-+case EMSGSIZE:return 90;
-+#endif
-+#ifdef EPROTOTYPE
-+case EPROTOTYPE:return 91;
-+#endif
-+#ifdef ENOPROTOOPT
-+case ENOPROTOOPT:return 92;
-+#endif
-+#ifdef EPROTONOSUPPORT
-+case EPROTONOSUPPORT:return 93;
-+#endif
-+#ifdef ESOCKTNOSUPPORT
-+case ESOCKTNOSUPPORT:return 94;
-+#endif
-+#ifdef EOPNOTSUPP
-+case EOPNOTSUPP:return 95;
-+#endif
-+#ifdef EPFNOSUPPORT
-+case EPFNOSUPPORT:return 96;
-+#endif
-+#ifdef EAFNOSUPPORT
-+case EAFNOSUPPORT:return 97;
-+#endif
-+#ifdef EADDRINUSE
-+case EADDRINUSE:return 98;
-+#endif
-+#ifdef EADDRNOTAVAIL
-+case EADDRNOTAVAIL:return 99;
-+#endif
-+#ifdef ENETDOWN
-+case ENETDOWN:return 100;
-+#endif
-+#ifdef ENETUNREACH
-+case ENETUNREACH:return 101;
-+#endif
-+#ifdef ENETRESET
-+case ENETRESET:return 102;
-+#endif
-+#ifdef ECONNABORTED
-+case ECONNABORTED:return 103;
-+#endif
-+#ifdef ECONNRESET
-+case ECONNRESET:return 104;
-+#endif
-+#ifdef ENOBUFS
-+case ENOBUFS:return 105;
-+#endif
-+#ifdef EISCONN
-+case EISCONN:return 106;
-+#endif
-+#ifdef ENOTCONN
-+case ENOTCONN:return 107;
-+#endif
-+#ifdef ESHUTDOWN
-+case ESHUTDOWN:return 108;
-+#endif
-+#ifdef ETOOMANYREFS
-+case ETOOMANYREFS:return 109;
-+#endif
-+#ifdef ETIMEDOUT
-+case ETIMEDOUT:return 110;
-+#endif
-+#ifdef ECONNREFUSED
-+case ECONNREFUSED:return 111;
-+#endif
-+#ifdef EHOSTDOWN
-+case EHOSTDOWN:return 112;
-+#endif
-+#ifdef EHOSTUNREACH
-+case EHOSTUNREACH:return 113;
-+#endif
-+#ifdef EALREADY
-+case EALREADY:return 114;
-+#endif
-+#ifdef EINPROGRESS
-+case EINPROGRESS:return 115;
-+#endif
-+#ifdef ESTALE
-+case ESTALE:return 116;
-+#endif
-+#ifdef EUCLEAN
-+case EUCLEAN:return 117;
-+#endif
-+#ifdef ENOTNAM
-+case ENOTNAM:return 118;
-+#endif
-+#ifdef ENAVAIL
-+case ENAVAIL:return 119;
-+#endif
-+#ifdef EISNAM
-+case EISNAM:return 120;
-+#endif
-+#ifdef EREMOTEIO
-+case EREMOTEIO:return 121;
-+#endif
-+#ifdef EDQUOT
-+case EDQUOT:return 122;
-+#endif
-+#ifdef ENOMEDIUM
-+case ENOMEDIUM:return 123;
-+#endif
-+#ifdef EMEDIUMTYPE
-+case EMEDIUMTYPE:return 124;
-+#endif
-+#ifdef ECANCELED
-+case ECANCELED:return 125;
-+#endif
-+#ifdef ENOKEY
-+case ENOKEY:return 126;
-+#endif
-+#ifdef EKEYEXPIRED
-+case EKEYEXPIRED:return 127;
-+#endif
-+#ifdef EKEYREVOKED
-+case EKEYREVOKED:return 128;
-+#endif
-+#ifdef EKEYREJECTED
-+case EKEYREJECTED:return 129;
-+#endif
-+#ifdef EOWNERDEAD
-+case EOWNERDEAD:return 130;
-+#endif
-+#ifdef ENOTRECOVERABLE
-+case ENOTRECOVERABLE:return 131;
-+#endif
-+#ifdef ERFKILL
-+case ERFKILL:return 132;
-+#endif
-+#ifdef EHWPOISON
-+case EHWPOISON:return 133;
-+#endif
-+#if defined(ENOTSUP) && ENOTSUP != EOPNOTSUPP
-+case ENOTSUP:return 95;
-+#endif
-+default:return 5;}}
-+
-+static int fail(int error){socket_error=guest_errno(error);return -1;}
-+static int result(int value){if(value<0)socket_error=guest_errno(errno);return value;}
-+int dm_lan_socket_errno(void){return socket_error;}
-+void dm_lan_socket_set_errno(int error){socket_error=error;}
-+static int allocate(int fd){if(fd<0)return result(-1);pthread_mutex_lock(&socket_mutex);for(int i=0;i<MAX_GUEST_FDS;i++)if(!sockets[i]){sockets[i]=fd+1;pthread_mutex_unlock(&socket_mutex);return i;}pthread_mutex_unlock(&socket_mutex);close(fd);return fail(EMFILE);}
-+static int acquire(int guest){pthread_mutex_lock(&socket_mutex);int fd=-1;if(guest>=0&&guest<MAX_GUEST_FDS&&sockets[guest])fd=dup(sockets[guest]-1);else errno=EBADF;pthread_mutex_unlock(&socket_mutex);if(fd<0)socket_error=guest_errno(errno);return fd;}
-+static int finish(int fd,int value){int e=errno;close(fd);if(value<0)socket_error=guest_errno(e);return value;}
-+static int bind_source(int fd){struct sockaddr_in current;socklen_t length=sizeof(current);if(getsockname(fd,(struct sockaddr*)&current,&length))return -1;if(!current.sin_addr.s_addr&&!current.sin_port){uint32_t ip,mask;if(dm_lan_ipv4(&ip,&mask)){errno=ENETDOWN;return -1;}current.sin_len=sizeof(current);current.sin_family=AF_INET;current.sin_addr.s_addr=htonl(ip);return bind(fd,(struct sockaddr*)&current,sizeof(current));}return 0;}
-+static long finish_long(int fd,ssize_t value){int e=errno;close(fd);if(value<0)socket_error=guest_errno(e);return value;}
-+static int address_in(struct sockaddr_in*out,const void*raw,unsigned length,int binding){
-+    if(!raw||length<16)return fail(EINVAL);const uint8_t*p=raw;
-+    if(p[1]!=AF_INET||(p[0]&&p[0]!=16))return fail(EAFNOSUPPORT);
-+    memset(out,0,sizeof(*out));out->sin_len=sizeof(*out);out->sin_family=AF_INET;memcpy(&out->sin_port,p+2,2);memcpy(&out->sin_addr.s_addr,p+4,4);
-+    uint32_t ip=0,mask=0;if(dm_lan_ipv4(&ip,&mask))return fail(ENETDOWN);
-+    if(binding){if(!out->sin_addr.s_addr)out->sin_addr.s_addr=htonl(ip);else if(out->sin_addr.s_addr!=htonl(ip)&&(ntohl(out->sin_addr.s_addr)>>24)!=127)return fail(EADDRNOTAVAIL);}
-+    else if(!dm_lan_peer_allowed(out->sin_addr.s_addr,1))return fail(EACCES);
-+    return 0;
-+}
-+static void address_out(void*raw,unsigned*length,const struct sockaddr_in*address){if(!length)return;unsigned n=*length<16?*length:16;if(raw&&n){uint8_t p[16]={16,AF_INET};memcpy(p+2,&address->sin_port,2);memcpy(p+4,&address->sin_addr.s_addr,4);memcpy(raw,p,n);}*length=16;}
-+static int flags_in(int flags){/* FreeBSD and Darwin agree on these message flags. NOSIGNAL is implemented with SO_NOSIGPIPE. */if(flags&~(0x1|0x2|0x4|0x10|0x40|0x80|0x20000))return fail(EOPNOTSUPP);return flags&~0x20000;}
-+int dm_lan_socket(int family,int type,int protocol){uint32_t ip,mask;if(dm_lan_ipv4(&ip,&mask))return fail(ENETDOWN);if(family!=AF_INET||(type!=SOCK_STREAM&&type!=SOCK_DGRAM)||(protocol!=0&&protocol!=IPPROTO_TCP&&protocol!=IPPROTO_UDP))return fail(EAFNOSUPPORT);int fd=socket(AF_INET,type,protocol);if(fd<0)return result(-1);int on=1;setsockopt(fd,SOL_SOCKET,SO_NOSIGPIPE,&on,sizeof(on));fcntl(fd,F_SETFD,FD_CLOEXEC);return allocate(fd);}
-+int dm_lan_socket_close(int guest){pthread_mutex_lock(&socket_mutex);int fd=-1;if(guest>=0&&guest<MAX_GUEST_FDS&&sockets[guest]){fd=sockets[guest]-1;sockets[guest]=0;}pthread_mutex_unlock(&socket_mutex);if(fd<0)return fail(EBADF);shutdown(fd,SHUT_RDWR);return result(close(fd));}
-+void dm_lan_socket_finalize(void){for(int i=0;i<MAX_GUEST_FDS;i++){pthread_mutex_lock(&socket_mutex);int used=sockets[i]!=0;pthread_mutex_unlock(&socket_mutex);if(used)dm_lan_socket_close(i);}}
-+void dm_lan_socket_revoke(uint32_t ip){pthread_mutex_lock(&socket_mutex);for(int i=0;i<MAX_GUEST_FDS;i++)if(sockets[i]){int fd=sockets[i]-1;struct sockaddr_in a;socklen_t n=sizeof(a);if(!getpeername(fd,(struct sockaddr*)&a,&n)&&a.sin_family==AF_INET&&a.sin_addr.s_addr==ip){/* LDN revokes transport, not the guest-owned BSD descriptor. */shutdown(fd,SHUT_RDWR);}}pthread_mutex_unlock(&socket_mutex);}
-+int dm_lan_socket_shutdown(int guest,int how){int fd=acquire(guest);if(fd<0)return -1;return finish(fd,shutdown(fd,how));}
-+int dm_lan_socket_bind(int guest,const void*address,unsigned length){struct sockaddr_in a;if(address_in(&a,address,length,1))return -1;int fd=acquire(guest);if(fd<0)return -1;return finish(fd,bind(fd,(struct sockaddr*)&a,sizeof(a)));}
-+int dm_lan_socket_connect(int guest,const void*address,unsigned length){struct sockaddr_in a;if(address_in(&a,address,length,0))return -1;int fd=acquire(guest);if(fd<0)return -1;if(bind_source(fd))return finish(fd,-1);return finish(fd,connect(fd,(struct sockaddr*)&a,sizeof(a)));}
-+int dm_lan_socket_listen(int guest,int backlog){int fd=acquire(guest);if(fd<0)return -1;return finish(fd,listen(fd,backlog));}
-+int dm_lan_socket_accept(int guest,void*address,unsigned*length){int fd=acquire(guest);if(fd<0)return -1;struct sockaddr_in a;socklen_t n=sizeof(a);int accepted=accept(fd,(struct sockaddr*)&a,&n);int e=errno;close(fd);if(accepted<0)return fail(e);if(a.sin_family!=AF_INET||!dm_lan_peer_allowed(a.sin_addr.s_addr,0)){close(accepted);return fail(EACCES);}int on=1;setsockopt(accepted,SOL_SOCKET,SO_NOSIGPIPE,&on,sizeof(on));address_out(address,length,&a);return allocate(accepted);}
-+long dm_lan_socket_send(int guest,const void*buffer,size_t n,int flags){int f=flags_in(flags);if(f<0)return -1;int fd=acquire(guest);if(fd<0)return -1;return finish_long(fd,send(fd,buffer,n,f));}
-+long dm_lan_socket_recv(int guest,void*buffer,size_t n,int flags){int f=flags_in(flags);if(f<0)return -1;int fd=acquire(guest);if(fd<0)return -1;return finish_long(fd,recv(fd,buffer,n,f));}
-+long dm_lan_socket_sendto(int guest,const void*buffer,size_t n,int flags,const void*address,unsigned length){int f=flags_in(flags);if(f<0)return -1;struct sockaddr_in a;if(address_in(&a,address,length,0))return -1;int fd=acquire(guest);if(fd<0)return -1;if(bind_source(fd))return finish(fd,-1);return finish_long(fd,sendto(fd,buffer,n,f,(struct sockaddr*)&a,sizeof(a)));}
-+long dm_lan_socket_recvfrom(int guest,void*buffer,size_t n,int flags,void*address,unsigned*length){int f=flags_in(flags);if(f<0)return -1;int fd=acquire(guest);if(fd<0)return -1;for(int attempt=0;attempt<16;attempt++){struct sockaddr_in a;socklen_t size=sizeof(a);ssize_t got=recvfrom(fd,buffer,n,f,(struct sockaddr*)&a,&size);if(got<0)return finish_long(fd,got);if(a.sin_family==AF_INET&&dm_lan_peer_allowed(a.sin_addr.s_addr,0)){address_out(address,length,&a);return finish_long(fd,got);}if(f&MSG_PEEK){errno=EACCES;return finish_long(fd,-1);}f|=MSG_DONTWAIT;}errno=EAGAIN;return finish_long(fd,-1);}
-+int dm_lan_socket_fcntl(int guest,int command,int value){int fd=acquire(guest);if(fd<0)return -1;int r;if(command==3){r=fcntl(fd,F_GETFL);if(r>=0)r=(r&~O_NONBLOCK)|((r&O_NONBLOCK)?G_NONBLOCK:0);}else if(command==4){int current=fcntl(fd,F_GETFL);r=current<0?-1:fcntl(fd,F_SETFL,(current&~O_NONBLOCK)|((value&G_NONBLOCK)?O_NONBLOCK:0));}else if(command==1)r=fcntl(fd,F_GETFD);else if(command==2)r=fcntl(fd,F_SETFD,value);else{errno=EINVAL;r=-1;}return finish(fd,r);}
-+int dm_lan_socket_poll(void*raw,uint64_t count,int timeout){if(count>MAX_GUEST_FDS||(!raw&&count))return fail(EINVAL);struct pollfd*g=raw,*native=calloc(count?count:1,sizeof(*native));if(!native)return fail(ENOMEM);for(size_t i=0;i<count;i++){native[i].fd=g[i].fd<0?-1:acquire(g[i].fd);native[i].events=g[i].events;g[i].revents=0;if(g[i].fd>=0&&native[i].fd<0)g[i].revents=POLLNVAL;}int invalid=0;for(size_t i=0;i<count;i++)invalid+=g[i].revents!=0;int r=poll(native,(nfds_t)count,invalid?0:timeout);int e=errno;if(r>=0){r=0;for(size_t i=0;i<count;i++){g[i].revents|=native[i].revents;r+=g[i].revents!=0;}}for(size_t i=0;i<count;i++)if(native[i].fd>=0)close(native[i].fd);free(native);if(r<0)socket_error=guest_errno(e);return r;}
-+static int bit(const uint32_t*set,int i){return set&&((set[i/32]>>(i%32))&1);}
-+static void setbit(uint32_t*set,int i){if(set)set[i/32]|=1u<<(i%32);}
-+int dm_lan_socket_select(int nfds,void*readset,void*writeset,void*errorset,void*tv){
-+    if(nfds<0||nfds>MAX_GUEST_FDS)return fail(EINVAL);struct pollfd*p=calloc(nfds?nfds:1,sizeof(*p));if(!p)return fail(ENOMEM);int count=0;
-+    for(int i=0;i<nfds;i++)if(bit(readset,i)||bit(writeset,i)||bit(errorset,i)){p[count].fd=i;p[count].events=(bit(readset,i)?POLLIN:0)|(bit(writeset,i)?POLLOUT:0)|(bit(errorset,i)?POLLPRI:0);count++;}
-+    int timeout=-1;if(tv){const int64_t*t=tv;if(t[0]<0||t[1]<0||t[1]>=1000000){free(p);return fail(EINVAL);}timeout=t[0]>INT_MAX/1000?INT_MAX:(int)(t[0]*1000+(t[1]+999)/1000);}
-+    int r=dm_lan_socket_poll(p,count,timeout);if(r>=0){if(readset)memset(readset,0,128);if(writeset)memset(writeset,0,128);if(errorset)memset(errorset,0,128);r=0;for(int j=0;j<count;j++){int i=p[j].fd,e=p[j].revents;if(e&POLLNVAL){r=fail(EBADF);break;}if((p[j].events&POLLIN)&&(e&(POLLIN|POLLHUP|POLLERR))){setbit(readset,i);r++;}if((p[j].events&POLLOUT)&&(e&(POLLOUT|POLLERR))){setbit(writeset,i);r++;}if((p[j].events&POLLPRI)&&(e&POLLPRI)){setbit(errorset,i);r++;}}}free(p);return r;
-+}
-+int dm_lan_socket_option(int guest,int level,int option,void*value,unsigned*length,int set){
-+    if(!length||(!value&&*length))return fail(EINVAL);int fd=acquire(guest);if(fd<0)return -1;int r;
-+    if(level==0xffff&&(option==0x1005||option==0x1006)){
-+        if(*length<16||(set&&*length!=16)){close(fd);return fail(EINVAL);}int64_t v[2];struct timeval t={0};
-+        if(set){memcpy(v,value,16);if(v[0]<0||v[1]<0||v[1]>=1000000){close(fd);return fail(EINVAL);}t.tv_sec=v[0];t.tv_usec=(int)v[1];r=setsockopt(fd,level,option,&t,sizeof(t));}
-+        else{socklen_t n=sizeof(t);r=getsockopt(fd,level,option,&t,&n);if(!r){v[0]=t.tv_sec;v[1]=t.tv_usec;memcpy(value,v,16);*length=16;}}
-+    }else{socklen_t n=*length;r=set?setsockopt(fd,level,option,value,n):getsockopt(fd,level,option,value,&n);*length=n;}if(!set&&!r&&level==0xffff&&option==0x1007&&*length>=sizeof(int)){int error;memcpy(&error,value,sizeof(error));error=guest_errno(error);memcpy(value,&error,sizeof(error));}
-+    return finish(fd,r);
-+}
-+int dm_lan_socket_name(int guest,void*address,unsigned*length,int peer){if(!length)return fail(EINVAL);int fd=acquire(guest);if(fd<0)return -1;struct sockaddr_in a;socklen_t n=sizeof(a);int r=peer?getpeername(fd,(struct sockaddr*)&a,&n):getsockname(fd,(struct sockaddr*)&a,&n);if(!r)address_out(address,length,&a);return finish(fd,r);}
-+
-+/* Horizon's addrinfo has canonname before addr (the reverse of Darwin). */
-+typedef struct guest_ai { int flags,family,type,protocol; uint32_t length,pad;char*canonname;void*address;struct guest_ai*next; } guest_ai;
-+_Static_assert(sizeof(guest_ai)==48,"Horizon addrinfo");
-+int dm_lan_getaddrinfo(const char*host,const char*service,const void*hint,void**out){
-+    if(!out)return 4;*out=NULL;const guest_ai*h=hint;if(h&&h->family!=0&&h->family!=AF_INET)return 5;
-+    int type=h?h->type:0,protocol=h?h->protocol:0;if(type&&type!=SOCK_STREAM&&type!=SOCK_DGRAM)return 10;
-+    if(protocol&&protocol!=IPPROTO_TCP&&protocol!=IPPROTO_UDP)return 10;if(!type)type=protocol==IPPROTO_UDP?SOCK_DGRAM:SOCK_STREAM;
-+    if(protocol&&(protocol==IPPROTO_TCP)!=(type==SOCK_STREAM))return 10;if(!protocol)protocol=type==SOCK_STREAM?IPPROTO_TCP:IPPROTO_UDP;
-+    struct in_addr ip;if(!host)ip.s_addr=htonl(h&&(h->flags&1)?INADDR_ANY:INADDR_LOOPBACK);else if(!strcmp(host,"localhost"))ip.s_addr=htonl(INADDR_LOOPBACK);else if(inet_pton(AF_INET,host,&ip)!=1)return 8;
-+    if(ip.s_addr&&!dm_lan_peer_allowed(ip.s_addr,0))return 8;unsigned long port=0;if(service){char*end;port=strtoul(service,&end,10);if(*end||port>65535)return 9;}
-+    guest_ai*a=calloc(1,sizeof(*a)+16);if(!a)return 6;a->flags=h?h->flags:0;a->family=AF_INET;a->type=type;a->protocol=protocol;a->length=16;a->address=a+1;
-+    uint8_t*p=a->address;p[0]=16;p[1]=AF_INET;uint16_t net=htons(port);memcpy(p+2,&net,2);memcpy(p+4,&ip.s_addr,4);*out=a;return 0;
-+}
-+void dm_lan_freeaddrinfo(void*value){guest_ai*a=value;while(a){guest_ai*next=a->next;free(a);a=next;}}
-+void*dm_lan_gethostbyname(const char*host){static __thread struct {char*name;char**aliases;int type,length;char**addresses;} entry;static __thread char name[64],*aliases[1],*addresses[2];static __thread struct in_addr ip;if(!host)return NULL;if(!strcmp(host,"localhost"))ip.s_addr=htonl(INADDR_LOOPBACK);else if(inet_pton(AF_INET,host,&ip)!=1){socket_error=guest_errno(ENOENT);return NULL;}if(!dm_lan_peer_allowed(ip.s_addr,0)){socket_error=guest_errno(EACCES);return NULL;}snprintf(name,sizeof(name),"%s",host);aliases[0]=NULL;addresses[0]=(char*)&ip;addresses[1]=NULL;entry.name=name;entry.aliases=aliases;entry.type=AF_INET;entry.length=4;entry.addresses=addresses;return &entry;}
 diff --git a/dm/host/hle_misc.c b/dm/host/hle_misc.c
 index 5f86515..ea4cf72 100644
 --- a/dm/host/hle_misc.c
@@ -2919,95 +1751,6 @@ index 96d2674..579e8ae 100644
  void hle_signal_system_event(void *ev) {   // An unbound one is bound on the spot as manual-clear (can only happen on a guest thread)
      pthread_mutex_lock(&g_se_lock); uint32_t wh = se_find(ev); pthread_mutex_unlock(&g_se_lock);
      if (!wh) { hle_bind_system_event(ev, 0); pthread_mutex_lock(&g_se_lock); wh = se_find(ev); pthread_mutex_unlock(&g_se_lock); }
-diff --git a/dm/host/lan_native.h b/dm/host/lan_native.h
-new file mode 100644
-index 0000000..00d42c8
---- /dev/null
-+++ b/dm/host/lan_native.h
-@@ -0,0 +1,83 @@
-+/* Native LAN transport. Guest structures are the locked DR3 SDK ABI, not wire structs. */
-+#pragma once
-+#include <stdint.h>
-+#include <stddef.h>
-+#include <sys/types.h>
-+
-+enum { DM_LAN_NONE, DM_LAN_INITIALIZED, DM_LAN_AP, DM_LAN_AP_CREATED,
-+       DM_LAN_STATION, DM_LAN_CONNECTED, DM_LAN_ERROR };
-+typedef struct { int64_t communication_id; uint8_t reserved[2]; uint16_t scene_id; uint8_t reserved2[4]; } dm_lan_intent;
-+typedef struct { dm_lan_intent intent; uint8_t session[16]; } dm_lan_network_id;
-+typedef struct { uint8_t length; char text[33]; } dm_lan_ssid;
-+typedef struct { uint8_t bssid[6]; dm_lan_ssid ssid; int16_t channel; int8_t link_level; uint8_t type; uint8_t reserved[4]; } dm_lan_common;
-+typedef struct { uint32_t ipv4; uint8_t mac[6]; int8_t id; uint8_t connected; char name[33]; uint8_t reserved0; int16_t version; uint8_t reserved[16]; } dm_lan_node;
-+typedef struct {
-+    dm_lan_network_id id; dm_lan_common common; uint8_t server_random[16];
-+    uint16_t security_mode; uint8_t accept_policy, version, reserved0[2];
-+    int8_t node_count_max; uint8_t node_count; dm_lan_node nodes[8];
-+    uint8_t reserved1[2]; uint16_t advertise_size; uint8_t advertise[384];
-+    uint8_t reserved2[140]; uint64_t reserved3;
-+} dm_lan_network_info;
-+typedef struct { dm_lan_network_id id; uint32_t type; uint8_t bssid[6]; dm_lan_ssid ssid; uint8_t reserved[16]; uint32_t flags; } dm_lan_scan_filter;
-+typedef struct { uint16_t mode, passphrase_size; uint8_t passphrase[64]; } dm_lan_security;
-+typedef struct { char name[33]; uint8_t reserved[15]; } dm_lan_user;
-+typedef struct { dm_lan_intent intent; int16_t channel; int8_t max_nodes; uint8_t reserved; int16_t version; uint8_t reserved2[10]; } dm_lan_network_config;
-+typedef struct { uint8_t changed, reserved[7]; } dm_lan_node_update;
-+
-+_Static_assert(sizeof(dm_lan_network_info)==0x480,"LDN NetworkInfo ABI");
-+_Static_assert(offsetof(dm_lan_network_info,nodes)==0x68,"LDN NodeInfo offset");
-+_Static_assert(offsetof(dm_lan_network_info,advertise)==0x26c,"LDN advertise offset");
-+_Static_assert(sizeof(dm_lan_node)==0x40,"LDN NodeInfo ABI");
-+_Static_assert(sizeof(dm_lan_scan_filter)==0x60,"LDN ScanFilter ABI");
-+_Static_assert(sizeof(dm_lan_network_config)==0x20,"LDN NetworkConfig ABI");
-+
-+int dm_lan_initialize(void);
-+int dr3_lan_supported(void);
-+void dm_lan_finalize(void);
-+int dm_lan_state(void);
-+int dm_lan_open(int access_point);
-+int dm_lan_close(int access_point);
-+int dm_lan_create(const dm_lan_network_config *,const dm_lan_security *,const dm_lan_user *);
-+int dm_lan_connect(const dm_lan_network_info *,const dm_lan_security *,const dm_lan_user *,int version,int option);
-+int dm_lan_disconnect(int destroy);
-+int dm_lan_advertise(const void *,size_t);
-+int dm_lan_scan(dm_lan_network_info *,int *,int,const dm_lan_scan_filter *,int);
-+int dm_lan_info(dm_lan_network_info *,dm_lan_node_update *,int);
-+int dm_lan_ipv4(uint32_t *,uint32_t *);
-+int dm_lan_disconnect_reason(void);
-+int dm_lan_set_accept_policy(int);
-+void dm_lan_suspend(int);
-+void dm_lan_set_change_handler(void (*handler)(void));
-+uint16_t dm_lan_control_port(void);
-+/* Discovery implementations supply network-order IPv4/port. No metadata is trusted until JOIN authentication. */
-+void dm_lan_discovered(uint32_t ipv4,uint16_t port);
-+void dm_lan_discovery_status(int ready,const char *reason);
-+void dm_lan_discovery_start(uint16_t port);
-+void dm_lan_discovery_publish(int on,uint16_t port,const char *name);
-+void dm_lan_discovery_stop(void);
-+int dm_lan_discovery_available(void);
-+int dm_lan_peer_allowed(uint32_t network_order_ipv4,int broadcast);
-+
-+int dm_lan_socket(int,int,int);
-+int dm_lan_socket_close(int);
-+int dm_lan_socket_shutdown(int,int);
-+int dm_lan_socket_bind(int,const void *,unsigned);
-+int dm_lan_socket_connect(int,const void *,unsigned);
-+int dm_lan_socket_listen(int,int);
-+int dm_lan_socket_accept(int,void *,unsigned *);
-+long dm_lan_socket_send(int,const void *,size_t,int);
-+long dm_lan_socket_recv(int,void *,size_t,int);
-+long dm_lan_socket_sendto(int,const void *,size_t,int,const void *,unsigned);
-+long dm_lan_socket_recvfrom(int,void *,size_t,int,void *,unsigned *);
-+int dm_lan_socket_fcntl(int,int,int);
-+int dm_lan_socket_poll(void *,uint64_t,int);
-+int dm_lan_socket_select(int,void *,void *,void *,void *);
-+int dm_lan_socket_option(int,int,int,void *,unsigned *,int);
-+int dm_lan_socket_name(int,void *,unsigned *,int);
-+int dm_lan_socket_errno(void);
-+void dm_lan_socket_set_errno(int);
-+void dm_lan_socket_finalize(void);
-+void dm_lan_socket_revoke(uint32_t network_order_ipv4);
-+int dm_lan_getaddrinfo(const char *,const char *,const void *,void **);
-+void dm_lan_freeaddrinfo(void *);
-+void *dm_lan_gethostbyname(const char *);
 diff --git a/dm/host/loader.c b/dm/host/loader.c
 index e237a24..2fe8d62 100644
 --- a/dm/host/loader.c
@@ -3067,8 +1810,31 @@ index e237a24..2fe8d62 100644
      // Patch area before the base (patch_off < 0): W ends at the end of data (FILE_IMAGE_LEN); bss and the key page are zero pages from vm_allocate and are not in the executable
      int front = m->patch_off < 0;
      if (z0 + zw != (front ? m->file_image_len : (uint64_t)m->patch_off) || (z0 & 0x3FFF) || (zw & 0x3FFF) || (z1 & 0x3FFF) || ((uintptr_t)x0 & 0x3FFF) || ((uintptr_t)w & 0x3FFF) || ((uintptr_t)x1 & 0x3FFF))
+diff --git a/dm/host/thread.c b/dm/host/thread.c
+index 4d22880..0be9257 100644
+--- a/dm/host/thread.c
++++ b/dm/host/thread.c
+@@ -14,9 +14,16 @@ static void own_key_init(void) { if (pthread_key_create(&g_keyown, own_free)) di
+ void guest_thread_init(void) {
+     pthread_setspecific(g_keygate, (void *)dm_gate);
+     for (int i = 0; i < 2; i++) if (g_keyres[i]) pthread_setspecific(g_keyres[i], (void *)dm_game_res(i));   // resolution parameter slot: {u32 width, u32 height} packed
+-    if (g_keyaspect || g_keyaspectui) {   // aspect ratio limit parameter slot: max(19/9, output width / height of the two modes), float bit pattern in the low 32 bits
++    if (g_keyaspect || g_keyaspectui) {   // D2R: aspect ratio limit parameter slot = max(19/9, output width / height of the two modes), float bit pattern in the low 32 bits;
++        // D3: the slot is the camera's direct input (Perspective cot(vfov/2)/aspect), take the handheld mode ratio itself, no 19/9 limit, no UI margin (D3 has no side-pillar logic)
++        int d3 = !strcmp(dm_main_build(), DM_D3_BUILD);
+         float a = 19.0f / 9.0f; int wide = 0;
+-        for (int i = 0; i < 2; i++) { uint64_t r = front_game_res(i); float w = (float)(uint32_t)r, h = (float)(uint32_t)(r >> 32); if (h > 0 && w / h > a) { a = w / h; wide = 1; } }
++        for (int i = 0; i < 2; i++) {
++            uint64_t r = front_game_res(i); float w = (float)(uint32_t)r, h = (float)(uint32_t)(r >> 32);
++            if (!h) continue;
++            if (d3) { if (!i) { a = w / h; } }   // mode 0 = handheld
++            else if (w / h > a) { a = w / h; wide = 1; }
++        }
+         // Limit of the UI side-pillar shader: when the screen is wider than 19:9 add another 0.15, pushing the pillars' inward soft edge off the screen; 16:9 is unchanged.
+         // Derivation: pillar inner edge x = screen height * limit / 2, so for every delta added to the limit the inner edge moves outward by screen height * delta / 2 on each side. Measured on Mac 1952x900, the soft edge is <= 30 pixels wide
+         // (with limit = screen aspect ratio, columns 0–20 at the right edge fade from black to bright, and it disappears once the limit is pushed to 2.4) => need delta >= 2 * 30 / 900 ~ 0.067; 0.15 is taken (about 67 pixels outward per side), leaving more than double the margin.
 diff --git a/dm/tools/patch_nso.py b/dm/tools/patch_nso.py
-index 837700c..4cb657c 100644
+index 837700c..e7019d8 100644
 --- a/dm/tools/patch_nso.py
 +++ b/dm/tools/patch_nso.py
 @@ -680,7 +680,12 @@ for a in sorted(kinds):
@@ -3085,3 +1851,90 @@ index 837700c..4cb657c 100644
      put_branch(a, st)
  
  # Private visual branch; not OBS, 0x85 is a read-only query. Only this experimental build explicitly opts in; the original Qty/children and Update are unchanged.
+@@ -833,7 +838,16 @@ PARAMS = {'db0507f36b84200ac05f75d76ed5026f': [
+     (0x1663ee8, '52838e49', 0x1663eec, '72a800e9', 9, 'KASPECTUI', '界面常量缓冲 0x15 号槽 [屏宽, 屏高, 宽高比上限]：界面精灵着色器按它在上限以外画两侧黑柱（带约 20–30 像素向内的柔边，宿主另加余量把柔边推出屏幕）'),
+     (0xb152bc, '52838e48', 0xb152c0, '72a800e8', 8, 'KASPECT', '新画面模式视口：边距 = (屏宽 − 屏高 × 上限) / 2，经 0x85bc90 设居中视口'),
+     (0x23e888, '52838e48', 0x23e88c, '72a800e8', 8, 'KASPECT', '新画面模式坐标钳制（0x23e760）：x 夹进 [边距, 边距 + 屏高 × 上限]，宽屏两侧的指针 / 触摸不再被夹回中间'),
+-]}
++    ],
++    # ---- Diablo III 2.7.7（2607a74f）：启动初始化选渲染分辨率 / 显示宽高比（tools/mobile_graphics_profile.py 逐字清点过，与其 SITES 一致；三对相邻 mov+movk）----
++    # 宿主按屏幕给值：16:9 原值行为不变；iPhone / iPad 原生比例给原生值，游戏按原生渲染（UI 投影随尺寸、镜头随宽高比）。
++    # 相邻性前提（A、B 之间不碰本对寄存器）在下方循环里逐条断言；D3 的 16:9 约束谓词与贴图查询比例在循环后以仅宿主剪口放行。
++    '2607a74f5df7754cc0357b5df7e49693': [
++        (0xe7858, 'd280c808', 0xe7860, 'f2c07088', 8, 'KRES1', '启动初始化：主机模式渲染分辨率 {u32 宽, u32 高} 打包（原 1600x900）'),
++        (0xe785c, 'd280a009', 0xe7864, 'f2c05a09', 9, 'KRES0', '启动初始化：掌机模式渲染分辨率（原 1280x720）'),
++        (0xe7868, '5291c72a', 0xe786c, '72a7fc6a', 10, 'KASPECT', '启动初始化：显示宽高比（浮点位型低 32 位；Perspective cot(vfov/2)/aspect、UI 投影同源）'),
++    ],
++}
+ params = PARAMS.get(BUILD_ID, [])
+ for oa, wa, ob_, wb, r, key, why in params:
+     for o, w0 in ((oa, wa), (ob_, wb)):
+@@ -847,6 +861,20 @@ for oa, wa, ob_, wb, r, key, why in params:
+     tmp = 16 if r != 16 else 17
+     emit(STUR(tmp, 31, -16)); emit(MRS_TPIDRRO(r)); emit_slot_addr(r, tmp, key); emit(LDRX(r, r)); emit(LDUR(tmp, 31, -16)); emit(B(here(), oa + 4))
+     struct.pack_into('<I', IMG, oa, B(oa, start)); struct.pack_into('<I', IMG, ob_, NOP); stat('param')
++# Diablo III 的仅宿主放行（与 mobile_graphics_profile.SITES 逐字一致）：渲染几何已交给参数槽，
++# 这三处只解除原版 16:9 鉴定与贴图查询的 0.8 折算；16:9 值下结果与原版相同（谓词本就通过、模式尺寸相等要求 1.0）。
++if BUILD_ID == '2607a74f5df7754cc0357b5df7e49693':
++    for o, old, new, why in (
++        (0x29b480, 0xb00075a8, 0x52800000, '鉴定 16:9 约束谓词入口 → mov w0,#0（参数槽宽高比下原生比例放行）'),
++        (0x29b484, 0xf9423908, 0xd65f03c0, '鉴定 16:9 约束谓词返回 → ret'),
++        (0xebb48, 0xbd484101, 0x1e2e1001, '贴图 full/half/quarter 掌机查询比例 → fmov s1,#1.0（模式尺寸相等要求 1.0）'),
++    ):
++        w = struct.unpack_from('<I', IMG, o)[0]
++        assert w == old, f'D3 仅宿主剪口原字不符 {o:#x}：{w:08x}'
++        assert o not in kinds and not any(seg[0].address <= o < seg[-1].address + 4 for seg in windows), f'D3 仅宿主剪口与改写点冲突 {o:#x}'
++        struct.pack_into('<I', IMG, o, new)
++        # cuts.tsv 的两列 hex 是字节序列（structck bytes.fromhex 后与映像原样比对），不是字值
++        cuts.append((o, struct.pack('<I', old).hex(), struct.pack('<I', new).hex(), why, '仅宿主')); stat('d3_param_cut')
+ 
+ # The three existing native rule trampolines all use only the dead temporary w8 that is overwritten afterwards, and do not change the w0/stat return, sp or NZCV.
+ # 6c6290 is after the original mode3 gate; the Blaze / reference count and data invalidation 6c62dc branches before it and the state update after it are untouched.
+@@ -893,38 +921,38 @@ if FAR:   # patch area before the base: file = text + ro + data (padded to 16K)
+ else:
+     open(P('patched.bin'), 'wb').write(IMG + bytearray(PATCH_OFF - len(IMG)) + patch)
+ import hashlib
+-with open(os.path.join(outdir, 'build_src.sha256'), 'w') as f:
++with open(os.path.join(outdir, 'build_src.sha256'), 'w', encoding='utf-8', newline='') as f:
+     f.write(hashlib.sha256(open(os.path.abspath(__file__), 'rb').read()).hexdigest() + '  patch_nso.py\n')
+ if PRIVATE_AIM:
+-    with open(P('aim.tsv'), 'w') as f:
++    with open(P('aim.tsv'), 'w', encoding='utf-8', newline='') as f:
+         f.write('# RULESET\tskill-aim-v1-private\n# ORIGINAL_CALL\t0x2faf04\t97fee7fd\n# ORIGINAL_CALLEE\t0x2b4ef8\n# SKILL_CALLER\t0x2b5b80\n# SVC\t0x86\n# INPUT\tactual GetNpad sampled right; move axis unchanged\n')
+         f.write('# IMAGE_SHA256\t'+hashlib.sha256(open(P('patched.bin'),'rb').read()).hexdigest()+'\n')
+ if RULE_RUN:
+-    with open(P('rules.tsv'), 'w') as f:
++    with open(P('rules.tsv'), 'w', encoding='utf-8', newline='') as f:
+         f.write(f'# RULESET\t{RULESET}\n# BUILD_ID\t{BUILD_ID}\n# ORIGINAL_SHA256\t{RULE_ORIG_SHA}\n# IMAGE_SHA256\t{hashlib.sha256(open(P("patched.bin"), "rb").read()).hexdigest()}\n')
+         for off, raw, why in rule_blocks: f.write(f'{off:#x}\t{raw}\t{hashlib.sha256(bytes.fromhex(raw)).hexdigest()}\t{why}\n')
+ elif os.path.exists(P('rules.tsv')):
+     os.unlink(P('rules.tsv'))  # When rebuilding native, clear this module's old rule registration so the old manifest does not leak into the original-resource domain
+-with open(P('fixups.tsv'), 'w') as f:
++with open(P('fixups.tsv'), 'w', encoding='utf-8', newline='') as f:
+     f.write(f'# PATCH_OFF\t{PATCH_OFF:#x}\n# KEY_PAGE_OFF\t{KEY_PAGE_OFF:#x}\n# KEY_PAGE_SIZE\t0x4000\n# TEXT_END\t{TEXT_END:#x}\n# RO_OFF\t{RO_OFF:#x}\n# DATA_OFF\t{DATA_OFF:#x}\n')
+     if FAR: f.write(f'# IMAGE_SIZE\t{IMAGE_SIZE:#x}\n# FILE_IMAGE_LEN\t{FILE_IMAGE_LEN:#x}\n')   # patch area before the base (negative PATCH_OFF): whole image size, length of the image part of the file
+     for k in KEY_INDEX: f.write(f'# KEY_{k}_IDX\t{KEY_INDEX[k]}\n')
+     f.write(f'# BUILD_ID\t{BUILD_ID}\n')   # the host identifies the build by it: features with hard-coded addresses only run on the build they belong to
+-with open(P('gates.tsv'), 'w') as f:
++with open(P('gates.tsv'), 'w', encoding='utf-8', newline='') as f:
+     for ret, k, arg, orig in gates: f.write(f'{ret:#x}\t{k}\t{arg}\t{orig:#x}\n')
+-with open(P('sites.tsv'), 'w') as f:
++with open(P('sites.tsv'), 'w', encoding='utf-8', newline='') as f:
+     for a in sorted(kinds):
+         if a not in done: f.write(f'{a:#x}\t{kinds[a][0]}\n')
+     for wseg in windows: f.write(f'{wseg[0].address:#x}\tW\t{wseg[-1].address + 4:#x}\n')
+     for a, (b, c) in jumps.items(): f.write(f'{a:#x}\tJ\t{b:#x}\t{c}\n')
+     for a, tgt in tabjumps.items(): f.write(f'{a:#x}\tT\t' + ' '.join(f'{t:#x}' for t in tgt) + '\n')   # offset-table jump and all its targets
+-with open(P('cuts.tsv'), 'w') as f:
++with open(P('cuts.tsv'), 'w', encoding='utf-8', newline='') as f:
+     f.write(f'# BUILD_ID\t{BUILD_ID}\n')
+     for off, ob, nb, why, scope in cuts: f.write(f'{off:#x}\t{ob}\t{nb}\t{scope}\t{why}\n')   # Columns: offset, original bytes, new bytes, scope, reason
+-with open(P('params.tsv'), 'w') as f:
++with open(P('params.tsv'), 'w', encoding='utf-8', newline='') as f:
+     f.write(f'# BUILD_ID\t{BUILD_ID}\n')
+     for oa, wa, ob_, wb, r, key, why in params: f.write(f'{oa:#x}\t{ob_:#x}\tx{r}\t{key}\t{why}\n')
+-with open(P('obs.tsv'), 'w') as f:
++with open(P('obs.tsv'), 'w', encoding='utf-8', newline='') as f:
+     f.write(f'# BUILD_ID\t{BUILD_ID}\n')
+     for off, oid, ow, why in obs: f.write(f'{off:#x}\t{oid}\t{ow}\t{why}\n')
+ print(NAME, stats, 'cuts', len(cuts), 'obs', len(obs), 'patch', len(patch), 'PATCH_OFF', hex(PATCH_OFF), 'slot_refs', len(fix), 'gates', len(gates))

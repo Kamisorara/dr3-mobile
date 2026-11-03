@@ -32,21 +32,20 @@ static NSString *text(NSString *zh, NSString *en) {
     // HUD 默认关：Apple 的 libMTLHud 见到 MTL_HUD_ENABLED 存在就可能挂上（0 也不算关，得 unsetenv），
     // 出厂默认必须是"变量不存在"；想要的人拨开关，onPlay 里 setenv 1。
     [defaults registerDefaults:@{@"LaunchMetalHUD":@NO,@"LaunchMetalFX":@YES,@"LaunchLocalLAN":@YES}];
-    // 屏幕几何（横屏）：iPad ~1.44:1、iPhone ~1.9–2.2:1、16:9 屏正好 1.78——填充选项只对非 16:9 屏有意义，
-    // 宽屏映像 (1568×720≈2.18:1) 只在够宽的屏幕上提供。
+    // 屏幕几何（横屏）：iPad ~1.44:1、iPhone ~1.9–2.2:1、16:9 屏正好 1.78。
+    // 标准 = 16:9 完整；填充 = 放大裁边；适配 = 参数槽按屏幕比例原生渲染（零黑边零裁切，需要 pack 带 D3 参数槽）。
     CGSize nb=UIScreen.mainScreen.nativeBounds.size;
     CGFloat aspect=fmax(nb.width,nb.height)/fmin(nb.width,nb.height);
     BOOL fillAvailable=fabs(aspect/(16.0/9.0)-1.0)>=0.02;
-    BOOL wideHere=self.wideAvailable&&aspect>2.0;
-    self.mode=[[UISegmentedControl alloc] initWithItems:@[text(@"标准",@"Standard"),text(@"填充",@"Fill"),text(@"宽屏",@"Wide")]];
+    BOOL aspectHere=self.wideAvailable&&fillAvailable;   // wideAvailable 实为 aspect_available（main.m）；16:9 屏不需要
+    self.mode=[[UISegmentedControl alloc] initWithItems:@[text(@"标准",@"Standard"),text(@"填充",@"Fill"),text(@"适配",@"Aspect")]];
     NSInteger mode=0;
     if([defaults objectForKey:@"LaunchMode"]){mode=[defaults integerForKey:@"LaunchMode"];}
-    else if([defaults boolForKey:@"LaunchWide"]){mode=2;}   // 旧版本只存过 LaunchWide
     if(mode==1&&!fillAvailable)mode=0;
-    if(mode==2&&!wideHere)mode=0;
+    if(mode==2&&!aspectHere)mode=0;
     self.mode.selectedSegmentIndex=mode;
     [self.mode setEnabled:fillAvailable forSegmentAtIndex:1];
-    [self.mode setEnabled:wideHere forSegmentAtIndex:2];
+    [self.mode setEnabled:aspectHere forSegmentAtIndex:2];
     self.mode.accessibilityIdentifier=@"display-mode";
     [self.mode addTarget:self action:@selector(changed:) forControlEvents:UIControlEventValueChanged];
     self.hud=[UISwitch new];self.hud.on=[defaults boolForKey:@"LaunchMetalHUD"];
@@ -102,7 +101,7 @@ static NSString *text(NSString *zh, NSString *en) {
     if(section==1)return self.metalfx.on?text(@"720p 渲染，MetalFX 超分至 2K 输出。HUD 显示帧率与 GPU 数据。",@"Render at 720p and use MetalFX for 2K output. HUD shows frame rate and GPU data."):text(@"720p 渲染，直接适配屏幕。HUD 显示帧率与 GPU 数据。",@"Render at 720p and fit the display directly. HUD shows frame rate and GPU data.");
     switch(self.mode.selectedSegmentIndex){
         case 1:return text(@"放大铺满屏幕，画面边缘被裁掉（不丢存档，只裁显示）。",@"Scale up to fill the screen; picture edges are cropped (display only).");
-        case 2:return text(@"扩大左右视野并适配 HUD；图形负载会增加。",@"Expand the horizontal view and adapt the HUD. Increases GPU load.");
+        case 2:return text(@"按屏幕比例原生渲染，整屏无黑边无裁切；UI 布局随比例走。",@"Render at the screen's native ratio — the full screen, no bars, no cropping; UI layout follows the ratio.");
         default:return text(@"原版 16:9 画面完整保留，屏幕比例不匹配处留黑边。",@"Keep the full original 16:9 picture; bars remain where the screen ratio differs.");}
 }
 - (UITableViewCell *)tableView:(UITableView *)table cellForRowAtIndexPath:(NSIndexPath *)path {
