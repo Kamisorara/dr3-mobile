@@ -1,0 +1,46 @@
+name: Shell build
+# Build the unsigned, game-content-free shell (tools/shell_build.py): a build input that users
+# pack with their own game files on their own machine (tools/dr3_pack.py). No game files, keys,
+# shaders or derived content are needed or produced here.
+on:
+  workflow_dispatch:
+  push:
+    branches: [shell-build]
+    tags: ['shell-v*']
+permissions:
+  contents: read
+jobs:
+  shell:
+    # iOS 26 SDK required (platform/ios/project.yml deploymentTarget). macos-26 carries Xcode 26;
+    # adjust if GitHub renames the image.
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          brew install xcodegen
+      - name: Bootstrap pinned upstream
+        run: python3 tools/dr3.py bootstrap
+      - name: Build the shell
+        run: python3 tools/shell_build.py --out work/shell
+      - name: Upload shell
+        uses: actions/upload-artifact@v4
+        with:
+          name: DR3Mobile-shell-build-input
+          path: |
+            work/shell/DR3Mobile-shell-build-input.zip
+            work/shell/shell_manifest.txt
+          if-no-files-found: error
+      - name: Release (shell-v* tags only)
+        if: startsWith(github.ref, 'refs/tags/shell-v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            work/shell/DR3Mobile-shell-build-input.zip
+            work/shell/shell_manifest.txt

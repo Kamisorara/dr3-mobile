@@ -90,6 +90,11 @@ def bootstrap(_):
     if not applied:
         run(['git', 'apply', '--check', patch], WORK / 'logs/patch-check.log', cwd=UPSTREAM)
         run(['git', 'apply', patch], WORK / 'logs/patch.log', cwd=UPSTREAM)
+    shell_patch = ROOT / 'patches/shell.patch'
+    shell_done = subprocess.run(['git', 'apply', '--reverse', '--check', str(shell_patch)], cwd=UPSTREAM, capture_output=True).returncode == 0
+    if not shell_done:
+        run(['git', 'apply', '--check', shell_patch], WORK / 'logs/shell-patch-check.log', cwd=UPSTREAM)
+        run(['git', 'apply', shell_patch], WORK / 'logs/shell-patch.log', cwd=UPSTREAM)
     copy_native()
     game = UPSTREAM / 'dm/games' / TITLE
     game.mkdir(exist_ok=True)
