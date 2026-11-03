@@ -119,11 +119,17 @@ def bootstrap(_):
             def api(path):
                 req = urllib.request.Request('https://api.github.com' + path, headers={'Authorization': f'Bearer {token}', 'User-Agent': 'dr3-bootstrap'})
                 import time as _time
-                for attempt in range(4):   # GitHub API 偶发 5xx/断流：退避重试，别让一次抖动毁掉整次构建 | GitHub API throws sporadic 5xx: back off and retry so one hiccup does not kill the build
+                for attempt in range(4):   # GitHub API 偶发 5xx/断流/限流：退避重试，别让一次抖动毁掉整次构建 | GitHub API throws sporadic 5xx, dropouts and rate limits: back off and retry so one hiccup does not kill the build
                     try:
                         with urllib.request.urlopen(req, timeout=120) as resp:
                             return json.loads(resp.read())
                     except urllib.error.HTTPError as err:
+                        # 403 = 主/次级限流（带 Retry-After）或真权限错——按 Retry-After 或指数退避重试，
+                        # 末次立即抛（真权限错多等也无益）。429/5xx 同列。
+                        if err.code == 403 and attempt < 3:
+                            ra = err.headers.get('Retry-After') if err.headers else None
+                            _time.sleep(min(120.0, float(ra)) if ra and ra.isdigit() else 2 ** attempt * 2)
+                            continue
                         if err.code < 500 and err.code != 429 or attempt == 3: raise
                         _time.sleep(2 ** attempt * 2)
                     except (urllib.error.URLError, TimeoutError, ConnectionError) as err:
