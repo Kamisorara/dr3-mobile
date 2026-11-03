@@ -176,7 +176,10 @@ def main():
     payload.mkdir(); shutil.copytree(app_dir, payload / f'{APP_NAME}.app')
     zip_path = out / 'DR3Mobile-shell-build-input.zip'
     if zip_path.exists(): zip_path.unlink()
-    subprocess.run(['zip', '-qry', str(zip_path), 'Payload'], cwd=out, check=True)
+    import zipfile
+    with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_STORED) as zf:   # 原样存（不压缩）：IPA 惯例，签名的二进制压了也没省多少
+        for p in sorted(payload.rglob('*')):
+            zf.write(p, p.relative_to(out).as_posix())
     shutil.rmtree(payload)
     n = sum(1 for _ in app_dir.rglob('*') if _.is_file())
     print(f'[shell] {zip_path} ({zip_path.stat().st_size // 1024 // 1024} MB, {n} files); '
