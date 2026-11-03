@@ -16,6 +16,8 @@ jobs:
       - run: python3 tools/audit_public.py --all-history
       - run: pip install -r requirements.txt
       - name: Reconstruct source headers for graphics guards
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: python3 tools/dr3.py bootstrap
       - name: Synthetic checks without game files
         run: |
@@ -33,6 +35,8 @@ jobs:
           python-version: '3.12'
       - run: pip install -r requirements.txt
       - name: Reconstruct pinned source only
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: python3 tools/dr3.py bootstrap
       - name: Synthetic native tests without private corpus or Bonjour
         run: python3 -m unittest discover -s tests -v

@@ -26,6 +26,8 @@ jobs:
           pip install -r requirements.txt
           brew install xcodegen
       - name: Bootstrap pinned upstream
+        env:
+          GITHUB_TOKEN: ${{ github.token }}   # 上游孤儿提交只能经 GitHub API 树重建 | the pinned orphan commit is rebuilt through the GitHub API
         run: python3 tools/dr3.py bootstrap
       - name: Build the shell
         run: python3 tools/shell_build.py --out work/shell
