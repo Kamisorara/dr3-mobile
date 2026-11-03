@@ -29,6 +29,10 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}   # 上游孤儿提交只能经 GitHub API 树重建 | the pinned orphan commit is rebuilt through the GitHub API
         run: python3 tools/dr3.py bootstrap
+      - name: Chain inputs digest (diagnostics)
+        env:
+          DM_GAME: 01001B300B9BE000
+        run: python3 -I tools/chain_debug.py
       - name: Build the shell
         run: python3 tools/shell_build.py --out work/shell
       - name: Upload shell
