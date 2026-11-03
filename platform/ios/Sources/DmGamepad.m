@@ -15,14 +15,20 @@
 #include "game_profile.h"
 #include "DmTouchControlArt.h"
 
-enum { B_A = 0, B_B, B_X, B_Y, B_LS, B_RS, B_L, B_R, B_ZL, B_ZR, B_PLUS, B_MINUS, B_LEFT, B_UP, B_RIGHT, B_DOWN, B_N };
-enum { C_NONE = 0, C_STICK, C_DPAD, C_FACE, C_BTN, C_SWAP };   // which control a touch holds
+enum { B_A = 0, B_B, B_X, B_Y, B_LS, B_RS, B_L, B_R, B_ZL, B_ZR, B_PLUS, B_MINUS, B_BAG, B_MENU, B_LEFT, B_UP, B_RIGHT, B_DOWN, B_N };
+enum { C_NONE = 0, C_STICK, C_DPAD, C_FACE, C_BTN, C_SWAP, C_GAME };   // which control a touch holds; C_GAME = game-screen passthrough (hle_touch)
 
 static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
 static uint64_t g_touch_btn;
 static int32_t g_touch_lx, g_touch_ly, g_touch_rx, g_touch_ry;
 void dm_gamepad_start(void (*on_present)(int present));
 void dm_physical_gamepad_reset(void);
+// 游戏区触摸透传（hle_touch.c 合成 nn::hid::TouchScreenState，游戏 main 0x1b65260 原生读取）：
+// 坐标 = 出图画面归一化 [0,1)，原点左上；frame 由 front_ios 的 dm_ios_game_frame 提供（letterbox/适配几何都在里面）。
+// | Game-area touch passthrough: coordinates normalized to the output frame, origin top left.
+typedef struct { unsigned id; float x, y; } dm_touch;
+extern void dm_touch_set(const dm_touch *t, int n);
+extern CGRect dm_ios_game_frame(void);
 static void publish(void) {
     pthread_mutex_lock(&g_mu);
     dm_input_set(g_touch_btn, g_touch_lx, g_touch_ly, g_touch_rx, g_touch_ry);
@@ -49,7 +55,7 @@ static const CGFloat
     K_DPAD_GRAB = 1.3,                              // D-pad grab radius (times the outer edge)
     K_RSTICK_R = 60, K_RKNOB_R = 24,                // right stick: ring and knob radius
     K_CLICK_X = 102, K_CLICK_R = 17;                // L3 / R3: centre from the outer edge (level with ZL / ZR), radius
-static const int k_btns[] = {B_ZL, B_L, B_ZR, B_R, B_MINUS, B_PLUS, B_LS, B_RS};   // keys locked at touch-down (L3 / R3 only in the 3D layout)
+static const int k_btns[] = {B_ZL, B_L, B_ZR, B_R, B_MINUS, B_PLUS, B_BAG, B_MENU, B_LS, B_RS};   // keys locked at touch-down (L3 / R3 only in the 3D layout)
 static NSString *const k_layout_key = @"DmPadLayout";   // NSUserDefaults: 1 = 3D, 0 = 2D
 
 @interface DmGamepad : UIView
@@ -59,6 +65,7 @@ static __weak DmGamepad *g_view;
 @implementation DmGamepad {
     NSMapTable<UITouch *, NSNumber *> *_owner;     // touch → control (with the key for C_BTN or the stick for C_STICK, << 8)
     UITouch *_stick[2]; CGPoint _stickNow[2];      // the touch holding each stick and where it is now (0 left, 1 right)
+    NSMutableArray<UITouch *> *_gtouch;            // 游戏区透传触摸（有序，index = finger_id）| ordered game-area passthrough touches
     uint64_t _faceBits, _dpadBits, _btnBits;
     NSMapTable<UITouch *, NSNumber *> *_faceOf;    // which keys each touch on the diamond currently holds
     CAShapeLayer *_key[B_N]; CATextLayer *_label[B_N];   // one layer per key
@@ -90,6 +97,7 @@ static BOOL fullOnly(int b) { return b == B_LS || b == B_RS || b >= B_LEFT; }   
     if ((self = [super initWithFrame:f])) {
         self.multipleTouchEnabled = YES; self.opaque = NO; self.backgroundColor = UIColor.clearColor;
         _owner = [NSMapTable strongToStrongObjectsMapTable]; _faceOf = [NSMapTable strongToStrongObjectsMapTable];
+        _gtouch = [NSMutableArray array];
         static dispatch_once_t once;
         dispatch_once(&once, ^{
             // each colour carries its own low opacity instead of lowering the whole view's alpha (that would add an off-screen pass for the full-screen layer)
@@ -107,7 +115,7 @@ static BOOL fullOnly(int b) { return b == B_LS || b == B_RS || b >= B_LEFT; }   
             _knob[i] = shape(self.layer);
             _knob[i].fillColor = UIColor.clearColor.CGColor; _knob[i].strokeColor = nil;
         }
-        static NSString *const names[B_N] = {@"A", @"B", @"X", @"Y", @"L3", @"R3", @"L", @"R", @"ZL", @"ZR", @"+", @"−"};
+        static NSString *const names[B_N] = {@"A", @"B", @"X", @"Y", @"L3", @"R3", @"L", @"R", @"ZL", @"ZR", @"+", @"−", @"包", @"单"};
         for (int b = 0; b < B_N; b++) {
             _key[b] = shape(self.layer);
             if(b<=B_Y) {
@@ -160,7 +168,10 @@ static BOOL isClick(int b) { return b == B_LS || b == B_RS; }
 - (CGFloat)dropR:(int)b { return (b == B_ZL || b == B_ZR ? K_ZL_R : K_L_R) * self.u; }
 - (CGPoint)clickCenter:(int)b { CGRect s = self.safe; CGFloat u = self.u; return side(s, b == B_RS, K_CLICK_X * u, CGRectGetMinY(s) + K_ZL_Y * u); }
 - (CGRect)pillRect:(int)b { CGRect s = self.safe; CGFloat u = self.u, w = K_PILL_W * u, h = K_PILL_H * u;
-    CGPoint c = CGPointMake(CGRectGetMidX(s) + (b == B_PLUS ? K_PILL_DX : -K_PILL_DX) * u, CGRectGetMinY(s) + K_PILL_Y * u);   // − on the left, + on the right
+    // − 在中线左、+ 在右；背包 / 菜单快捷键再往外一档（D3：包 = Y、菜单 = + 的重复入口，游戏内改键后语义跟随真实键）
+    CGFloat off = b == B_PLUS ? K_PILL_DX : b == B_MINUS ? -K_PILL_DX
+                : b == B_MENU ? K_PILL_DX * 2 + 10 : b == B_BAG ? -(K_PILL_DX * 2 + 10) : 0;
+    CGPoint c = CGPointMake(CGRectGetMidX(s) + off * u, CGRectGetMinY(s) + K_PILL_Y * u);
     return CGRectMake(c.x - w / 2, c.y - h / 2, w, h); }
 - (CGPoint)swapCenter { CGRect s = self.safe; return CGPointMake(CGRectGetMidX(s), CGRectGetMinY(s) + K_PILL_Y * self.u); }
 
@@ -199,6 +210,20 @@ static CGFloat dist(CGPoint a, CGPoint b) { return hypot(a.x - b.x, a.y - b.y); 
 }
 
 // ---- Touch ----
+- (void)syncGameTouches {   // 游戏区触摸全集 → dm_touch_set（hle_touch 合成 TouchScreenState）；index 即 finger_id，抬起前稳定
+    NSMutableArray<UITouch *> *gt = _gtouch;
+    dm_touch arr[16]; int n = 0;
+    CGRect f = gt.count ? dm_ios_game_frame() : CGRectZero;
+    for (UITouch *t in gt) {
+        if (n >= 16) break;
+        CGPoint p = [t locationInView:self];
+        arr[n].id = (unsigned)n;
+        arr[n].x = f.size.width > 0 ? (float)((p.x - f.origin.x) / f.size.width) : 0;
+        arr[n].y = f.size.height > 0 ? (float)((p.y - f.origin.y) / f.size.height) : 0;
+        n++;
+    }
+    dm_touch_set(arr, n);
+}
 - (void)recompute {
     uint64_t face = 0; for (UITouch *t in _faceOf) face |= [_faceOf objectForKey:t].unsignedLongLongValue;
     uint64_t btn = 0, dpad = 0; BOOL swap = NO;
@@ -206,6 +231,9 @@ static CGFloat dist(CGPoint a, CGPoint b) { return hypot(a.x - b.x, a.y - b.y); 
         if (c == C_BTN) btn |= 1ull << (v >> 8);
         else if (c == C_DPAD) dpad |= [self dpadAt:[t locationInView:self]];
         else if (c == C_SWAP) swap = YES; }
+    // 背包 / 菜单快捷键 = Y / + 的重复入口：并进同一按键位（游戏内改键后语义跟随真实键）
+    if (btn & (1ull << B_BAG)) face |= 1ull << B_Y;
+    if (btn & (1ull << B_MENU)) face |= 1ull << B_PLUS;
     int32_t ax[4] = {0};
     for (int i = 0; i < 2; i++) {
         CGPoint o = [self knobOffset:i]; CGFloat R = [self stickR:i], d = hypot(o.x, o.y), dz = R * K_DEAD;
@@ -219,6 +247,7 @@ static CGFloat dist(CGPoint a, CGPoint b) { return hypot(a.x - b.x, a.y - b.y); 
     g_touch_btn = face | dpad | btn; g_touch_lx = ax[0]; g_touch_ly = ax[1]; g_touch_rx = ax[2]; g_touch_ry = ax[3];
     pthread_mutex_unlock(&g_mu);
     publish();
+    [self syncGameTouches];
     BOOL sticks = _stick[0] || _stick[1];
     if (changed || sticks || _sticksShown) [self refresh];   // also refresh on the stick release so the knob returns to the centre
     _sticksShown = sticks;
@@ -237,6 +266,7 @@ static CGFloat dist(CGPoint a, CGPoint b) { return hypot(a.x - b.x, a.y - b.y); 
         if (kind == C_FACE) { [_owner setObject:@(C_FACE) forKey:t]; [_faceOf setObject:@([self faceAt:p]) forKey:t]; }
         else if (kind == C_DPAD) [_owner setObject:@(C_DPAD) forKey:t];
         else if (kind == C_STICK) { [_owner setObject:@(C_STICK | (uint64_t)idx << 8) forKey:t]; _stick[idx] = t; _stickNow[idx] = p; }
+        else { [_owner setObject:@(C_GAME) forKey:t]; [_gtouch addObject:t]; }   // 没碰到任何控件 = 游戏区触摸：透传 | nothing grabbed = game-area touch
     }
     [self recompute];
 }
@@ -252,14 +282,15 @@ static CGFloat dist(CGPoint a, CGPoint b) { return hypot(a.x - b.x, a.y - b.y); 
     BOOL swap = NO;
     for (UITouch *t in ts) {
         if (ended && ([_owner objectForKey:t].unsignedLongLongValue & 0xff) == C_SWAP && [self inSwap:[t locationInView:self]]) swap = YES;   // layout button: counts only when released on the button
-        [_owner removeObjectForKey:t]; [_faceOf removeObjectForKey:t]; for (int i = 0; i < 2; i++) if (t == _stick[i]) _stick[i] = nil;
+        [_owner removeObjectForKey:t]; [_faceOf removeObjectForKey:t]; [_gtouch removeObject:t];
+        for (int i = 0; i < 2; i++) if (t == _stick[i]) _stick[i] = nil;
     }
     [self recompute];
     if (swap) [self setFull:!_full];
 }
 - (void)touchesEnded:(NSSet<UITouch *> *)ts withEvent:(UIEvent *)e { [self endTouches:ts tapped:YES]; }
 - (void)touchesCancelled:(NSSet<UITouch *> *)ts withEvent:(UIEvent *)e { [self endTouches:ts tapped:NO]; }
-- (void)reset { [_owner removeAllObjects]; [_faceOf removeAllObjects]; _stick[0] = _stick[1] = nil; [self recompute]; }
+ - (void)reset { [_owner removeAllObjects]; [_faceOf removeAllObjects]; [_gtouch removeAllObjects]; _stick[0] = _stick[1] = nil; [self recompute]; }   // 清空含游戏区触摸（dm_touch_set(0) 由 recompute→syncGameTouches 落地）| clearing the passthrough set lands as an empty dm_touch_set
 
 // ---- Shapes ----
 static CGPathRef circlePath(CGPoint c, CGFloat r) { return CGPathCreateWithEllipseInRect(CGRectMake(c.x - r, c.y - r, 2 * r, 2 * r), NULL); }

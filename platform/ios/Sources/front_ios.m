@@ -19,12 +19,14 @@ int front_ios_boot_ok(void);
 static CAMetalLayer *g_layer;
 static int g_wide,g_metalfx,g_fill,g_aspect;
 static CGFloat g_screen_aspect;
+static CGRect g_game_frame;   // 游戏画面在 pad view 坐标系里的 rect（触摸透传归一化基准）| game picture rect in pad-view coordinates
 void front_ios_configure_display(int wide,int metalfx,int fill) { g_wide=!!wide;g_metalfx=!!metalfx;g_fill=!!fill; }
 void front_ios_configure_aspect(int on) {   // 适配模式：渲染分辨率按屏幕比例（参数槽），画面天然铺满
     g_aspect=!!on;
     CGSize nb=UIScreen.mainScreen.nativeBounds.size;
     g_screen_aspect=fmax(nb.width,nb.height)/fmin(nb.width,nb.height);
 }
+CGRect dm_ios_game_frame(void) { return g_game_frame; }   // DmGamepad 触摸透传读 | consumed by DmGamepad's touch passthrough
 
 @interface DmGameView : UIView
 @end
@@ -93,6 +95,7 @@ void front_ios_configure_aspect(int on) {   // 适配模式：渲染分辨率按
     // | only the presentation geometry changes.
     if(g_fill) { CGFloat s=fmax(b.size.width/w,b.size.height/h); w*=s; h*=s; }
     self.game.frame = CGRectMake(floor((b.size.width - w) / 2), floor((b.size.height - h) / 2), w, h);
+    g_game_frame = self.game.frame;
 }
 - (void)viewDidAppear:(BOOL)a { [super viewDidAppear:a]; front_ios_boot(); }
 - (BOOL)prefersHomeIndicatorAutoHidden { return YES; }
