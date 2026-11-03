@@ -90,6 +90,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('shell_zip'); parser.add_argument('game_dir'); parser.add_argument('out_ipa')
     parser.add_argument('--skip-verify', action='store_true')
+    parser.add_argument('--bundle-id', default='com.enginefuture.dr3-mobile.ios',
+                        help='安装包名（缺省 = 正常构建的原包名；自签工具通常还会再改成你自己的）')
+    parser.add_argument('--icon', default='', help='App 图标（正方形 jpg/png；缺省保留壳的占位图标）。游戏的原图标在 NCA 控制分区，'
+                        '这里自备一张即可：做成 120px 与 152px 的松散 PNG 并改 Info.plist 指向它们（Windows 上没有 actool 重编 Assets.car）')
     args = parser.parse_args()
     game = Path(args.game_dir); out = Path(args.out_ipa)
     check_env()
@@ -236,6 +240,30 @@ def main():
         assets[kind] = {p.relative_to(directory).as_posix(): p.stat().st_size
                         for p in directory.rglob('*') if p.is_file()} if directory.exists() else {}
     (app / 'dm/private-assets.json').write_text(json.dumps(assets) + '\n')
+    # Info.plist：包名改回正常构建的原包名（旧壳 zip 里是构建期占位）；--icon 自备方图时一并换图标——
+    # 覆盖壳的占位图标并改走松散 PNG 路由（Windows 上没有 actool 重编 Assets.car）。
+    # | Info.plist: restore the normal build's bundle id (older shell zips carry the build-time placeholder);
+    # | with --icon (a square image) also replace the placeholder icon and switch to loose PNGs — there is no actool
+    # | on Windows to recompile Assets.car.
+    import plistlib
+    plist = plistlib.loads((app / 'Info.plist').read_bytes())
+    plist['CFBundleIdentifier'] = args.bundle_id
+    if args.icon:
+        from PIL import Image
+        img = Image.open(args.icon).convert('RGB')
+        w, h = img.size; s = min(w, h)
+        img = img.crop(((w - s) // 2, (h - s) // 2, (w - s) // 2 + s, (h - s) // 2 + s))   # 中心正方形 | center square
+        for name, px in (('AppIcon60x60@2x.png', 120), ('AppIcon76x76@2x~ipad.png', 152)):
+            img.resize((px, px), Image.LANCZOS).save(app / name)
+        plist.pop('CFBundleIconName', None)
+        icons = dict(CFBundlePrimaryIcon=dict(CFBundleIconFiles=['AppIcon60x60@2x', 'AppIcon76x76@2x~ipad']))
+        plist['CFBundleIcons'] = icons; plist['CFBundleIcons~ipad'] = dict(icons)
+        (app / 'Assets.car').unlink(missing_ok=True)   # 只装图标目录；ControlArt 是散装资源不受影响 | the car holds only the icon set; ControlArt ships loose and is unaffected
+        say('图标已替换（%s）' % args.icon)
+    else:
+        say('未给 --icon：保留壳的占位图标（想要游戏图标，找一张方图加 --icon 路径 即可）')
+    (app / 'Info.plist').write_bytes(plistlib.dumps(plist, fmt=plistlib.FMT_BINARY))
+    say('包名：%s' % args.bundle_id)
     # 核对：清单里的项都做进去了
     missing = [m for m in manifest if not (app / m.rstrip('/')).exists()]
     if missing: die('清单里的内容还没做齐：%s' % missing)

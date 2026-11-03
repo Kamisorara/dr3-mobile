@@ -76,7 +76,7 @@ def placeholder_icon(catalog_dir):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--bundle-id', default='com.dr3mobile.shell')
+    parser.add_argument('--bundle-id', default='com.enginefuture.dr3-mobile.ios')   # 与正常构建同包名 | same bundle id as the normal build
     parser.add_argument('--cpu', default='apple-a18', choices=['apple-a17', 'apple-a18'])
     parser.add_argument('--out', default=str(SHELL_DIR))
     args = parser.parse_args()
