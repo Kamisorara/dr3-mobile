@@ -1611,17 +1611,24 @@ index 31b4420..51cec58 100644
 +dmhost: $(SRC) $(GFX) dm.h hle.h dm_input.h front.h touch_mac.h ../ios/Sources/dm_touch_controls.[ch] $(GFX_H) controller_effects.h lan_native.h dm_d3_graphics.h $(GAME_H) $(GAME_DIR)/dmsh_chain.h $(GAME_STAMP) $(VPX_LIB)
 +	clang $(CFLAGS) -I../gfx/nvn/include -I$(dir $(GAME_H)) -I$(GAME_DIR) -I$(VPX) -I../third_party/stb_vorbis -fobjc-arc -o $@ $(SRC) $(GFX) $(VPX_LIB) -framework Cocoa -framework GameController -framework CoreHaptics -framework QuartzCore -framework Metal -framework MetalFX -framework AudioToolbox -framework ImageIO -framework UniformTypeIdentifiers
 diff --git a/dm/host/dm.h b/dm/host/dm.h
-index fda33ac..b8e3445 100644
+index fda33ac..5bd0f7c 100644
 --- a/dm/host/dm.h
 +++ b/dm/host/dm.h
-@@ -46,6 +46,7 @@ extern module_t g_mod[MAX_MOD];
+@@ -46,7 +46,14 @@ extern module_t g_mod[MAX_MOD];
  extern int g_nmod;
  // main's build ID (empty if none). DM_D2R_BUILD = the D2R build that the code inherited from d2r-mobile belongs to: code with fixed D2R addresses or that edits D2R saves runs only on it
  #define DM_D2R_BUILD "db0507f36b84200ac05f75d76ed5026f"
 +#define DM_D3_BUILD "2607a74f5df7754cc0357b5df7e49693"   // Diablo III 2.7.7: parameter slots (KRES*/KASPECT) feed the camera directly
  static inline const char *dm_main_build(void) { for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) return g_mod[i].build_id; return ""; }
++// HUD relocation (hle_hudmove.c): per-frame tick (call from the game thread's controller read),
++// controller-presence sync (front end's GameController connect/disconnect). off unless DM_HUDMOVE=1.
++void dm_hudmove_frame(void);
++void dm_hudmove_set_controller(int present);
++void svc_guest_range(uint8_t **base, size_t *size);   // hle_svc.c: whole guest address-space block
++int dm_guest_heap_readable(uint64_t a, size_t n);     // hle_svc.c: committed-heap readability probe
  // Four thread-local slots: K18 = the Switch's x18, KTLS = tpidr_el0, KTLR = tpidrro_el0 (ThreadLocalRegion), KGATE = host gate entry; the actual key numbers are written into the key page by the loader
  extern pthread_key_t g_key18, g_keytls, g_keytlr, g_keygate;
+ extern pthread_key_t g_keyres[2], g_keyaspect, g_keyaspectui;
 diff --git a/dm/host/dm_d3_graphics.h b/dm/host/dm_d3_graphics.h
 new file mode 100644
 index 0000000..c6da2da
@@ -1849,7 +1856,7 @@ index 3d309a1..ec44a2c 100644
 +    (void)infos; (void)capacity; return 0;
 +}
 diff --git a/dm/host/hle_hid.c b/dm/host/hle_hid.c
-index 561a3c8..e126dcf 100644
+index 561a3c8..f8e02e2 100644
 --- a/dm/host/hle_hid.c
 +++ b/dm/host/hle_hid.c
 @@ -1,8 +1,12 @@
@@ -1880,7 +1887,7 @@ index 561a3c8..e126dcf 100644
  uint64_t dm_input_samples(void) { return (uint64_t)atomic_load(&g_sampling); }
  // DM_KEYS scripted input (for tests): "seconds:key[+key][~hold seconds][*count/interval seconds],...", e.g. "8:A,12:A,15:Down~0.5,16:A+B,40:A*80/2" (A every 2 s from 40 s on, 80 times). Key names A B X Y LS RS L R ZL ZR Plus Minus Left Up Right Down, left stick LLeft LUp LRight LDown;
  //   held 0.15 s by default, at most 1024 steps (counted after repeats are expanded). Goes through the controller path (dm_pad_set), ORed with keyboard / touch, neither overrides the other. Times are counted from host start.
-@@ -77,7 +88,31 @@ static uint32_t style_of(uint32_t id) { return id != connected_id() ? 0 : id ==
+@@ -77,7 +88,32 @@ static uint32_t style_of(uint32_t id) { return id != connected_id() ? 0 : id ==
  static int32_t ax(uint64_t v, int i) { return (int16_t)(v >> (16 * i)); }
  static int32_t pick(int32_t a, int32_t b) { return (a < 0 ? -a : a) >= (b < 0 ? -b : b) ? a : b; }   // whichever of the two paths is deflected more
  
@@ -1909,10 +1916,11 @@ index 561a3c8..e126dcf 100644
 +}
  static void fill(NpadState *s, uint32_t id, uint32_t style) {
 +    uint64_t start = now_ns();
++    dm_hudmove_frame();   // HUD 移位节拍：与读手柄同帧（游戏线程；内部 5 秒节流）| same-frame tick as the controller read
      memset(s, 0, sizeof *s);
      s->sampling = atomic_fetch_add(&g_sampling, 1) + 1;
      if (!(style_of(id) & style)) return;   // no controller of this id / style: attributes = 0
-@@ -95,6 +130,7 @@ static void fill(NpadState *s, uint32_t id, uint32_t style) {
+@@ -95,6 +131,7 @@ static void fill(NpadState *s, uint32_t id, uint32_t style) {
      if (s->ry < -STICK_THRESH) b |= 1u << 23;
      s->buttons = b;
      s->attributes = ATTR_CONNECTED | (id == NPAD_HANDHELD ? ATTR_WIRED | ATTR_LEFT_CONN | ATTR_LEFT_WIRED | ATTR_RIGHT_CONN | ATTR_RIGHT_WIRED : ATTR_LEFT_CONN | ATTR_RIGHT_CONN);
@@ -1920,7 +1928,7 @@ index 561a3c8..e126dcf 100644
  }
  // GetNpadStates(out, n, id): returns the number written, newest first. The host keeps no history: only 1 current state (callers handle the returned count)
  static int states(NpadState *out, int n, uint32_t id, uint32_t style) { if (n <= 0) return 0; fill(out, id, style); return 1; }
-@@ -121,21 +157,39 @@ HLE_FORCE("_ZN2nn3hid20StopLrAssignmentModeEv", "L/R 分配模式；宿主忽略
+@@ -121,21 +158,39 @@ HLE_FORCE("_ZN2nn3hid20StopLrAssignmentModeEv", "L/R 分配模式；宿主忽略
  // Controller applet (system UI): report "1 player, current controller selected" directly. ControllerSupportResultInfo = { int playerCount; uint32_t selectedId; }
  HLE_FORCE("_ZN2nn3hid21ShowControllerSupportEPNS0_27ControllerSupportResultInfoERKNS0_20ControllerSupportArgE", "手柄小程序；宿主直接报已选好",
            Result, h_hid_ShowCtrl, int32_t *info, const void *arg) { (void)arg; if (info) { info[0] = 1; info[1] = (int32_t)connected_id(); } return RES_OK; }
@@ -1969,7 +1977,7 @@ index 561a3c8..e126dcf 100644
  // Mouse / keyboard: not connected
  HLE_FORCE("_ZN2nn3hid15InitializeMouseEv", "鼠标；宿主不提供", void, h_hid_InitMouse, void) {}
  HLE_FORCE("_ZN2nn3hid14GetMouseStatesEPNS0_10MouseStateEi", "鼠标状态：0 条", int, h_hid_MouseStates, void *out, int n) { (void)out; (void)n; return 0; }
-@@ -209,6 +263,11 @@ HLE_FORCE("_ZN2nn3hid32GetSixAxisSensorFusionParametersEPfS1_RKNS0_19SixAxisSens
+@@ -209,6 +264,11 @@ HLE_FORCE("_ZN2nn3hid32GetSixAxisSensorFusionParametersEPfS1_RKNS0_19SixAxisSens
  HLE_FORCE("_ZN2nn3hid32SetSixAxisSensorFusionParametersERKNS0_19SixAxisSensorHandleEff", "六轴融合参数；宿主忽略", void, h_hid_FusionSet, const uint32_t *h, float a, float b) { (void)h; (void)a; (void)b; }
  HLE_FORCE("_ZN2nn3hid34ResetSixAxisSensorFusionParametersERKNS0_19SixAxisSensorHandleE", "六轴融合参数；宿主忽略", void, h_hid_FusionReset, const uint32_t *h) { (void)h; }
  HLE_FORCE("_ZN2nn3hid41IsFirmwareUpdateAvailableForSixAxisSensorERKNS0_19SixAxisSensorHandleE", "六轴固件更新：无", unsigned, h_hid_SixFw, const uint32_t *h) { (void)h; return 0; }
@@ -1983,6 +1991,137 @@ index 561a3c8..e126dcf 100644
 +HLE_FORCE("_ZN2nn3hid23GetActualVibrationValueEPNS0_14VibrationValueERKNS0_21VibrationDeviceHandleE", "震动值；最后成功接受的原命令，非硬件测量", void, h_hid_VibActual, dm_vibration_value *v, const void *h) {
 +    if(!v)return;memset(v,0,sizeof *v);int device=rumble_device(h);
 +    if(device>=0 && &dm_controller_rumble_applied)dm_controller_rumble_applied((unsigned)device,v);
++}
+diff --git a/dm/host/hle_hudmove.c b/dm/host/hle_hudmove.c
+new file mode 100644
+index 0000000..14bcd73
+--- /dev/null
++++ b/dm/host/hle_hudmove.c
+@@ -0,0 +1,125 @@
++// HUD 移位（触摸模式生效、物理手柄接入自动还原）——结构校准阶段。
++// 原理：.ui 加载后节点路径是堆里的明文串；在 guest 堆里搜目标节点的路径串
++// （ConsoleHUD_main.LayoutRoot.Globes = 血球容器），再搜指向它的指针（节点记录），
++// dump 记录周边内存（含 float 对解读）到 log——位置字段偏移由此校准；校准后写值。
++// 手柄 presence 由前端同步（dm_hudmove_set_controller，iOS 的 GameController 回调）。
++// 开关：DM_HUDMOVE=1；诊断：DM_HUDMOVE_DUMP=1（每个锚串只 dump 一次）。
++// | HUD relocation (touch mode on, physical controller restores stock) — structure
++// | calibration phase. Scans the guest heap for the node-path string of the HUD
++// | element, then for pointers referencing it, and dumps the surrounding records
++// | (with float-pair annotations) to the log; the position-field offset is pinned
++// | from that dump and values are written afterwards. Controller presence is
++// | synced from the front end's GameController callbacks.
++#include "dm.h"
++#include <stdatomic.h>
++#include <string.h>
++#include <stdio.h>
++#include <stdint.h>
++
++// Physical controller presence (synced by the front end; 1 = hide/restore HUD)
++static _Atomic int g_pad_present;
++void dm_hudmove_set_controller(int present) { atomic_store(&g_pad_present, !!present); }
++
++static int enabled(void) {
++    static int on = -1;
++    if (on < 0) on = getenv("DM_HUDMOVE") != NULL;
++    return on;
++}
++static int dump_requested(void) {
++    static int on = -1;
++    if (on < 0) on = getenv("DM_HUDMOVE_DUMP") != NULL;
++    return on;
++}
++
++// Anchors to locate: full node paths of the elements we will move (stock names).
++static const char *const anchors[] = {
++    "ConsoleHUD_main.LayoutRoot.Globes",   // 血球容器（血球/巅峰球）
++    "ConsoleHUD_main.LayoutRoot",          // HUD 布局根（后备锚）
++};
++
++typedef struct { const char *path; size_t len; uint64_t addr; int dumped; } anchor_state;
++static anchor_state g_st[sizeof anchors / sizeof *anchors];
++static _Atomic int g_done_scan;
++static uint64_t g_next_scan_ms;
++
++static void hexdump_tagged(uint64_t addr, const uint8_t *p, size_t n) {
++    for (size_t i = 0; i < n; i += 32) {
++        char line[256]; int m = 0;
++        m += snprintf(line + m, sizeof line - m, "[hudmove]   %012llx ", (unsigned long long)(addr + i));
++        for (size_t k = 0; k < 32 && i + k < n; k++) m += snprintf(line + m, sizeof line - m, "%02x", p[i + k]);
++        m += snprintf(line + m, sizeof line - m, "  ");
++        for (size_t k = 0; k < 32 && i + k < n; k++) { uint8_t c = p[i + k]; m += snprintf(line + m, sizeof line - m, "%c", c >= 32 && c < 127 ? c : '.'); }
++        // float-pair annotations: values plausibly in panel space (x<=1280, y<=720)
++        for (size_t k = 0; k + 8 <= 32 && i + k + 8 <= n; k += 4) {
++            float a, b; memcpy(&a, p + i + k, 4); memcpy(&b, p + i + k + 4, 4);
++            if (a > 0.05f && a <= 1280.f && b > 0.05f && b <= 720.f)
++                m += snprintf(line + m, sizeof line - m, " [+%zu=(%.1f,%.1f)]", i + k, a, b);
++        }
++        LOG("%s", line);
++    }
++}
++
++// One full-heap scan pass: find anchor strings, then pointers referencing them.
++// Walks the whole guest AS in 1 MB steps, probing readability before touching each
++// step (uncommitted pages are PROT_NONE and would trap).
++static void scan_once(void) {
++    uint8_t *base; size_t size;
++    svc_guest_range(&base, &size);
++    if (!base) return;
++    uint64_t lo = (uint64_t)(uintptr_t)base, hi = lo + size;
++    LOG("[hudmove] 扫描 guest AS %012llx..%012llx", (unsigned long long)lo, (unsigned long long)hi);
++    // pass 1: anchor strings
++    for (int ai = 0; ai < (int)(sizeof anchors / sizeof *anchors); ai++) {
++        anchor_state *st = &g_st[ai];
++        if (st->addr) continue;
++        if (!st->len) st->len = strlen(st->path);
++        for (uint64_t a = lo; a + st->len + 8 < hi; a += 0x100000) {
++            if (!dm_guest_heap_readable(a, 0x1000)) continue;
++            size_t chunk = 0x100000 - (size_t)(a & 0xfffff);
++            if (a + chunk > hi) chunk = (size_t)(hi - a);
++            const uint8_t *p = (const uint8_t *)(uintptr_t)a;
++            for (size_t k = 0; k + st->len < chunk; k++)
++                if (p[k] == st->path[0] && !memcmp(p + k, st->path, st->len)) {
++                    st->addr = a + k;
++                    LOG("[hudmove] 锚 '%s' @ %012llx", st->path, (unsigned long long)st->addr);
++                    break;
++                }
++            if (st->addr) break;
++        }
++        if (!st->addr) LOG("[hudmove] 锚 '%s' 本轮未命中（布局未加载？5 秒后重试）", st->path);
++    }
++    // pass 2: pointers referencing the anchors (the node record holding the path)
++    for (int ai = 0; ai < (int)(sizeof anchors / sizeof *anchors); ai++) {
++        anchor_state *st = &g_st[ai];
++        if (!st->addr || st->dumped) continue;
++        int found = 0;
++        for (uint64_t a = lo; a + 8 < hi && found < 6; a += 0x100000) {
++            if (!dm_guest_heap_readable(a, 0x1000)) continue;
++            size_t chunk = 0x100000 - (size_t)(a & 0xfffff);
++            if (a + chunk > hi) chunk = (size_t)(hi - a);
++            const uint8_t *p = (const uint8_t *)(uintptr_t)a;
++            for (size_t k = 0; k + 8 <= chunk && found < 6; k += 8) {
++                uint64_t v; memcpy(&v, p + k, 8);
++                if (v == st->addr) {
++                    found++;
++                    LOG("[hudmove] 引用锚 '%s' 的指针 @ %012llx", st->path, (unsigned long long)(a + k));
++                    if (dump_requested()) hexdump_tagged(a + k - 0x80, p + k - 0x80, 0x180);
++                }
++            }
++        }
++        if (found) { st->dumped = 1; if (!dump_requested()) LOG("[hudmove]（DM_HUDMOVE_DUMP=1 可 dump 记录结构）"); }
++        else if (st->addr) LOG("[hudmove] 锚 '%s' 暂无指针引用（可能按索引/相对偏移引用）", st->path);
++    }
++    if (g_st[0].addr && g_st[0].dumped) atomic_store(&g_done_scan, 1);
++}
++
++// Called from the game thread every controller read (hle_hid fill); internally throttled.
++void dm_hudmove_frame(void) {
++    if (!enabled()) return;
++    if (atomic_load(&g_done_scan)) return;
++    uint64_t now = now_ns() / 1000000ull;
++    if (now < g_next_scan_ms) return;
++    g_next_scan_ms = now + 5000;
++    static int logged; if (!logged++) LOG("[hudmove] HUD 移位框架启动（DM_HUDMOVE，诊断=%d，手柄 presence=%d）", dump_requested(), atomic_load(&g_pad_present));
++    scan_once();
 +}
 diff --git a/dm/host/hle_lan_hooks.c b/dm/host/hle_lan_hooks.c
 new file mode 100644

@@ -29,6 +29,7 @@ void dm_physical_gamepad_reset(void);
 typedef struct { unsigned id; float x, y; } dm_touch;
 extern void dm_touch_set(const dm_touch *t, int n);
 extern CGRect dm_ios_game_frame(void);
+extern void dm_hudmove_set_controller(int present);   // 物理手柄 presence → HUD 移位还原（hle_hudmove.c）| physical pad presence → HUD restore
 static void publish(void) {
     pthread_mutex_lock(&g_mu);
     dm_input_set(g_touch_btn, g_touch_lx, g_touch_ly, g_touch_rx, g_touch_ry);
@@ -408,6 +409,7 @@ static UIImage *controlImage(CGSize size,CGFloat scale,void (^draw)(CGContextRef
 static void physical_present(int present) {
     g_view.hidden = present;
     if (present) { [g_view reset]; dm_input_clear(); }
+    dm_hudmove_set_controller(present);   // HUD 移位随物理手柄插拔切换（用户确认的还原约束）| relocation toggles with the pad
 }
 UIView *dm_gamepad_view(CGRect frame) {
     DmGamepad *v = [[DmGamepad alloc] initWithFrame:frame]; g_view = v;
