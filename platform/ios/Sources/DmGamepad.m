@@ -172,23 +172,24 @@ static CGPoint side(CGRect s, int right, CGFloat dx, CGFloat y) { return CGPoint
 - (CGFloat)faceGap { return K_FACE_GAP * self.u; }
 - (CGFloat)faceR { return K_FACE_R * self.u; }
 - (CGPoint)facePos:(int)b {
-    if (_d3) {   // D3 技能环：攻=中心大键，2/3/4 扇形上开，B 环下（取消）
-        CGPoint c = self.faceCenter; CGFloat u = self.u;
-        CGPoint ring = CGPointMake(c.x - 36 * u, c.y - 14 * u); CGFloat g = 64 * u;
+    if (_d3) {   // 现代手游几何（暗黑不朽式）：主攻贴右下角，技能弧绕主键拇指可达，低频键收右上图标栏
+        CGPoint c = self.faceCenter; CGFloat u = self.u;   // faceCenter = 右下角骨架原点 (W-81u, H-82u)
+        CGPoint hero = CGPointMake(c.x - 37 * u, c.y - 14 * u);
+        CGFloat w = self.bounds.size.width;
         switch (b) {
-            case B_A: return ring;
-            case B_X: return CGPointMake(ring.x - g * 0.82, ring.y - g * 0.45);
-            case B_Y: return CGPointMake(ring.x, ring.y - g);
-            case B_R: return CGPointMake(ring.x + g * 0.82, ring.y - g * 0.45);
-            case B_B: return CGPointMake(ring.x, ring.y + g * 0.85);
-            default:  return ring;
+            case B_A: return hero;                                                        // Skill1 主攻
+            case B_X: return CGPointMake(hero.x - 114 * u, hero.y - 20 * u);              // Skill2 左
+            case B_Y: return CGPointMake(hero.x - 50 * u, hero.y - 107 * u);              // Skill3 上偏左
+            case B_R: return CGPointMake(hero.x + 40 * u, hero.y - 111 * u);              // Skill4 上偏右
+            case B_B: return CGPointMake(w - 60 * u, 195 * u);                            // ✕ 取消 → 图标栏
+            default:  return hero;
         }
     }
     CGPoint c = self.faceCenter; CGFloat g = self.faceGap;
     switch (b) { case B_A: return CGPointMake(c.x + g, c.y); case B_B: return CGPointMake(c.x, c.y + g); case B_X: return CGPointMake(c.x, c.y - g); default: return CGPointMake(c.x - g, c.y); }
 }
-- (CGFloat)faceKeyR:(int)b {   // 键面半径（D3：中心键加大）
-    if (_d3) { CGFloat u = self.u; return b == B_A ? 44 * u : 27 * u; }
+- (CGFloat)faceKeyR:(int)b {   // 键面半径（D3：主攻大键，技能/取消小键）
+    if (_d3) { CGFloat u = self.u; return b == B_A ? 48 * u : (b == B_B ? 22 * u : 26 * u); }
     return self.faceR;
 }
 - (CGPoint)stickHome:(int)i { CGRect s = self.corner; CGFloat u = self.u;
@@ -228,7 +229,7 @@ static CGFloat dist(CGPoint a, CGPoint b) { return hypot(a.x - b.x, a.y - b.y); 
         int best = -1; CGFloat bestd = 1e9;
         for (int b = B_A; b <= B_Y; b++) { CGFloat d = dist(p, [self facePos:b]); if (d < bestd) { bestd = d; best = b; } }
         CGFloat u = self.u;
-        if (best >= 0 && bestd <= (best == B_A ? 46 * u : 30 * u)) m |= 1ull << best;
+        if (best >= 0 && bestd <= (best == B_A ? 50 * u : best == B_B ? 24 * u : 28 * u)) m |= 1ull << best;
         return m;
     }
     CGFloat r = self.faceR * 1.25;
