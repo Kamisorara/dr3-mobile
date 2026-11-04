@@ -190,6 +190,10 @@ def bootstrap(_):
     # | patch, fails harmlessly on the bare snapshot), then a forward apply that must succeed.
     subprocess.run(['git', 'apply', '--reverse', str(patch)], cwd=UPSTREAM, capture_output=True)
     run(['git', 'apply', patch], WORK / 'logs/patch.log', cwd=UPSTREAM)
+    if _out := (WORK / 'logs/patch.log').read_text().strip():
+        print('[bootstrap] git apply 输出：', _out, flush=True)   # 取证：skipping/告警都让它现形
+    if not (UPSTREAM / 'dm/host/lan_native.h').exists():
+        die('[bootstrap] git apply 后 lan_native.h 仍不存在——patch 未真正落地，见上方输出')
     copy_native()
     game = UPSTREAM / 'dm/games' / TITLE
     game.mkdir(exist_ok=True)
