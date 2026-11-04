@@ -152,14 +152,14 @@ static BOOL fullOnly(int b) {   // 仅 3D 布局显示的键（显式列举：�
     if (full == _full && !_d3) return;
     [self reset];
     _full = full; _d3 = NO;
-    [NSUserDefaults.standardUserDefaults setObject:@(full ? @1 : @0) forKey:k_layout_key];
+    [NSUserDefaults.standardUserDefaults setObject:@(full ? 1 : 0) forKey:k_layout_key];
     [self applyLayout]; [self setNeedsLayout];
 }
 - (void)setD3:(BOOL)d3 {   // D3 专用布局（触控模式默认）：真实键重排为技能环 + 语义标签
     if (d3 == _d3) return;
     [self reset];
     _d3 = d3; if (d3) _full = NO;
-    [NSUserDefaults.standardUserDefaults setObject:@(d3 ? @2 : @0) forKey:k_layout_key];
+    [NSUserDefaults.standardUserDefaults setObject:@(d3 ? 2 : 0) forKey:k_layout_key];
     [self applyLayout]; [self setNeedsLayout];
 }
 
