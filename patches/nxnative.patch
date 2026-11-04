@@ -1835,21 +1835,22 @@ index 0000000..b39a06b
 +}
 +void dm_controller_effects_stop(void) {initialized();atomic_fetch_add(&generation,1);synchronous(^{stop_all();});}
 diff --git a/dm/host/dm.h b/dm/host/dm.h
-index fda33ac..5bd0f7c 100644
+index fda33ac..cb2665f 100644
 --- a/dm/host/dm.h
 +++ b/dm/host/dm.h
-@@ -46,7 +46,14 @@ extern module_t g_mod[MAX_MOD];
+@@ -46,7 +46,15 @@ extern module_t g_mod[MAX_MOD];
  extern int g_nmod;
  // main's build ID (empty if none). DM_D2R_BUILD = the D2R build that the code inherited from d2r-mobile belongs to: code with fixed D2R addresses or that edits D2R saves runs only on it
  #define DM_D2R_BUILD "db0507f36b84200ac05f75d76ed5026f"
 +#define DM_D3_BUILD "2607a74f5df7754cc0357b5df7e49693"   // Diablo III 2.7.7: parameter slots (KRES*/KASPECT) feed the camera directly
  static inline const char *dm_main_build(void) { for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) return g_mod[i].build_id; return ""; }
 +// HUD relocation (hle_hudmove.c): per-frame tick (call from the game thread's controller read),
-+// controller-presence sync (front end's GameController connect/disconnect). off unless DM_HUDMOVE=1.
++// controller-presence sync (front end's GameController connect/disconnect). on by default (DM_HUDMOVE=0 turns it off).
 +void dm_hudmove_frame(void);
 +void dm_hudmove_set_controller(int present);
 +void svc_guest_range(uint8_t **base, size_t *size);   // hle_svc.c: whole guest address-space block
 +int dm_guest_heap_readable(uint64_t a, size_t n);     // hle_svc.c: committed-heap readability probe
++int dm_guest_readable(uint64_t a, size_t n);          // hle_svc.c: heap + alias-region page bitmap (memory scanners)
  // Four thread-local slots: K18 = the Switch's x18, KTLS = tpidr_el0, KTLR = tpidrro_el0 (ThreadLocalRegion), KGATE = host gate entry; the actual key numbers are written into the key page by the loader
  extern pthread_key_t g_key18, g_keytls, g_keytlr, g_keygate;
  extern pthread_key_t g_keyres[2], g_keyaspect, g_keyaspectui;
@@ -2352,16 +2353,16 @@ index 561a3c8..f8e02e2 100644
 +}
 diff --git a/dm/host/hle_hudmove.c b/dm/host/hle_hudmove.c
 new file mode 100644
-index 0000000..14bcd73
+index 0000000..0ba9f80
 --- /dev/null
 +++ b/dm/host/hle_hudmove.c
-@@ -0,0 +1,125 @@
+@@ -0,0 +1,163 @@
 +// HUD 移位（触摸模式生效、物理手柄接入自动还原）——结构校准阶段。
 +// 原理：.ui 加载后节点路径是堆里的明文串；在 guest 堆里搜目标节点的路径串
 +// （ConsoleHUD_main.LayoutRoot.Globes = 血球容器），再搜指向它的指针（节点记录），
 +// dump 记录周边内存（含 float 对解读）到 log——位置字段偏移由此校准；校准后写值。
 +// 手柄 presence 由前端同步（dm_hudmove_set_controller，iOS 的 GameController 回调）。
-+// 开关：DM_HUDMOVE=1；诊断：DM_HUDMOVE_DUMP=1（每个锚串只 dump 一次）。
++// 开关：默认开，DM_HUDMOVE=0 显式关；诊断：默认开，DM_HUDMOVE_DUMP=0 关（每个锚串只 dump 一次）。
 +// | HUD relocation (touch mode on, physical controller restores stock) — structure
 +// | calibration phase. Scans the guest heap for the node-path string of the HUD
 +// | element, then for pointers referencing it, and dumps the surrounding records
@@ -2380,12 +2381,12 @@ index 0000000..14bcd73
 +
 +static int enabled(void) {
 +    static int on = -1;
-+    if (on < 0) on = getenv("DM_HUDMOVE") != NULL;
++    if (on < 0) { const char *v = getenv("DM_HUDMOVE"); on = !(v && v[0] == '0' && !v[1]); }   // 缺省开：校准自动跑（用户无需改 env.txt）
 +    return on;
 +}
 +static int dump_requested(void) {
 +    static int on = -1;
-+    if (on < 0) on = getenv("DM_HUDMOVE_DUMP") != NULL;
++    if (on < 0) { const char *v = getenv("DM_HUDMOVE_DUMP"); on = !(v && v[0] == '0' && !v[1]); }   // 缺省开：dump 每锚一次、几 KB 日志
 +    return on;
 +}
 +
@@ -2398,7 +2399,6 @@ index 0000000..14bcd73
 +typedef struct { const char *path; size_t len; uint64_t addr; int dumped; } anchor_state;
 +static anchor_state g_st[sizeof anchors / sizeof *anchors];
 +static _Atomic int g_done_scan;
-+static uint64_t g_next_scan_ms;
 +
 +static void hexdump_tagged(uint64_t addr, const uint8_t *p, size_t n) {
 +    for (size_t i = 0; i < n; i += 32) {
@@ -2417,69 +2417,108 @@ index 0000000..14bcd73
 +    }
 +}
 +
-+// One full-heap scan pass: find anchor strings, then pointers referencing them.
-+// Walks the whole guest AS in 1 MB steps, probing readability before touching each
-+// step (uncommitted pages are PROT_NONE and would trap).
-+static void scan_once(void) {
-+    uint8_t *base; size_t size;
-+    svc_guest_range(&base, &size);
-+    if (!base) return;
-+    uint64_t lo = (uint64_t)(uintptr_t)base, hi = lo + size;
-+    LOG("[hudmove] 扫描 guest AS %012llx..%012llx", (unsigned long long)lo, (unsigned long long)hi);
-+    // pass 1: anchor strings
++// Incremental scan, not one synchronous full pass: walking the whole guest AS (GBs of
++// 1 MB steps) in one go stalls the game thread for hundreds of ms. Instead each frame
++// gets a small time budget (~2 ms) and a cursor resumes where the last one stopped:
++// stage 1 walks for the anchor strings, stage 2 (once anchors are located) walks for
++// pointers referencing them. Nothing ever blocks for long, and giving up after a few
++// full walks keeps a missing layout from costing a scan every frame forever.
++// | 增量扫描：全地址空间一轮要做几百毫秒（游戏线程卡顿），改为每帧约 2 毫秒的预算
++// | 与跨帧续走的游标：阶段 1 找锚串，阶段 2（锚已定位）找引用指针。几轮不中即放弃，
++// | 避免布局一直没加载时永远在扫。
++
++static uint64_t g_lo, g_hi;        // guest AS range（首帧读一次）
++static uint64_t g_cursor;          // 当前阶段的步进位置
++static int g_pass = 1;             // 1 = 找锚串，2 = 找引用指针
++static int g_miss_rounds;          // 阶段 1 整轮未命中的次数（达上限放弃）
++
++static void scan_end_of_pass(void) {
++    if (g_pass == 1) {
++        int missing = 0;
++        for (int ai = 0; ai < (int)(sizeof anchors / sizeof *anchors); ai++)
++            if (!g_st[ai].addr) missing++;
++        if (!missing) { g_pass = 2; g_cursor = g_lo; return; }
++        if (++g_miss_rounds >= 12) {
++            LOG("[hudmove] %d 轮未命中锚串（HUD 布局未加载或路径串不按此存储），放弃扫描（重启游戏重试）", g_miss_rounds);
++            atomic_store(&g_done_scan, 1);
++            return;
++        }
++        LOG("[hudmove] 锚整轮未命中（布局未加载？继续增量重扫，第 %d 轮）", g_miss_rounds + 1);
++        g_cursor = g_lo;
++        return;
++    }
++    // pass 2 finished: anchors without any referencing pointer are given up on (the layout
++    // is loaded by now; if nothing references the path the record form differs — dump data
++    // from other anchors drives the calibration instead).
 +    for (int ai = 0; ai < (int)(sizeof anchors / sizeof *anchors); ai++) {
 +        anchor_state *st = &g_st[ai];
-+        if (st->addr) continue;
-+        if (!st->len) st->len = strlen(st->path);
-+        for (uint64_t a = lo; a + st->len + 8 < hi; a += 0x100000) {
-+            if (!dm_guest_heap_readable(a, 0x1000)) continue;
-+            size_t chunk = 0x100000 - (size_t)(a & 0xfffff);
-+            if (a + chunk > hi) chunk = (size_t)(hi - a);
-+            const uint8_t *p = (const uint8_t *)(uintptr_t)a;
++        if (!st->addr || st->dumped) continue;
++        LOG("[hudmove] 锚 '%s' 暂无 8 字节指针引用（可能按索引/相对偏移引用），放弃该锚", st->path);
++        st->dumped = 1;
++    }
++    if (g_st[0].dumped || g_st[1].dumped) atomic_store(&g_done_scan, 1);
++}
++
++// One scan step (1 MB), called under the frame budget. Returns non-zero when the budget is used up.
++static int scan_step(uint64_t deadline_ms) {
++    uint64_t a = g_cursor;
++    if (a >= g_hi) { scan_end_of_pass(); return 1; }
++    g_cursor = a + 0x100000;
++    size_t chunk = 0x100000 - (size_t)(a & 0xfffff);
++    if (a + chunk > g_hi) chunk = (size_t)(g_hi - a);
++    // 整步探测（别名区页位图 + 堆水位）：步内任何地址可读才扫——堆/别名区之外或中间有未映射
++    // 洞的步整步跳过，绝不触碰 PROT_NONE 页；dump 的回看偏移因此也钳在步内。
++    // | Probe the whole step (alias bitmap + heap watermark): scan only when every address in
++    // | the step is readable, so dumps can safely look back a fixed offset within the step.
++    if (!dm_guest_readable(a, chunk)) return now_ns() / 1000000ull >= deadline_ms;
++    const uint8_t *p = (const uint8_t *)(uintptr_t)a;
++    if (g_pass == 1) {
++        for (int ai = 0; ai < (int)(sizeof anchors / sizeof *anchors); ai++) {
++            anchor_state *st = &g_st[ai];
++            if (st->addr) continue;
++            if (!st->len) st->len = strlen(st->path);
 +            for (size_t k = 0; k + st->len < chunk; k++)
 +                if (p[k] == st->path[0] && !memcmp(p + k, st->path, st->len)) {
 +                    st->addr = a + k;
 +                    LOG("[hudmove] 锚 '%s' @ %012llx", st->path, (unsigned long long)st->addr);
 +                    break;
 +                }
-+            if (st->addr) break;
 +        }
-+        if (!st->addr) LOG("[hudmove] 锚 '%s' 本轮未命中（布局未加载？5 秒后重试）", st->path);
-+    }
-+    // pass 2: pointers referencing the anchors (the node record holding the path)
-+    for (int ai = 0; ai < (int)(sizeof anchors / sizeof *anchors); ai++) {
-+        anchor_state *st = &g_st[ai];
-+        if (!st->addr || st->dumped) continue;
-+        int found = 0;
-+        for (uint64_t a = lo; a + 8 < hi && found < 6; a += 0x100000) {
-+            if (!dm_guest_heap_readable(a, 0x1000)) continue;
-+            size_t chunk = 0x100000 - (size_t)(a & 0xfffff);
-+            if (a + chunk > hi) chunk = (size_t)(hi - a);
-+            const uint8_t *p = (const uint8_t *)(uintptr_t)a;
-+            for (size_t k = 0; k + 8 <= chunk && found < 6; k += 8) {
++    } else {
++        for (int ai = 0; ai < (int)(sizeof anchors / sizeof *anchors); ai++) {
++            anchor_state *st = &g_st[ai];
++            if (!st->addr || st->dumped) continue;
++            for (size_t k = 0; k + 8 <= chunk; k += 8) {
 +                uint64_t v; memcpy(&v, p + k, 8);
 +                if (v == st->addr) {
-+                    found++;
++                    st->dumped = 1;
 +                    LOG("[hudmove] 引用锚 '%s' 的指针 @ %012llx", st->path, (unsigned long long)(a + k));
-+                    if (dump_requested()) hexdump_tagged(a + k - 0x80, p + k - 0x80, 0x180);
++                    if (dump_requested()) {
++                        size_t back = k < 0x80 ? k : 0x80;   // 回看钳在步内（跨步地址可能不可读）
++                        size_t fwd = chunk - k - 8 >= 0x100 ? 0x100 : chunk - k - 8;
++                        hexdump_tagged(a + k - back, p + k - back, back + fwd);
++                    }
 +                }
 +            }
 +        }
-+        if (found) { st->dumped = 1; if (!dump_requested()) LOG("[hudmove]（DM_HUDMOVE_DUMP=1 可 dump 记录结构）"); }
-+        else if (st->addr) LOG("[hudmove] 锚 '%s' 暂无指针引用（可能按索引/相对偏移引用）", st->path);
 +    }
-+    if (g_st[0].addr && g_st[0].dumped) atomic_store(&g_done_scan, 1);
++    return now_ns() / 1000000ull >= deadline_ms;
 +}
 +
-+// Called from the game thread every controller read (hle_hid fill); internally throttled.
++// Called from the game thread every controller read. Per-frame budget: ~2 ms.
 +void dm_hudmove_frame(void) {
 +    if (!enabled()) return;
 +    if (atomic_load(&g_done_scan)) return;
-+    uint64_t now = now_ns() / 1000000ull;
-+    if (now < g_next_scan_ms) return;
-+    g_next_scan_ms = now + 5000;
-+    static int logged; if (!logged++) LOG("[hudmove] HUD 移位框架启动（DM_HUDMOVE，诊断=%d，手柄 presence=%d）", dump_requested(), atomic_load(&g_pad_present));
-+    scan_once();
++    static int logged; if (!logged++) LOG("[hudmove] HUD 移位框架启动（默认开，DM_HUDMOVE=0 关；诊断=%d，手柄 presence=%d）", dump_requested(), atomic_load(&g_pad_present));
++    if (!g_hi) {
++        uint8_t *base; size_t size;
++        svc_guest_range(&base, &size);
++        if (!base) return;
++        g_lo = (uint64_t)(uintptr_t)base; g_hi = g_lo + size; g_cursor = g_lo;
++        LOG("[hudmove] 增量扫描 guest AS %012llx..%012llx（每帧约 2ms，跨帧续走）", (unsigned long long)g_lo, (unsigned long long)g_hi);
++    }
++    uint64_t deadline = now_ns() / 1000000ull + 2;
++    while (!scan_step(deadline)) { }   // 步进直到预算用尽 | step until the budget runs out
 +}
 diff --git a/dm/host/hle_lan_hooks.c b/dm/host/hle_lan_hooks.c
 new file mode 100644
@@ -3378,10 +3417,34 @@ index 367779a..9eccbc0 100644
 +
 +#endif
 diff --git a/dm/host/hle_svc.c b/dm/host/hle_svc.c
-index 7683095..89ba099 100644
+index 7683095..9129d3f 100644
 --- a/dm/host/hle_svc.c
 +++ b/dm/host/hle_svc.c
-@@ -238,7 +238,9 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
+@@ -25,6 +25,23 @@ static _Atomic uint64_t *g_alias_bits;   // alias region page bitmap (alias_page
+ static uint8_t *g_stack; static size_t g_stack_cap;
+ // The address lies in the guest address block (every guest thread stack is here: the game's own heap or the stack region); the big-stack entry (hle_bigstack.c) uses it to decide whether to switch stacks
+ int dm_guest_as_contains(uintptr_t a) { uintptr_t b = (uintptr_t)g_as; return g_as && a >= b && a - b < RESERVE; }
++// Guest 地址区间可读（内存扫描器用）：别名区逐 4KB 页查映射位图（Map/Unmap 与宿主 mprotect
++// 同步维护），堆按提交水位算术；其余（未提交/空隙/栈外空页）一律不可读——调用方据此整步
++// 跳过，永不触碰 PROT_NONE 页。
++// | Guest range readable (for memory scanners): the alias region is checked page-by-page
++// | against the mapping bitmap (kept in sync with the host mprotect), the heap against the
++// | commit watermark; everything else reads as false so scanners skip whole steps and never
++// | touch a PROT_NONE page.
++int dm_guest_readable(uint64_t a, size_t n) {
++    if (!n) return 0;
++    uint64_t alias = (uint64_t)(uintptr_t)g_alias;
++    if (g_alias && a >= alias && g_alias_cap > (size_t)(a - alias) && n <= g_alias_cap - (size_t)(a - alias)) {
++        for (uint64_t p = (a - alias) >> 12, e = (a - alias + n - 1) >> 12; p <= e; p++)
++            if (!(atomic_load_explicit(&g_alias_bits[p >> 6], memory_order_acquire) >> (p & 63) & 1)) return 0;
++        return 1;
++    }
++    return dm_guest_heap_readable(a, n);
++}
+ 
+ static void mem_init(void) {
+     if (g_as) return;
+@@ -238,7 +255,9 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
          regs[0] = 0; regs[1] = v; return 0;
      }
      default:
