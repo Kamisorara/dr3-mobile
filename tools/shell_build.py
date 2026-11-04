@@ -104,6 +104,10 @@ def main():
         die(f'HEADER_SEARCH_PATHS 缺 host 目录 {host_dir}（front_ios.m 的 lan_native.h 将找不到）')
     if not (UPSTREAM / 'dm/host/lan_native.h').exists():
         die('树上 dm/host/lan_native.h 不存在（patch 新建文件未落地——快照/补丁状态不一致）')
+    _hm = UPSTREAM / 'dm/host/hle_hudmove.c'
+    if not _hm.exists() or b'ConsoleHUD_main.LayoutRoot.Globes' not in _hm.read_bytes():
+        die(f'树上 hle_hudmove.c 缺锚串字面量（{_hm.stat().st_size if _hm.exists() else "文件缺失"}）'
+            '——不是当前补丁的产物（扫描器会空转）')
     # The shell embeds no module images: no -segprot link flags for them, and the graphics layer's
     # DM_SHELL branch (ships in patches/nxnative.patch) is compiled in so shader sources are compiled on device.
     config = re.sub(r'^(OTHER_CFLAGS = .*)$', r'\1 -DDM_SHELL', config, flags=re.M)
