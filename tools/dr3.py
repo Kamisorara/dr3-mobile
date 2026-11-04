@@ -181,10 +181,15 @@ def bootstrap(_):
         if not (pinned.exists() and pinned.read_text().strip() == COMMIT and (actual or not (UPSTREAM / '.git').exists())):
             raise ValueError(f'Upstream commit mismatch (HEAD={actual or "none"}); use the pinned clean checkout')
     patch = ROOT / 'patches/nxnative.patch'
-    applied = subprocess.run(['git', 'apply', '--reverse', '--check', str(patch)], cwd=UPSTREAM, capture_output=True).returncode == 0
-    if not applied:
-        run(['git', 'apply', '--check', patch], WORK / 'logs/patch-check.log', cwd=UPSTREAM)
-        run(['git', 'apply', patch], WORK / 'logs/patch.log', cwd=UPSTREAM)
+    # git 2.56+ 的 --reverse --check 对「从未应用」的纯净树也返回成功（2026-11-04 CI 实证），
+    # 不能作为「已应用」判定——过期树会静默跳过 apply。改为确定性幂等：先尽力逆应用（已应用
+    # 则回滚；未应用则无害失败），再正向应用（纯净快照树 + 当前补丁，必须成功）。
+    # | git 2.56+ returns success for --reverse --check even on a tree where the patch was never
+    # | applied (measured on CI, 2026-11-04), so it cannot decide "already applied" — a stale tree
+    # | would silently skip it. Idempotent instead: best-effort reverse (rolls back an applied
+    # | patch, fails harmlessly on the bare snapshot), then a forward apply that must succeed.
+    subprocess.run(['git', 'apply', '--reverse', str(patch)], cwd=UPSTREAM, capture_output=True)
+    run(['git', 'apply', patch], WORK / 'logs/patch.log', cwd=UPSTREAM)
     copy_native()
     game = UPSTREAM / 'dm/games' / TITLE
     game.mkdir(exist_ok=True)
