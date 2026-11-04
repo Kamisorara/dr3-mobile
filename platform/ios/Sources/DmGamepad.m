@@ -48,6 +48,7 @@ static const CGFloat
     K_FACE_X = 81, K_PAD_Y = 82,                    // diamond centre from the outer edge; diamond and stick centre from the bottom (B's lower edge about 5 above it)
     K_FACE_GAP = 50, K_FACE_R = 27,                 // diamond: key distance from the centre, key radius
     K_PILL_DX = 52, K_PILL_Y = 22, K_PILL_W = 50, K_PILL_H = 28,   // − / +: centre from the screen's midline (the middle goes to the layout button) and from the top, size
+    K_BAR_X = 60, K_BAR_Y = 195, K_BAR_DX = 46, K_BAR_R = 22,      // D3 图标栏：✕/单/包/城 自右向左等距（城市键离最远，贴 mockup）
     K_SWAP_R = 15,                                  // layout button: top centre, level with − / +
     K_STICK_X = 81, K_STICK_R = 77, K_KNOB_R = 30,  // left stick: mirrors the diamond, the ring as large as the whole diamond (key distance + key radius), the knob a little larger than a diamond key
     K_STICK_GRAB = 1.4,                             // how near the ring centre a touch-down grabs a stick (times the ring radius)
@@ -143,7 +144,8 @@ static BOOL fullOnly(int b) {   // 仅 3D 布局显示的键（显式列举：�
 - (void)applyLayout {   // show / hide the controls for the current layout
     [CATransaction begin]; [CATransaction setDisableActions:YES];
     for (int b = 0; b < B_N; b++) _key[b].hidden = _d3 ? (b == B_LS || b == B_RS || b == B_L ||
-        b == B_LEFT || b == B_UP || b == B_RIGHT || b == B_DOWN) : (fullOnly(b) && !_full);
+        b == B_LEFT || b == B_UP || b == B_RIGHT || b == B_DOWN ||
+        b == B_PLUS || b == B_MINUS) : (fullOnly(b) && !_full);   // D3：±本体隐藏（包/单 pill = 同功能的语义入口）
     _ring[1].hidden = _knob[1].hidden = _d3 || !_full;
     _swapLabel.string = _d3 ? @"D3" : _full ? @"3D" : @"2D";
     [CATransaction commit];
@@ -181,7 +183,7 @@ static CGPoint side(CGRect s, int right, CGFloat dx, CGFloat y) { return CGPoint
             case B_X: return CGPointMake(hero.x - 114 * u, hero.y - 20 * u);              // Skill2 左
             case B_Y: return CGPointMake(hero.x - 50 * u, hero.y - 107 * u);              // Skill3 上偏左
             case B_R: return CGPointMake(hero.x + 40 * u, hero.y - 111 * u);              // Skill4 上偏右
-            case B_B: return CGPointMake(w - 60 * u, 195 * u);                            // ✕ 取消 → 图标栏
+            case B_B: return CGPointMake(w - K_BAR_X * u, K_BAR_Y * u);                   // ✕ 取消 → 图标栏最右
             default:  return hero;
         }
     }
@@ -199,11 +201,18 @@ static CGPoint side(CGRect s, int right, CGFloat dx, CGFloat y) { return CGPoint
 - (CGFloat)dpadR { return K_DPAD_R * self.u; }
 static BOOL isDrop(int b) { return b == B_ZL || b == B_L || b == B_ZR || b == B_R; }
 static BOOL isClick(int b) { return b == B_LS || b == B_RS; }
+- (CGPoint)d3BarPos:(int)b {   // D3 右上图标栏：✕(B_B)/单(B_MENU)/包(B_BAG)/城(B_ZR) 自右向左
+    CGFloat u = self.u; int slot = b == B_B ? 0 : b == B_MENU ? 1 : b == B_BAG ? 2 : 3;
+    return CGPointMake(self.bounds.size.width - (K_BAR_X + slot * K_BAR_DX) * u, K_BAR_Y * u);
+}
 - (CGPoint)dropCenter:(int)b { CGRect s = self.safe; CGFloat u = self.u; BOOL z = b == B_ZL || b == B_ZR;
+    if (_d3 && b == B_ZR) return [self d3BarPos:B_ZR];   // D3：城在图标栏（不再是顶部泪滴）
     return side(s, b == B_ZR || b == B_R, (z ? K_ZL_X : K_L_X) * u, CGRectGetMinY(s) + (z ? K_ZL_Y : K_L_Y) * u); }
 - (CGFloat)dropR:(int)b { return (b == B_ZL || b == B_ZR ? K_ZL_R : K_L_R) * self.u; }
 - (CGPoint)clickCenter:(int)b { CGRect s = self.safe; CGFloat u = self.u; return side(s, b == B_RS, K_CLICK_X * u, CGRectGetMinY(s) + K_ZL_Y * u); }
 - (CGRect)pillRect:(int)b { CGRect s = self.safe; CGFloat u = self.u, w = K_PILL_W * u, h = K_PILL_H * u;
+    if (_d3 && (b == B_BAG || b == B_MENU)) {   // D3：包/单并入右上图标栏（圆键；返回外接方供命中与圆角矩形绘制——正方形圆角=圆）
+        CGPoint c = [self d3BarPos:b]; return CGRectMake(c.x - K_BAR_R * u, c.y - K_BAR_R * u, 2 * K_BAR_R * u, 2 * K_BAR_R * u); }
     // − 在中线左、+ 在右；背包 / 菜单快捷键再往外一档（D3：包 = Y、菜单 = + 的重复入口，游戏内改键后语义跟随真实键）
     CGFloat off = b == B_PLUS ? K_PILL_DX : b == B_MINUS ? -K_PILL_DX
                 : b == B_MENU ? K_PILL_DX * 2 + 10 : b == B_BAG ? -(K_PILL_DX * 2 + 10) : 0;
@@ -216,9 +225,10 @@ static CGFloat dist(CGPoint a, CGPoint b) { return hypot(a.x - b.x, a.y - b.y); 
     CGFloat u = self.u;
     for (int i = 0; i < (int)(sizeof k_btns / sizeof *k_btns); i++) { int b = k_btns[i];
         if (fullOnly(b) && !_full) continue;
-        BOOL hit = isDrop(b) ? dist(p, [self dropCenter:b]) <= [self dropR:b] * 1.35
+        if (_d3 && (b == B_PLUS || b == B_MINUS)) continue;   // D3：±本体已隐藏（功能=包/单图标键）
+        BOOL hit = isDrop(b) ? dist(p, [self dropCenter:b]) <= (b == B_ZR && _d3 ? K_BAR_R : [self dropR:b]) * 1.2
                  : isClick(b) ? dist(p, [self clickCenter:b]) <= K_CLICK_R * u * 1.35
-                 : CGRectContainsPoint(CGRectInset([self pillRect:b], -8 * u, -8 * u), p);
+                 : CGRectContainsPoint(CGRectInset([self pillRect:b], -(b == B_BAG || b == B_MENU ? (_d3 ? 2 : 8) : 8) * u, -(b == B_BAG || b == B_MENU ? (_d3 ? 2 : 8) : 8) * u), p);
         if (hit) return b; }
     return -1;
 }
@@ -306,7 +316,8 @@ static CGFloat dist(CGPoint a, CGPoint b) { return hypot(a.x - b.x, a.y - b.y); 
         if ([self inSwap:p]) { [_owner setObject:@(C_SWAP) forKey:t]; continue; }
         // diamond, D-pad, the two sticks: take the one with the smallest distance / grab radius, if it is <= 1
         CGFloat best = 1; int kind = C_NONE, idx = 0;
-        CGFloat f = dist(p, self.faceCenter) / (self.faceGap + self.faceR * 1.6); if (f <= best) { best = f; kind = C_FACE; }
+        if (_d3) { if ([self faceAt:p]) { kind = C_FACE; best = 0; } }   // D3：点中技能环/图标栏具体键才抢，否则透传游戏区（弧外的点击是拾取/移动；固定半径竞争公式够不着技能弧 111u+）
+        else { CGFloat f = dist(p, self.faceCenter) / (self.faceGap + self.faceR * 1.6); if (f <= best) { best = f; kind = C_FACE; } }
         if (_full) { CGFloat d = dist(p, self.dpadCenter) / (self.dpadR * K_DPAD_GRAB); if (d < best) { best = d; kind = C_DPAD; } }
         for (int i = 0; i < (_full ? 2 : 1); i++) if (!_stick[i]) {
             CGFloat s = dist(p, [self stickHome:i]) / ([self stickR:i] * K_STICK_GRAB); if (s < best) { best = s; kind = C_STICK; idx = i; } }
@@ -428,13 +439,11 @@ static UIImage *controlImage(CGSize size,CGFloat scale,void (^draw)(CGContextRef
     if (_d3) {   // D3 语义标签 + 药水/城键重摆（键 = 真实手柄键，只改几何与标签；映射见 docs/移动端虚拟按键设计.md）
         static NSString *const d3names[B_N] = {@"攻", @"B", @"2", @"3", @"L3", @"R3", @"L", @"4", @"药", @"城", @"+", @"−", @"包", @"单"};
         for (int b = 0; b < B_N; b++) if (d3names[b]) _label[b].string = d3names[b];
-        // 药水（B_ZL）：左摇杆右上；城（B_ZR）：顶栏「单」右侧（泪滴改圆）
+        // 药水（B_ZL）：左摇杆右上；城（B_ZR）：右上图标栏最左（泪滴改圆；包/单的图标栏圆由 k_btns 循环按 pillRect D3 分支画出）
         CGPoint pot = [self stickHome:0]; pot.x += 118 * u; pot.y -= 46 * u;
         setPath(_key[B_ZL], circlePath(pot, 26 * u)); placeLabel(_label[B_ZL], pot, 18 * u);
-        CGPoint tp = [self pillRect:B_MENU].origin; tp.x += (K_PILL_W + 12) * u;
-        CGRect tpRect = CGRectMake(tp.x, tp.y, K_PILL_W * u, K_PILL_H * u);
-        setPath(_key[B_ZR], CGPathCreateWithRoundedRect(tpRect, tpRect.size.height / 2, tpRect.size.height / 2, NULL));
-        placeLabel(_label[B_ZR], CGPointMake(CGRectGetMidX(tpRect), CGRectGetMidY(tpRect)), 18 * u);
+        CGPoint tp = [self d3BarPos:B_ZR];
+        setPath(_key[B_ZR], circlePath(tp, K_BAR_R * u)); placeLabel(_label[B_ZR], tp, 18 * u);
         _key[B_ZR].hidden = NO; _label[B_ZR].hidden = NO;
         // Skill4（B_R）在环上（k_btns 循环按顶部泪滴画过，这里重画到环位）
         CGPoint r4 = [self facePos:B_R]; setPath(_key[B_R], circlePath(r4, 27 * u));
