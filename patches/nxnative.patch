@@ -2353,10 +2353,10 @@ index 561a3c8..f8e02e2 100644
 +}
 diff --git a/dm/host/hle_hudmove.c b/dm/host/hle_hudmove.c
 new file mode 100644
-index 0000000..85f4e8c
+index 0000000..acdcf68
 --- /dev/null
 +++ b/dm/host/hle_hudmove.c
-@@ -0,0 +1,172 @@
+@@ -0,0 +1,177 @@
 +// HUD 移位（触摸模式生效、物理手柄接入自动还原）——结构校准阶段。
 +// 原理：.ui 加载后节点路径是堆里的明文串；在 guest 堆里搜目标节点的路径串
 +// （ConsoleHUD_main.LayoutRoot.Globes = 血球容器），再搜指向它的指针（节点记录），
@@ -2396,8 +2396,12 @@ index 0000000..85f4e8c
 +// | used + a real first-tick print: LTO stripped these literals from the linked binary
 +// | once (indirect refs + constant propagation; CI byte-level probe read offset=-1).
 +static const char *const anchors[] __attribute__((used)) = {
-+    "ConsoleHUD_main.LayoutRoot.Globes",   // 血球容器（血球/巅峰球）
-+    "ConsoleHUD_main.LayoutRoot",          // HUD 布局根（后备锚）
++    // 锚必须逐字存在于 .ui 字符串池（真机验证：完整路径「...LayoutRoot.Globes」并不存在——
++    // Globes 是逐段存名的子节点；池里的完整串只有这些）。
++    // | Anchors must exist verbatim in the .ui string pool (measured: "...LayoutRoot.Globes"
++    // | does not exist as a whole string; Globes is a per-segment child node name).
++    "ConsoleHUD_main.LayoutRoot",                        // HUD 布局根（主锚）
++    "ConsoleHUD_main.LayoutRoot.hp_bar_template_player", // 血条模板（HUD 已加载的强信号）
 +};
 +
 +typedef struct { const char *path; size_t len; uint64_t addr; int dumped; } anchor_state;
@@ -2442,12 +2446,13 @@ index 0000000..85f4e8c
 +        for (int ai = 0; ai < (int)(sizeof anchors / sizeof *anchors); ai++)
 +            if (!g_st[ai].addr) missing++;
 +        if (!missing) { g_pass = 2; g_cursor = g_lo; return; }
-+        if (++g_miss_rounds >= 12) {
++        if (++g_miss_rounds >= 40) {   // 用户从启动到进主城（HUD 布局加载）要以分钟计，40 轮 ≈ 数分钟
 +            LOG("[hudmove] %d 轮未命中锚串（HUD 布局未加载或路径串不按此存储），放弃扫描（重启游戏重试）", g_miss_rounds);
 +            atomic_store(&g_done_scan, 1);
 +            return;
 +        }
-+        LOG("[hudmove] 锚整轮未命中（布局未加载？继续增量重扫，第 %d 轮）", g_miss_rounds + 1);
++        for (int ai = 0; ai < (int)(sizeof anchors / sizeof *anchors); ai++)
++            if (!g_st[ai].addr) LOG("[hudmove] 锚 '%s' 第 %d 轮未命中（布局未加载？继续增量重扫）", anchors[ai], g_miss_rounds + 1);
 +        g_cursor = g_lo;
 +        return;
 +    }
