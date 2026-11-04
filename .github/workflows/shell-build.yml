@@ -51,6 +51,13 @@ jobs:
             python3 -c "import zipfile; zipfile.ZipFile('../snap.zip').extractall('.')"
             rm -f ../snap.zip
             echo "$COMMIT" > .dm-pinned
+            # 取证：git 对纯净树+当前 patch 的判定（bootstrap 的 applied 分支依赖它）
+            echo "--- git 版本与 patch 状态取证 ---"
+            git --version
+            ls dm/host/lan_native.h 2>&1 || true
+            git apply --reverse --check ../../patches/nxnative.patch; echo "reverse-check rc=$?"
+            git apply --check ../../patches/nxnative.patch; echo "forward-check rc=$?"
+            echo "--- 取证结束 ---"
           fi
       - name: Bootstrap pinned upstream
         env:
