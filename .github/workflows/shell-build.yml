@@ -25,20 +25,24 @@ jobs:
         run: |
           pip install -r requirements.txt
           brew install xcodegen
-      - name: Restore bootstrapped upstream
-        uses: actions/cache/restore@v4
-        with:
-          # 命中即跳过 API 树重建（一次重建几百次调用，是 403 限流的根源）；键 = 补丁摘要
-          # | A hit skips the API-heavy tree rebuild (hundreds of calls; the 403 source); key = patch digest
-          path: third_party/nxnative
-          key: nxnative-${{ hashFiles('patches/nxnative.patch') }}
+      # 缓存已移除：bootstrap 主力路径走 Release 快照 zip（零 API 调用，解压几秒），缓存不再有收益；
+      # 且缓存树的「patch 已应用」判定是假阳性（git 对新建 diff 的逆应用只查存在性不查内容），
+      # 树过期时 patch 静默不重应用、删除还有传播延迟——这类坑 2026-11-04 连吃三轮，直接根除。
+      # | Cache removed: the bootstrap fast path is the Release snapshot zip (zero API calls,
+      # | seconds to unzip), so caching buys nothing; worse, the "patch already applied" probe is
+      # | a false positive on stale trees (git apply --reverse --check for new-file diffs only
+      # | checks existence), and deleted entries kept being served — bit us three times in a row.
       - name: Restore pinned snapshot (release asset)
         env:
           GITHUB_TOKEN: ${{ github.token }}
           COMMIT: '9579030e5b1f0443c12b7376559560915b6d4c4b'
         run: |
           if [ ! -d third_party/nxnative/dm ]; then
-            # 主力路径：Release 资产里的 pinned 快照（免 API 树重建；孤儿提交重建是 403 限流的根源）
+            # 主力路径：Release 资产里的 pinned 快照 = 纯孤儿树（git archive HEAD，不含补丁状态）——
+            # bootstrap 每轮把当前 patch 真实应用一遍，zip 与 patch 解耦、永不静默过期
+            # | Fast path: the pinned snapshot = the bare orphan tree (git archive HEAD, no patch
+            # | state). bootstrap then truly applies the current patch each run, so the zip and
+            # | the patch can never silently drift apart.
             gh release download nxnative-s9579030 --repo "$GITHUB_REPOSITORY" --pattern 'nxnative-s9579030.zip' --output third_party/snap.zip
             mkdir -p third_party/nxnative
             cd third_party/nxnative
@@ -50,15 +54,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}   # 快照缺失时的兜底：孤儿提交经 GitHub API 树重建 | fallback when the snapshot is missing
         run: python3 tools/dr3.py bootstrap
-      - name: Save bootstrapped upstream
-        # actions/cache 的默认 post 只在 job 成功时保存——xcodebuild 失败的构建会丢缓存，
-        # 之后每轮都全量重建再撞限流。bootstrap 一完成就保存（树已就绪，与编译成败无关）。
-        # | actions/cache's default post-step only saves on job success; a failing xcodebuild
-        # | would drop the tree and every later run would rebuild from scratch into the 403.
-        uses: actions/cache/save@v4
-        with:
-          path: third_party/nxnative
-          key: nxnative-${{ hashFiles('patches/nxnative.patch') }}
       - name: Chain inputs digest (diagnostics)
         env:
           DM_GAME: 01001B300B9BE000
