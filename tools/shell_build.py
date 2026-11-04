@@ -154,6 +154,12 @@ def main():
     if rc: die(f'xcodebuild exited {rc}; see {log}')
 
     app = next(p for p in (WORK / 'build/ios-shell/Build/Products').rglob(f'{APP_NAME}.app'))
+    _exe = app / APP_NAME
+    _data = _exe.read_bytes()
+    # 产物取证：锚串源文件已由哨兵钉死在树上，若编译产物里没有，则问题在编译/链接层（symlink
+    # 解析、dead-strip 等），这里直接给出字节级事实。
+    for _s in (b'ConsoleHUD_main.LayoutRoot.Globes', b'DM_HUDMOVE'):
+        print(f'[shell] 产物取证 {_s.decode()}: offset={_data.find(_s)}', flush=True)
     app_dir = out / 'app'
     if app_dir.exists(): shutil.rmtree(app_dir)
     shutil.copytree(app, app_dir)
