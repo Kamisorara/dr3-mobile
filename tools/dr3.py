@@ -193,7 +193,16 @@ def bootstrap(_):
     if _out := (WORK / 'logs/patch.log').read_text().strip():
         print('[bootstrap] git apply 输出：', _out, flush=True)   # 取证：skipping/告警都让它现形
     if not (UPSTREAM / 'dm/host/lan_native.h').exists():
-        sys.exit('[x] [bootstrap] git apply 后 lan_native.h 仍不存在——patch 未真正落地，见上方输出')
+        # git 2.56+ 的 apply 语义变了（2026-11-04 CI 实证：rc=0、零输出、零效果——patch 被
+        # 当作已应用静默跳过）。换经典 patch 工具兜底：-p1 剥前缀、--forward 跳过已应用 hunk、
+        # --batch 不交互；再次验证哨兵文件。
+        # | git 2.56+ changed apply semantics (measured on CI: rc=0, no output, no effect —
+        # | the patch is silently skipped as "already applied"). Fall back to classic patch:
+        # | -p1 strips prefixes, --forward skips already-applied hunks, --batch never prompts.
+        run(['patch', '-p1', '--forward', '--batch', '-i', str(patch)],
+            WORK / 'logs/patch-fallback.log', cwd=UPSTREAM)
+        if not (UPSTREAM / 'dm/host/lan_native.h').exists():
+            sys.exit('[x] git apply 与 patch -p1 都未能落地 lan_native.h——patch/树状态异常')
     copy_native()
     game = UPSTREAM / 'dm/games' / TITLE
     game.mkdir(exist_ok=True)
