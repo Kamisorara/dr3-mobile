@@ -1610,6 +1610,230 @@ index 31b4420..51cec58 100644
 -	clang $(CFLAGS) -I../gfx/nvn/include -I$(dir $(GAME_H)) -I$(GAME_DIR) -I$(VPX) -I../third_party/stb_vorbis -fobjc-arc -o $@ $(SRC) $(GFX) $(VPX_LIB) -framework Cocoa -framework QuartzCore -framework Metal -framework AudioToolbox -framework ImageIO -framework UniformTypeIdentifiers
 +dmhost: $(SRC) $(GFX) dm.h hle.h dm_input.h front.h touch_mac.h ../ios/Sources/dm_touch_controls.[ch] $(GFX_H) controller_effects.h lan_native.h dm_d3_graphics.h $(GAME_H) $(GAME_DIR)/dmsh_chain.h $(GAME_STAMP) $(VPX_LIB)
 +	clang $(CFLAGS) -I../gfx/nvn/include -I$(dir $(GAME_H)) -I$(GAME_DIR) -I$(VPX) -I../third_party/stb_vorbis -fobjc-arc -o $@ $(SRC) $(GFX) $(VPX_LIB) -framework Cocoa -framework GameController -framework CoreHaptics -framework QuartzCore -framework Metal -framework MetalFX -framework AudioToolbox -framework ImageIO -framework UniformTypeIdentifiers
+diff --git a/dm/host/controller_effects.h b/dm/host/controller_effects.h
+new file mode 100644
+index 0000000..9c79feb
+--- /dev/null
++++ b/dm/host/controller_effects.h
+@@ -0,0 +1,59 @@
++// Shared Mac/iOS physical-controller effect ABI. No virtual actuators or motion.
++#pragma once
++#include <stdint.h>
++#include <math.h>
++
++typedef struct { float amp_low,freq_low,amp_high,freq_high; } dm_vibration_value;
++typedef struct { float intensity,sharpness; } dm_haptic_envelope;
++enum { DM_RUMBLE_LEFT=1,DM_RUMBLE_RIGHT=2,DM_RUMBLE_COMBINED=4 };
++_Static_assert(sizeof(dm_vibration_value)==16,"Nintendo vibration value ABI");
++
++static inline float dm_effect_unit(float value) {
++    return !isfinite(value) || value<=0?0:value>1?1:value;
++}
++static inline dm_vibration_value dm_vibration_sanitize(dm_vibration_value v) {
++    v.amp_low=dm_effect_unit(v.amp_low);v.amp_high=dm_effect_unit(v.amp_high);
++    if(!isfinite(v.freq_low) || v.freq_low<=0){v.freq_low=0;v.amp_low=0;}
++    if(!isfinite(v.freq_high) || v.freq_high<=0){v.freq_high=0;v.amp_high=0;}
++    if(v.freq_low>1250)v.freq_low=1250;if(v.freq_high>1250)v.freq_high=1250;
++    return v;
++}
++static inline dm_haptic_envelope dm_vibration_envelope(dm_vibration_value input) {
++    dm_vibration_value v=dm_vibration_sanitize(input);float total=v.amp_low+v.amp_high;
++    float frequency=total>0?(v.freq_low*v.amp_low+v.freq_high*v.amp_high)/total:40;
++    float sharpness=frequency>0?log2f(frequency/40.0f)/5.0f:0;
++    return (dm_haptic_envelope){fmaxf(v.amp_low,v.amp_high),dm_effect_unit(sharpness)};
++}
++static inline int dm_rumble_device_supported(unsigned capabilities,unsigned device) {
++    return device<2 && ((capabilities&(1u<<device)) || (device==0 && (capabilities&DM_RUMBLE_COMBINED)));
++}
++static inline uint32_t dm_rumble_handle(unsigned style,uint32_t player,unsigned device) {
++    // Verified in D3 SDK 8.2 detail::GetVibrationDeviceHandles: full=3, handheld=4.
++    unsigned index=style==1?3:style==2?4:0;
++    return index && player<=0x20 && device<2 ? index|(player<<8)|(device<<16):0;
++}
++static inline int dm_rumble_decode(uint32_t handle,uint32_t player) {
++    unsigned style=handle&255,device=(handle>>16)&255;
++    return !(handle>>24) && (style==3 || style==4) && ((handle>>8)&255)==player && device<2 ? (int)device:-1;
++}
++
++#if defined(DM_CONTROLLER_EFFECTS_OPTIONAL) && !defined(DM_CONTROLLER_EFFECTS_TEST)
++#define DM_EFFECT_API __attribute__((weak_import))
++#else
++#define DM_EFFECT_API
++#endif
++#ifdef __cplusplus
++extern "C" {
++#endif
++unsigned dm_controller_rumble_capabilities(void) DM_EFFECT_API;
++unsigned dm_controller_rumble_cached_capabilities(void) DM_EFFECT_API;
++int dm_controller_rumble_permitted(void) DM_EFFECT_API;
++int dm_controller_rumble_initialize(unsigned device) DM_EFFECT_API;
++int dm_controller_rumble_send(unsigned device,const dm_vibration_value *value) DM_EFFECT_API;
++int dm_controller_rumble_applied(unsigned device,dm_vibration_value *value) DM_EFFECT_API;
++void dm_controller_effects_set_active(int active) DM_EFFECT_API;
++void dm_controller_effects_stop(void) DM_EFFECT_API;
++#ifdef __cplusplus
++}
++#endif
++#undef DM_EFFECT_API
+diff --git a/dm/host/controller_effects.m b/dm/host/controller_effects.m
+new file mode 100644
+index 0000000..b39a06b
+--- /dev/null
++++ b/dm/host/controller_effects.m
+@@ -0,0 +1,153 @@
++// Core Haptics controller output, shared by Mac and iOS. The two NVN bands are
++// translated to intensity/sharpness; this is not an exact HD-rumble waveform.
++#import <GameController/GameController.h>
++#import <CoreHaptics/CoreHaptics.h>
++#include <TargetConditionals.h>
++#include <stdatomic.h>
++#include <stdio.h>
++#include <string.h>
++#include "controller_effects.h"
++
++@interface DMRumbleChannel:NSObject
++@property(nonatomic,strong) CHHapticEngine *engine;
++@property(nonatomic,strong) id<CHHapticPatternPlayer> player;
++@property(nonatomic) BOOL started;
++@property(nonatomic) BOOL failed;
++@property(nonatomic) dm_vibration_value applied;
++@end
++@implementation DMRumbleChannel @end
++
++static dispatch_queue_t queue;
++static void *queueKey=&queueKey;
++static GCController *controller;
++static DMRumbleChannel *channels[2];
++static _Atomic unsigned capabilities;
++static _Atomic int active=1;
++static _Atomic unsigned generation;
++static unsigned physicalCapabilities;
++static unsigned failures;
++static void effect_error(const char *operation,NSError *error) {
++    if(failures++<32)fprintf(stderr,"[dm] [controller-effects] %s: %s\n",operation,error.localizedDescription.UTF8String?:"unavailable");
++}
++static void stop_channel(DMRumbleChannel *channel) {
++    if(!channel)return;
++    if(channel.started)[channel.player stopAtTime:CHHapticTimeImmediate error:nil];
++    channel.started=NO;channel.applied=(dm_vibration_value){0};
++}
++static void stop_all(void) {
++    for(unsigned i=0;i<2;i++)stop_channel(channels[i]);
++}
++static void disable_channel(unsigned side) {
++    stop_channel(channels[side]);channels[side].failed=YES;
++    unsigned remove=side?DM_RUMBLE_RIGHT:(physicalCapabilities&DM_RUMBLE_COMBINED)?DM_RUMBLE_COMBINED:DM_RUMBLE_LEFT;
++    atomic_fetch_and(&capabilities,~remove);
++}
++static void refresh(void) {
++    NSArray<GCController *> *attached=[GCController controllers];
++    if(controller && [attached containsObject:controller] && controller.haptics)return;
++    stop_all();for(unsigned i=0;i<2;i++){[channels[i].engine stopWithCompletionHandler:nil];channels[i]=nil;}
++    controller=nil;physicalCapabilities=0;atomic_store(&capabilities,0);atomic_fetch_add(&generation,1);
++    for(GCController *candidate in attached)if(candidate.extendedGamepad && candidate.haptics){controller=candidate;break;}
++    if(!controller)return;
++    NSSet<GCHapticsLocality> *localities=controller.haptics.supportedLocalities;
++    unsigned bits=0;
++    for(unsigned side=0;side<2;side++) {
++        GCHapticsLocality locality=side?GCHapticsLocalityRightHandle:GCHapticsLocalityLeftHandle;
++        if(![localities containsObject:locality])continue;
++        CHHapticEngine *engine=[controller.haptics createEngineWithLocality:locality];
++        if(!engine)continue;
++        DMRumbleChannel *channel=[DMRumbleChannel new];channel.engine=engine;channels[side]=channel;bits|=1u<<side;
++    }
++    if(!bits) {
++        CHHapticEngine *engine=[controller.haptics createEngineWithLocality:GCHapticsLocalityDefault];
++        if(engine){channels[0]=[DMRumbleChannel new];channels[0].engine=engine;bits=DM_RUMBLE_COMBINED;}
++    }
++    for(unsigned side=0;side<2;side++)if(channels[side]) {
++        __weak DMRumbleChannel *weak=channels[side];
++        channels[side].engine.stoppedHandler=^(CHHapticEngineStoppedReason reason){
++            (void)reason;dispatch_async(queue,^{DMRumbleChannel *c=weak;stop_channel(c);c.player=nil;});
++        };
++        channels[side].engine.resetHandler=^{dispatch_async(queue,^{DMRumbleChannel *c=weak;stop_channel(c);c.player=nil;});};
++    }
++    physicalCapabilities=bits;atomic_store(&capabilities,bits);
++    fprintf(stderr,"[dm] [controller-effects] physical controller haptics capabilities=%u (bands approximated, motion unavailable)\n",bits);
++}
++static void initialized(void) {
++    static dispatch_once_t once;dispatch_once(&once,^{
++        dispatch_queue_attr_t attributes=dispatch_queue_attr_make_with_autorelease_frequency(DISPATCH_QUEUE_SERIAL,DISPATCH_AUTORELEASE_FREQUENCY_WORK_ITEM);
++        queue=dispatch_queue_create("enginefuture.controller-effects",attributes);
++        dispatch_queue_set_specific(queue,queueKey,queueKey,NULL);
++        NSNotificationCenter *notifications=NSNotificationCenter.defaultCenter;
++        for(NSString *name in @[GCControllerDidConnectNotification,GCControllerDidDisconnectNotification])
++            [notifications addObserverForName:name object:nil queue:nil usingBlock:^(NSNotification *n){(void)n;dispatch_async(queue,^{refresh();});}];
++#if TARGET_OS_IPHONE
++        NSArray *off=@[@"UIApplicationWillResignActiveNotification",@"UIApplicationDidEnterBackgroundNotification"];
++        NSArray *on=@[@"UIApplicationDidBecomeActiveNotification"];
++#else
++        NSArray *off=@[@"NSApplicationDidResignActiveNotification",@"NSWindowDidResignKeyNotification"];
++        NSArray *on=@[@"NSApplicationDidBecomeActiveNotification",@"NSWindowDidBecomeKeyNotification"];
++#endif
++        for(NSString *name in off)[notifications addObserverForName:name object:nil queue:nil usingBlock:^(NSNotification *n){(void)n;dm_controller_effects_set_active(0);}];
++        for(NSString *name in on)[notifications addObserverForName:name object:nil queue:nil usingBlock:^(NSNotification *n){(void)n;dm_controller_effects_set_active(1);}];
++    });
++}
++static void synchronous(dispatch_block_t block) {
++    initialized();if(dispatch_get_specific(queueKey))block();else dispatch_sync(queue,block);
++}
++static int start_channel(unsigned side) {
++    DMRumbleChannel *channel=side<2?channels[side]:nil;
++    if(!channel || channel.failed || !atomic_load(&active))return 0;
++    if(channel.started)return 1;
++    NSError *error=nil;
++    if(![channel.engine startAndReturnError:&error]){effect_error("engine start",error);disable_channel(side);return 0;}
++    return 1;
++}
++unsigned dm_controller_rumble_capabilities(void) {
++    synchronous(^{refresh();});return atomic_load(&capabilities);
++}
++unsigned dm_controller_rumble_cached_capabilities(void) { return atomic_load(&capabilities); }
++int dm_controller_rumble_permitted(void) {
++    return atomic_load(&active) && dm_controller_rumble_capabilities()!=0;
++}
++int dm_controller_rumble_initialize(unsigned device) {
++    __block int result=0;synchronous(^{refresh();if(dm_rumble_device_supported(atomic_load(&capabilities),device))result=start_channel(device);});return result;
++}
++int dm_controller_rumble_send(unsigned device,const dm_vibration_value *input) {
++    if(!input || !dm_rumble_device_supported(atomic_load(&capabilities),device) || !atomic_load(&active))return 0;
++    dm_vibration_value value;memcpy(&value,input,sizeof value);value=dm_vibration_sanitize(value);
++    unsigned epoch=atomic_load(&generation);
++    dispatch_async(queue,^{
++        if(!atomic_load(&active) || epoch!=atomic_load(&generation))return;
++        DMRumbleChannel *channel=channels[device];dm_haptic_envelope envelope=dm_vibration_envelope(value);
++        if(!channel)return;
++        if(envelope.intensity==0){stop_channel(channel);return;}
++        dm_vibration_value previous=channel.applied;
++        if(channel.started && !memcmp(&previous,&value,sizeof value))return;
++        if(!start_channel(device))return;
++        NSError *error=nil;
++        if(!channel.player) {
++            CHHapticEvent *event=[[CHHapticEvent alloc] initWithEventType:CHHapticEventTypeHapticContinuous parameters:@[
++                [[CHHapticEventParameter alloc] initWithParameterID:CHHapticEventParameterIDHapticIntensity value:1],
++                [[CHHapticEventParameter alloc] initWithParameterID:CHHapticEventParameterIDHapticSharpness value:0]] relativeTime:0 duration:GCHapticDurationInfinite];
++            CHHapticPattern *pattern=[[CHHapticPattern alloc] initWithEvents:@[event] parameters:@[] error:&error];
++            channel.player=pattern?[channel.engine createPlayerWithPattern:pattern error:&error]:nil;
++        }
++        if(!channel.player){effect_error("create player",error);disable_channel(device);return;}
++        NSArray *parameters=@[
++            [[CHHapticDynamicParameter alloc] initWithParameterID:CHHapticDynamicParameterIDHapticIntensityControl value:envelope.intensity relativeTime:0],
++            [[CHHapticDynamicParameter alloc] initWithParameterID:CHHapticDynamicParameterIDHapticSharpnessControl value:envelope.sharpness relativeTime:0]];
++        if(![channel.player sendParameters:parameters atTime:CHHapticTimeImmediate error:&error] ||
++           (!channel.started && ![channel.player startAtTime:CHHapticTimeImmediate error:&error])) {
++            effect_error("apply haptic envelope",error);disable_channel(device);return;
++        }
++        channel.started=YES;channel.applied=value;
++    });return 1;
++}
++int dm_controller_rumble_applied(unsigned device,dm_vibration_value *value) {
++    if(!value)return 0;memset(value,0,sizeof *value);__block int result=0;
++    synchronous(^{refresh();if(device<2 && channels[device].started){*value=channels[device].applied;result=1;}});return result;
++}
++void dm_controller_effects_set_active(int enabled) {
++    initialized();atomic_fetch_add(&generation,1);atomic_store(&active,enabled!=0);dispatch_async(queue,^{if(!enabled)stop_all();else{for(unsigned i=0;i<2;i++)channels[i].failed=NO;atomic_store(&capabilities,physicalCapabilities);refresh();}});
++}
++void dm_controller_effects_stop(void) {initialized();atomic_fetch_add(&generation,1);synchronous(^{stop_all();});}
 diff --git a/dm/host/dm.h b/dm/host/dm.h
 index fda33ac..5bd0f7c 100644
 --- a/dm/host/dm.h
@@ -1794,6 +2018,140 @@ index c7559ca..1cbe064 100644
          // Guest thread: 64 MiB stack (the Switch main thread stack is specified by npdm; the host gives plenty)
          static guest_arg ga; ga.fn = guest;
          pthread_attr_t a; pthread_attr_init(&a); pthread_attr_setstacksize(&a, 64u << 20);
+diff --git a/dm/host/gamepad_mac.m b/dm/host/gamepad_mac.m
+new file mode 100644
+index 0000000..e6f7ab9
+--- /dev/null
++++ b/dm/host/gamepad_mac.m
+@@ -0,0 +1,128 @@
++// Adapted from Blade II Mobile gamepad_generic.m (MIT); see third_party/LICENSE.blade2.
++// Nintendo position mapping, separate physical input, hot plug and focus management.
++#import <GameController/GameController.h>
++#include <TargetConditionals.h>
++#include <math.h>
++#include <string.h>
++#include "dm.h"
++#include "dm_input.h"
++
++enum { NSLOT = 8 };
++static struct { const void *who; uint64_t b; int32_t ax[4]; } g_s[NSLOT];
++static int g_active = 1;
++static int g_count;                            // number of attached extended gamepads
++static void (*g_on_present)(int present);
++static int g_face_letter = -1; static float g_dead = -1;
++
++static int slot_of(const void *who, int make) {
++    int fr = -1;
++    for (int i = 0; i < NSLOT; i++) { if (g_s[i].who == who) return i; if (fr < 0 && !g_s[i].who) fr = i; }
++    if (make && fr >= 0) { memset(&g_s[fr], 0, sizeof g_s[fr]); g_s[fr].who = who; return fr; }
++    return -1;
++}
++// Optional bounded publication trace. Uses the same clock as the guest HID receipt.
++static void trace(uint64_t buttons, const int32_t axes[4]) {
++    static FILE *file; static int initialized, count;
++    static uint64_t last_buttons, last_flush;
++    if (!initialized) {
++        initialized = 1; const char *path = getenv("DM_PAD_EVENT_LOG");
++        if (path && *path) { file = fopen(path, "w"); if (!file) LOG("Cannot open gamepad event log: %s", path); }
++    }
++    if (!file || count >= 65536) return;
++    uint64_t time = now_ns();
++    fprintf(file, "{\"time_ns\":%llu,\"buttons\":%llu,\"axes\":[%d,%d,%d,%d],\"active\":%d,\"controllers\":%d,\"read_samples\":%llu}\n",
++        (unsigned long long)time, (unsigned long long)buttons, axes[0], axes[1], axes[2], axes[3],
++        g_active, g_count, (unsigned long long)dm_input_samples());
++    if (++count == 65536) fprintf(file, "{\"limit_reached\":65536}\n");
++    if (buttons != last_buttons || (!axes[0] && !axes[1] && !axes[2] && !axes[3]) || !g_active || time - last_flush >= 1000000000ull || count == 65536) { fflush(file); last_flush = time; }
++    last_buttons = buttons;
++}
++// Merge all controllers and hand the result to the host
++static void apply(void) {
++    uint64_t b = 0; int32_t ax[4] = {0}; double best[2] = {0};
++    for (int i = 0; i < NSLOT; i++) {
++        if (!g_s[i].who) continue; b |= g_s[i].b;
++        for (int k = 0; k < 2; k++) { double m = hypot(g_s[i].ax[2 * k], g_s[i].ax[2 * k + 1]); if (m > best[k]) { best[k] = m; ax[2 * k] = g_s[i].ax[2 * k]; ax[2 * k + 1] = g_s[i].ax[2 * k + 1]; } }
++    }
++    dm_pad_set(b, ax[0], ax[1], ax[2], ax[3]);
++    trace(b, ax);
++}
++// Stick: radial dead zone, then rescale to full range
++static void stick(float x, float y, int32_t *ox, int32_t *oy) {
++    if (g_dead < 0) { const char *e = getenv("DM_PAD_DEADZONE"); g_dead = e ? (float)atof(e) : 0.12f; if (!isfinite(g_dead) || g_dead < 0 || g_dead > 0.9f) g_dead = 0.12f; }
++    if (!isfinite(x) || !isfinite(y)) { *ox = *oy = 0; return; }
++    float m = hypotf(x, y);
++    if (m <= g_dead) { *ox = *oy = 0; return; }
++    float k = (fminf(m, 1.0f) - g_dead) / (1.0f - g_dead) / m;   // dead-zone edge = 0, rim = 1
++    *ox = (int32_t)lroundf(x * k * DM_STICK_MAX); *oy = (int32_t)lroundf(y * k * DM_STICK_MAX);
++}
++static void publish(GCController *c, GCExtendedGamepad *g) {
++    if (g_face_letter < 0) { const char *e = getenv("DM_PAD_FACE"); g_face_letter = e && !strcmp(e, "letter"); }
++    if (!g_active) return;
++    uint64_t b = 0;
++    int bot = g.buttonA.pressed, rgt = g.buttonB.pressed, lft = g.buttonX.pressed, top = g.buttonY.pressed;
++    if (g_face_letter) { if (bot) b |= DM_BTN_A; if (rgt) b |= DM_BTN_B; if (lft) b |= DM_BTN_X; if (top) b |= DM_BTN_Y; }
++    else { if (rgt) b |= DM_BTN_A; if (bot) b |= DM_BTN_B; if (top) b |= DM_BTN_X; if (lft) b |= DM_BTN_Y; }   // Switch positions
++    if (g.leftShoulder.pressed) b |= DM_BTN_L; if (g.rightShoulder.pressed) b |= DM_BTN_R;
++    if (g.leftTrigger.pressed) b |= DM_BTN_ZL; if (g.rightTrigger.pressed) b |= DM_BTN_ZR;
++    if (g.leftThumbstickButton.pressed) b |= DM_BTN_LS; if (g.rightThumbstickButton.pressed) b |= DM_BTN_RS;
++    if (g.buttonMenu.pressed) b |= DM_BTN_PLUS; if (g.buttonOptions.pressed) b |= DM_BTN_MINUS;
++    if (g.dpad.left.pressed) b |= DM_BTN_LEFT; if (g.dpad.up.pressed) b |= DM_BTN_UP; if (g.dpad.right.pressed) b |= DM_BTN_RIGHT; if (g.dpad.down.pressed) b |= DM_BTN_DOWN;
++    int i = slot_of((__bridge const void *)c, 1); if (i < 0) return;
++    g_s[i].b = b;
++    stick(g.leftThumbstick.xAxis.value, g.leftThumbstick.yAxis.value, &g_s[i].ax[0], &g_s[i].ax[1]);
++    stick(g.rightThumbstick.xAxis.value, g.rightThumbstick.yAxis.value, &g_s[i].ax[2], &g_s[i].ax[3]);
++    apply();
++}
++static void present_changed(void) { static int was = -1; int now = g_count > 0; if (now == was) return; was = now; if (g_on_present) g_on_present(now); }
++static void attach(GCController *c) {
++    GCExtendedGamepad *g = c.extendedGamepad;
++    if (!g) { LOG("Gamepad unsupported (no extended profile): %s", c.vendorName.UTF8String ?: "?"); return; }
++    if (slot_of((__bridge const void *)c, 0) >= 0) return;   // already attached (start enumeration and the connect notification can both arrive)
++    if (slot_of((__bridge const void *)c, 1) < 0) { LOG("Gamepad slots full (%d): %s", NSLOT, c.vendorName.UTF8String ?: "?"); return; }
++    g_count++;
++    c.handlerQueue = dispatch_get_main_queue();
++    LOG("Gamepad connected: %s (%s), count=%d, face=%s, deadzone=%s", c.vendorName.UTF8String ?: "?",
++        c.productCategory.UTF8String ?: "?", g_count, getenv("DM_PAD_FACE") ?: "position", getenv("DM_PAD_DEADZONE") ?: "0.12");
++    __weak GCController *wc = c;
++    g.valueChangedHandler = ^(GCExtendedGamepad *gp, GCControllerElement *el) { (void)el; GCController *sc = wc; if (sc) publish(sc, gp); };
++    publish(c, g);
++    present_changed();
++}
++static void detach(GCController *c) {
++    int i = slot_of((__bridge const void *)c, 0); if (i < 0) return;
++    c.extendedGamepad.valueChangedHandler = nil;
++    memset(&g_s[i], 0, sizeof g_s[i]); g_count--; apply();
++    if (!g_count) dm_pad_clear();
++    LOG("Gamepad disconnected: %s, count=%d", c.vendorName.UTF8String ?: "?", g_count);
++    present_changed();
++}
++
++int dm_gamepad_count(void) { return g_count; }
++void dm_gamepad_reset(void) {
++    int any = 0;
++    for (int i = 0; i < NSLOT; i++) if (g_s[i].who) { any |= g_s[i].b != 0 || g_s[i].ax[0] || g_s[i].ax[1] || g_s[i].ax[2] || g_s[i].ax[3]; g_s[i].b = 0; memset(g_s[i].ax, 0, sizeof g_s[i].ax); }
++    dm_pad_clear();
++    const int32_t zero[4] = {0}; trace(0, zero);
++    if (any) LOG("Gamepad focus lost: cleared buttons and axes");
++}
++void dm_gamepad_start(void (*on_present)(int present)) {
++    static int started; if (started) return; started = 1;
++    g_on_present = on_present;
++    NSNotificationCenter *nc = NSNotificationCenter.defaultCenter;
++    [nc addObserverForName:GCControllerDidConnectNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) { attach(n.object); }];
++    [nc addObserverForName:GCControllerDidDisconnectNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) { detach(n.object); }];
++    NSArray<GCController *> *cs = GCController.controllers;
++    LOG("GameController started: system controllers=%lu, face=%s, deadzone=%s", (unsigned long)cs.count,
++        getenv("DM_PAD_FACE") ?: "position", getenv("DM_PAD_DEADZONE") ?: "0.12");
++    for (GCController *c in cs) attach(c);   // attaching one calls back on_present(1)
++    if (!g_count) present_changed();         // none: call back once with 0 for the current count
++}
++
++// Called on the AppKit main thread. Background callbacks cannot republish held keys.
++void dm_gamepad_set_active(int active) {
++    g_active = active;
++    if (!active) { dm_gamepad_reset(); return; }
++    for (GCController *c in GCController.controllers)
++        if (slot_of((__bridge const void *)c, 0) >= 0) publish(c, c.extendedGamepad);
++}
 diff --git a/dm/host/hle.c b/dm/host/hle.c
 index 1a63bd7..9fcffec 100644
 --- a/dm/host/hle.c
@@ -3070,6 +3428,110 @@ index 96d2674..579e8ae 100644
  void hle_signal_system_event(void *ev) {   // An unbound one is bound on the spot as manual-clear (can only happen on a guest thread)
      pthread_mutex_lock(&g_se_lock); uint32_t wh = se_find(ev); pthread_mutex_unlock(&g_se_lock);
      if (!wh) { hle_bind_system_event(ev, 0); pthread_mutex_lock(&g_se_lock); wh = se_find(ev); pthread_mutex_unlock(&g_se_lock); }
+diff --git a/dm/host/lan_discovery_apple.m b/dm/host/lan_discovery_apple.m
+new file mode 100644
+index 0000000..fb3a375
+--- /dev/null
++++ b/dm/host/lan_discovery_apple.m
+@@ -0,0 +1,98 @@
++/* Bonjour is the public local-network discovery path on macOS and iOS.
++ * NSBonjourServices must contain _dr3lan._udp. No multicast entitlement is used.
++ */
++#import <Foundation/Foundation.h>
++#include <arpa/inet.h>
++#include "lan_native.h"
++
++@interface DR3LanDiscovery : NSObject <NSNetServiceBrowserDelegate,NSNetServiceDelegate>
++@property(nonatomic,strong) NSThread *thread;
++@property(nonatomic,strong) NSNetServiceBrowser *browser;
++@property(nonatomic,strong) NSNetService *published;
++@property(nonatomic,strong) NSMutableArray<NSNetService *> *resolving;
++@end
++@implementation DR3LanDiscovery
++- (instancetype)init {
++    if((self=[super init])) {
++        _resolving=[NSMutableArray array];
++        _thread=[[NSThread alloc] initWithTarget:self selector:@selector(run) object:nil];
++        _thread.name=@"DR3 LAN Bonjour";
++        [_thread start];
++    }
++    return self;
++}
++- (void)run {
++    @autoreleasepool {
++        NSRunLoop *loop=[NSRunLoop currentRunLoop];
++        [loop addPort:[NSMachPort port] forMode:NSDefaultRunLoopMode];
++        for(;;) { @autoreleasepool { [loop runMode:NSDefaultRunLoopMode beforeDate:[NSDate distantFuture]]; } }
++    }
++}
++- (void)start:(NSNumber *)port {
++    (void)port;
++    [self stop:nil];
++    self.browser=[[NSNetServiceBrowser alloc] init];
++    self.browser.delegate=self;
++    [self.browser searchForServicesOfType:@"_dr3lan._udp." inDomain:@"local."];
++}
++- (void)stop:(id)unused {
++    (void)unused;
++    self.browser.delegate=nil;[self.browser stop];self.browser=nil;
++    self.published.delegate=nil;[self.published stop];self.published=nil;
++    for(NSNetService *service in self.resolving) { service.delegate=nil;[service stop]; }
++    [self.resolving removeAllObjects];
++}
++- (void)publish:(NSDictionary *)request {
++    self.published.delegate=nil;[self.published stop];self.published=nil;
++    if(![request[@"on"] boolValue])return;
++    self.published=[[NSNetService alloc] initWithDomain:@"local." type:@"_dr3lan._udp." name:request[@"name"] port:[request[@"port"] intValue]];
++    self.published.delegate=self;
++    uint32_t ip=0,mask=0;dm_lan_ipv4(&ip,&mask);ip=htonl(ip);
++    [self.published setTXTRecordData:[NSNetService dataFromTXTRecordDictionary:@{@"v":[@"1" dataUsingEncoding:NSUTF8StringEncoding],@"game":[@"01001B300B9BE000" dataUsingEncoding:NSUTF8StringEncoding],@"ip4":[NSData dataWithBytes:&ip length:4]}]];
++    [self.published publish];
++}
++- (void)netServiceBrowserWillSearch:(NSNetServiceBrowser *)browser {
++    (void)browser;dm_lan_discovery_status(1,"Bonjour browse started; local-network authorization may still be pending");
++}
++- (void)netServiceBrowser:(NSNetServiceBrowser *)browser didNotSearch:(NSDictionary<NSString *,NSNumber *> *)errors {
++    (void)browser;dm_lan_discovery_status(-1,"Bonjour search failed or local-network permission denied");
++    NSLog(@"[lan] Bonjour browse error %@",errors);
++}
++- (void)netServiceBrowser:(NSNetServiceBrowser *)browser didFindService:(NSNetService *)service moreComing:(BOOL)more {
++    (void)browser;(void)more;
++    if(self.resolving.count>=32)return;
++    NSLog(@"[lan] Bonjour found %@",service.name);
++    service.delegate=self;[self.resolving addObject:service];[service resolveWithTimeout:3];
++}
++- (void)netServiceBrowser:(NSNetServiceBrowser *)browser didRemoveService:(NSNetService *)service moreComing:(BOOL)more {
++    (void)browser;(void)more;
++    for(NSNetService *found in [self.resolving copy])if([found.name isEqualToString:service.name]&&[found.domain isEqualToString:service.domain]){found.delegate=nil;[found stop];[self.resolving removeObject:found];}
++}
++- (void)netServiceDidResolveAddress:(NSNetService *)service {
++    /* Multihomed Apple hosts may resolve only another interface's address.
++     * This is an untrusted local candidate, not room authorization. The C core
++     * checks that it belongs to a local subnet, then authenticates JOIN. */
++    NSDictionary *txt=[NSNetService dictionaryFromTXTRecordData:service.TXTRecordData];
++    NSData *primary=txt[@"ip4"];
++    if(primary.length==4&&service.port>0&&service.port<=65535){uint32_t ip;memcpy(&ip,primary.bytes,4);dm_lan_discovered(ip,htons((uint16_t)service.port));}
++    for(NSData *data in service.addresses)if(data.length>=sizeof(struct sockaddr_in)) {
++        const struct sockaddr_in *address=data.bytes;
++        if(address->sin_family==AF_INET){fprintf(stderr,"[lan] Bonjour resolved ipv4=%08x port=%u\n",ntohl(address->sin_addr.s_addr),ntohs(address->sin_port));dm_lan_discovered(address->sin_addr.s_addr,address->sin_port);}
++    }
++}
++- (void)netService:(NSNetService *)service didNotResolve:(NSDictionary<NSString *,NSNumber *> *)errors {
++    (void)errors;service.delegate=nil;[service stop];[self.resolving removeObject:service];
++}
++- (void)netServiceDidPublish:(NSNetService *)service {
++    if(service==self.published)dm_lan_discovery_status(1,"Bonjour room published");
++}
++- (void)netService:(NSNetService *)service didNotPublish:(NSDictionary<NSString *,NSNumber *> *)errors {
++    (void)service;dm_lan_discovery_status(-1,"Bonjour room publication failed; check local-network permission");
++    NSLog(@"[lan] Bonjour publish error %@",errors);
++}
++@end
++static DR3LanDiscovery *bridge(void) { static DR3LanDiscovery *instance;static dispatch_once_t once;dispatch_once(&once,^{instance=[[DR3LanDiscovery alloc] init];});return instance; }
++int dm_lan_discovery_available(void){return 1;}
++void dm_lan_discovery_start(uint16_t port){DR3LanDiscovery*b=bridge();[b performSelector:@selector(start:) onThread:b.thread withObject:@(port) waitUntilDone:NO];}
++void dm_lan_discovery_publish(int on,uint16_t port,const char *name){DR3LanDiscovery*b=bridge();NSDictionary*r=@{@"on":@(on),@"port":@(port),@"name":name?[NSString stringWithUTF8String:name]:@""};[b performSelector:@selector(publish:) onThread:b.thread withObject:r waitUntilDone:NO];}
++void dm_lan_discovery_stop(void){DR3LanDiscovery*b=bridge();[b performSelector:@selector(stop:) onThread:b.thread withObject:nil waitUntilDone:NO];}
 diff --git a/dm/host/lan_native.h b/dm/host/lan_native.h
 new file mode 100644
 index 0000000..00d42c8
