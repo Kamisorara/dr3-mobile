@@ -44,7 +44,12 @@ jobs:
             # | Fast path: the pinned snapshot = the bare orphan tree (git archive HEAD, no patch
             # | state). bootstrap then truly applies the current patch each run, so the zip and
             # | the patch can never silently drift apart.
-            gh release download nxnative-s9579030 --repo "$GITHUB_REPOSITORY" --pattern 'nxnative-s9579030.zip' --output third_party/snap.zip
+            # 匿名 CDN 直链：public 仓库的 release 资产不需要 token，也不吃 GITHUB_TOKEN 的
+            # API 限流（gh release download 在限流窗口里会把 403 报成 "release not found"）
+            # | Anonymous CDN link: release assets of a public repo need no token and don't burn
+            # | GITHUB_TOKEN's API quota (gh release download surfaces rate-limit 403s as
+            # | "release not found").
+            curl -fL "https://github.com/$GITHUB_REPOSITORY/releases/download/nxnative-s9579030/nxnative-s9579030.zip" -o third_party/snap.zip
             echo "$ZIP_SHA256  third_party/snap.zip" | shasum -a 256 -c -   # Release 资产走 CDN：--clobber 后 URL 不变，可能拿到旧缓存——校验指纹
             mkdir -p third_party/nxnative
             cd third_party/nxnative
