@@ -2353,10 +2353,10 @@ index 561a3c8..f8e02e2 100644
 +}
 diff --git a/dm/host/hle_hudmove.c b/dm/host/hle_hudmove.c
 new file mode 100644
-index 0000000..b29f9bc
+index 0000000..85f4e8c
 --- /dev/null
 +++ b/dm/host/hle_hudmove.c
-@@ -0,0 +1,167 @@
+@@ -0,0 +1,172 @@
 +// HUD 移位（触摸模式生效、物理手柄接入自动还原）——结构校准阶段。
 +// 原理：.ui 加载后节点路径是堆里的明文串；在 guest 堆里搜目标节点的路径串
 +// （ConsoleHUD_main.LayoutRoot.Globes = 血球容器），再搜指向它的指针（节点记录），
@@ -2480,11 +2480,16 @@ index 0000000..b29f9bc
 +        for (int ai = 0; ai < (int)(sizeof anchors / sizeof *anchors); ai++) {
 +            anchor_state *st = &g_st[ai];
 +            if (st->addr) continue;
-+            if (!st->len) st->len = strlen(st->path);
++            // 锚串在 anchors[ai]（静态字面量）；g_st[].path 是状态字段、从未绑定、恒 NULL——
++            // 原版就写成 strlen(st->path)，默认关从未执行过，默认开首帧即 strlen(NULL) 崩溃
++            //（2026-11-04 真机 sig=11 实证）。一律用 anchors[ai].path。
++            // | The string lives in anchors[ai]; g_st[].path is an unbound state field (NULL
++            // | since BSS). strlen(NULL) on the very first tick — use anchors[ai].path.
++            if (!st->len) st->len = strlen(anchors[ai]);
 +            for (size_t k = 0; k + st->len < chunk; k++)
-+                if (p[k] == st->path[0] && !memcmp(p + k, st->path, st->len)) {
++                if (p[k] == anchors[ai][0] && !memcmp(p + k, anchors[ai], st->len)) {
 +                    st->addr = a + k;
-+                    LOG("[hudmove] 锚 '%s' @ %012llx", st->path, (unsigned long long)st->addr);
++                    LOG("[hudmove] 锚 '%s' @ %012llx", anchors[ai], (unsigned long long)st->addr);
 +                    break;
 +                }
 +        }
@@ -2496,7 +2501,7 @@ index 0000000..b29f9bc
 +                uint64_t v; memcpy(&v, p + k, 8);
 +                if (v == st->addr) {
 +                    st->dumped = 1;
-+                    LOG("[hudmove] 引用锚 '%s' 的指针 @ %012llx", st->path, (unsigned long long)(a + k));
++                    LOG("[hudmove] 引用锚 '%s' 的指针 @ %012llx", anchors[ai], (unsigned long long)(a + k));
 +                    if (dump_requested()) {
 +                        size_t back = k < 0x80 ? k : 0x80;   // 回看钳在步内（跨步地址可能不可读）
 +                        size_t fwd = chunk - k - 8 >= 0x100 ? 0x100 : chunk - k - 8;
