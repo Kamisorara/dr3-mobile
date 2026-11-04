@@ -2353,10 +2353,10 @@ index 561a3c8..f8e02e2 100644
 +}
 diff --git a/dm/host/hle_hudmove.c b/dm/host/hle_hudmove.c
 new file mode 100644
-index 0000000..0ba9f80
+index 0000000..b29f9bc
 --- /dev/null
 +++ b/dm/host/hle_hudmove.c
-@@ -0,0 +1,163 @@
+@@ -0,0 +1,167 @@
 +// HUD 移位（触摸模式生效、物理手柄接入自动还原）——结构校准阶段。
 +// 原理：.ui 加载后节点路径是堆里的明文串；在 guest 堆里搜目标节点的路径串
 +// （ConsoleHUD_main.LayoutRoot.Globes = 血球容器），再搜指向它的指针（节点记录），
@@ -2391,7 +2391,11 @@ index 0000000..0ba9f80
 +}
 +
 +// Anchors to locate: full node paths of the elements we will move (stock names).
-+static const char *const anchors[] = {
++// used 属性 + 首帧日志直接打印：LTO 曾把这里的字面量从产物里 strip 掉（间接引用 +
++// 常量传播，2026-11-04 CI 字节级取证 offset=-1），必须给链接器一个真实的运行时使用。
++// | used + a real first-tick print: LTO stripped these literals from the linked binary
++// | once (indirect refs + constant propagation; CI byte-level probe read offset=-1).
++static const char *const anchors[] __attribute__((used)) = {
 +    "ConsoleHUD_main.LayoutRoot.Globes",   // 血球容器（血球/巅峰球）
 +    "ConsoleHUD_main.LayoutRoot",          // HUD 布局根（后备锚）
 +};
@@ -2509,7 +2513,7 @@ index 0000000..0ba9f80
 +void dm_hudmove_frame(void) {
 +    if (!enabled()) return;
 +    if (atomic_load(&g_done_scan)) return;
-+    static int logged; if (!logged++) LOG("[hudmove] HUD 移位框架启动（默认开，DM_HUDMOVE=0 关；诊断=%d，手柄 presence=%d）", dump_requested(), atomic_load(&g_pad_present));
++    static int logged; if (!logged++) LOG("[hudmove] HUD 移位框架启动（默认开，DM_HUDMOVE=0 关；诊断=%d，手柄 presence=%d，锚0=%s）", dump_requested(), atomic_load(&g_pad_present), anchors[0]);   // 锚0 直用：防 LTO strip 字面量
 +    if (!g_hi) {
 +        uint8_t *base; size_t size;
 +        svc_guest_range(&base, &size);
