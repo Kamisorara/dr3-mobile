@@ -176,7 +176,9 @@ def bootstrap(_):
     actual = upstream_head()
     if actual != COMMIT:
         pinned = (UPSTREAM / '.dm-pinned')
-        if not (pinned.exists() and pinned.read_text().strip() == COMMIT and actual):
+        # 快照 zip（Release 资产）解压的树没有 .git：pinned 标记对上 COMMIT 即认（CI 免 API 重建的主力路径）
+        # | A snapshot-zip tree has no .git: accept the .dm-pinned marker alone when it matches COMMIT.
+        if not (pinned.exists() and pinned.read_text().strip() == COMMIT and (actual or not (UPSTREAM / '.git').exists())):
             raise ValueError(f'Upstream commit mismatch (HEAD={actual or "none"}); use the pinned clean checkout')
     patch = ROOT / 'patches/nxnative.patch'
     applied = subprocess.run(['git', 'apply', '--reverse', '--check', str(patch)], cwd=UPSTREAM, capture_output=True).returncode == 0
