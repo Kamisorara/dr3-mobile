@@ -95,9 +95,15 @@ def main():
           f'stdout_lines={len(probe.stdout.splitlines())} stderr={probe.stderr[:400]!r}', flush=True)
     config = subprocess.check_output([sys.executable, str(UPSTREAM / 'dm/ios/tools/gen_build.py'),
                                       str(UPSTREAM / 'dm/host'), str(gen)], env=settings, text=True)
-    if '/dm/host' not in config:
-        print(config, file=sys.stderr)   # 全文取证（gen_build 吃到了意外输入）
-        die('gen_build 输出缺 dm/host 头文件搜索路径（front_ios.m 的 lan_native.h 将找不到）')
+    print('[shell] --- gen_build 输出全文（取证）---', flush=True)
+    print(config, flush=True)
+    print('[shell] --- 输出结束 ---', flush=True)
+    hdr = next((l for l in config.splitlines() if l.startswith('HEADER_SEARCH_PATHS')), '')
+    host_dir = str(UPSTREAM / 'dm/host')
+    if not any(p.strip().strip('"') == host_dir for p in hdr.split(' ', 2)[-1].split(' ')):
+        die(f'HEADER_SEARCH_PATHS 缺 host 目录 {host_dir}（front_ios.m 的 lan_native.h 将找不到）')
+    if not (UPSTREAM / 'dm/host/lan_native.h').exists():
+        die('树上 dm/host/lan_native.h 不存在（patch 新建文件未落地——快照/补丁状态不一致）')
     # The shell embeds no module images: no -segprot link flags for them, and the graphics layer's
     # DM_SHELL branch (ships in patches/nxnative.patch) is compiled in so shader sources are compiled on device.
     config = re.sub(r'^(OTHER_CFLAGS = .*)$', r'\1 -DDM_SHELL', config, flags=re.M)
