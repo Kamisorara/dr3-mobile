@@ -36,6 +36,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
           COMMIT: '9579030e5b1f0443c12b7376559560915b6d4c4b'
+          ZIP_SHA256: 'd8ad73fd8a1b2d59be3cdb2240ecf0f54ab8563f4c3964dde6060c102396bbe4'
         run: |
           if [ ! -d third_party/nxnative/dm ]; then
             # 主力路径：Release 资产里的 pinned 快照 = 纯孤儿树（git archive HEAD，不含补丁状态）——
@@ -44,6 +45,7 @@ jobs:
             # | state). bootstrap then truly applies the current patch each run, so the zip and
             # | the patch can never silently drift apart.
             gh release download nxnative-s9579030 --repo "$GITHUB_REPOSITORY" --pattern 'nxnative-s9579030.zip' --output third_party/snap.zip
+            echo "$ZIP_SHA256  third_party/snap.zip" | shasum -a 256 -c -   # Release 资产走 CDN：--clobber 后 URL 不变，可能拿到旧缓存——校验指纹
             mkdir -p third_party/nxnative
             cd third_party/nxnative
             python3 -c "import zipfile; zipfile.ZipFile('../snap.zip').extractall('.')"
