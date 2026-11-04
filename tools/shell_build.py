@@ -88,8 +88,16 @@ def main():
 
     print('[shell] generating build inputs', flush=True)
     settings = env() | dict(GAME=TITLE, DM_BUNDLE_ID=args.bundle_id, DM_TEAM_ID='', DM_IOS_CPU=args.cpu)
+    probe = subprocess.run(['make', '-s', '-n', '-B', '-C', str(UPSTREAM / 'dm/host'), 'dmhost'],
+                           env=settings, capture_output=True, text=True)
+    # 取证：CI 的 make 版本行为与本地可能不同，这里是唯一能看到 make -n 实际输出的地方
+    print(f'[shell] make -n dmhost rc={probe.returncode} clang_lines={probe.stdout.count("clang")} '
+          f'stdout_lines={len(probe.stdout.splitlines())} stderr={probe.stderr[:400]!r}', flush=True)
     config = subprocess.check_output([sys.executable, str(UPSTREAM / 'dm/ios/tools/gen_build.py'),
                                       str(UPSTREAM / 'dm/host'), str(gen)], env=settings, text=True)
+    if '/dm/host' not in config:
+        print(config, file=sys.stderr)   # 全文取证（gen_build 吃到了意外输入）
+        die('gen_build 输出缺 dm/host 头文件搜索路径（front_ios.m 的 lan_native.h 将找不到）')
     # The shell embeds no module images: no -segprot link flags for them, and the graphics layer's
     # DM_SHELL branch (ships in patches/nxnative.patch) is compiled in so shader sources are compiled on device.
     config = re.sub(r'^(OTHER_CFLAGS = .*)$', r'\1 -DDM_SHELL', config, flags=re.M)
