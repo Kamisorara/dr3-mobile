@@ -2353,10 +2353,10 @@ index 561a3c8..f8e02e2 100644
 +}
 diff --git a/dm/host/hle_hudmove.c b/dm/host/hle_hudmove.c
 new file mode 100644
-index 0000000..acdcf68
+index 0000000..838d1ab
 --- /dev/null
 +++ b/dm/host/hle_hudmove.c
-@@ -0,0 +1,177 @@
+@@ -0,0 +1,249 @@
 +// HUD 移位（触摸模式生效、物理手柄接入自动还原）——结构校准阶段。
 +// 原理：.ui 加载后节点路径是堆里的明文串；在 guest 堆里搜目标节点的路径串
 +// （ConsoleHUD_main.LayoutRoot.Globes = 血球容器），再搜指向它的指针（节点记录），
@@ -2519,9 +2519,81 @@ index 0000000..acdcf68
 +    return now_ns() / 1000000ull >= deadline_ms;
 +}
 +
++// === 内存快照（一次装机 → 离线分析；把 N 轮「出包-装机-进主城-拷日志」压成一次） ===
++// 触发：锚 0 命中后 5 秒（HUD 确认加载）或游戏跑 300 秒保底；后台线程写，不卡游戏。
++// 产物：Documents/hud-dump.bin（原始内存段拼接）+ hud-dump.idx（每行 "guest_off file_off len"）
++// + hud-dump.done（防重复标记——成功一次后永不再 dump）。DM_HUDMOVE_SNAPSHOT=0 关。
++// | Memory snapshot (install once, analyse offline). Fires 5 s after the primary anchor
++// | hits (HUD confirmed loaded), or at 300 s as a fallback; written from a background
++// | thread. hud-dump.done prevents a second multi-GB dump on every launch.
++#include <pthread.h>
++#include <unistd.h>
++
++static _Atomic int g_snap_state;          // 0=待触发 1=进行中 2=完成/跳过
++static uint64_t g_snap_anchor_ms, g_snap_boot_ms;
++static int snapshot_off(void) {
++    const char *v = getenv("DM_HUDMOVE_SNAPSHOT");
++    return v && v[0] == '0' && !v[1];
++}
++static void *snapshot_thread(void *arg) {
++    (void)arg;
++    FILE *bin = fopen("hud-dump.bin", "wb"), *idx = fopen("hud-dump.idx", "w");
++    if (!bin || !idx) { LOG("[hudmove] 快照打开失败（Documents 可写？）"); if (bin) fclose(bin); if (idx) fclose(idx); atomic_store(&g_snap_state, 2); return NULL; }
++    uint64_t written = 0; int segs = 0;
++    for (uint64_t a = g_lo; a < g_hi; ) {
++        size_t chunk = 0x100000 - (size_t)(a & 0xfffff);
++        if (a + chunk > g_hi) chunk = (size_t)(g_hi - a);
++        uint64_t seg = 0;   // 本步内连续可写段的起点（步不可读时按 64KB 子块降级，别丢洞旁数据）
++        for (uint64_t o = 0; o < chunk; o += 0x10000) {
++            size_t n = (size_t)(chunk - o < 0x10000 ? chunk - o : 0x10000);
++            if (dm_guest_readable(a + o, n)) { if (!seg) seg = a + o; }
++            else if (seg) {
++                uint64_t len = a + o - seg;
++                if (fwrite((void *)(uintptr_t)seg, 1, len, bin) == len) {
++                    fprintf(idx, "%012llx %012llx %llx\n", (unsigned long long)seg, (unsigned long long)written, (unsigned long long)len);
++                    written += len; segs++;
++                }
++                seg = 0;
++            }
++        }
++        if (seg) {
++            uint64_t len = a + chunk - seg;
++            if (fwrite((void *)(uintptr_t)seg, 1, len, bin) == len) {
++                fprintf(idx, "%012llx %012llx %llx\n", (unsigned long long)seg, (unsigned long long)written, (unsigned long long)len);
++                written += len; segs++;
++            }
++        }
++        a += chunk;
++    }
++    fclose(bin); fclose(idx);
++    FILE *done = fopen("hud-dump.done", "w");
++    if (done) { fprintf(done, "bytes=%llu segs=%d\n", (unsigned long long)written, segs); fclose(done); }
++    LOG("[hudmove] 快照完成：hud-dump.bin %.2f GB（%d 段）+ hud-dump.idx + hud-dump.done（拷回给开发者；此后不再重复 dump）", written / 1073741824.0, segs);
++    atomic_store(&g_snap_state, 2);
++    return NULL;
++}
++static void snapshot_try(uint64_t now_ms) {
++    if (atomic_load(&g_snap_state) || snapshot_off()) return;
++    static int checked_done;
++    if (!checked_done++) { if (access("hud-dump.done", F_OK) == 0 || access("hud-dump.bin", F_OK) == 0) { LOG("[hudmove] 已有快照，跳过"); atomic_store(&g_snap_state, 2); return; } }
++    if (!g_snap_boot_ms) g_snap_boot_ms = now_ms;
++    int due = 0;
++    if (g_st[0].addr) {   // 主锚命中：再等 5 秒让 HUD 元素建全
++        if (!g_snap_anchor_ms) g_snap_anchor_ms = now_ms;
++        if (now_ms - g_snap_anchor_ms >= 5000) due = 1;
++    } else if (now_ms - g_snap_boot_ms >= 300000) due = 1;   // 保底：游戏跑了 5 分钟（用户应已在主城）
++    if (!due) return;
++    atomic_store(&g_snap_state, 1);
++    pthread_t t;
++    if (pthread_create(&t, NULL, snapshot_thread, NULL) == 0) { pthread_detach(t); LOG("[hudmove] 内存快照开始（后台线程，写入 hud-dump.bin）"); }
++    else atomic_store(&g_snap_state, 2);
++}
++static void snapshot_tick(void) { snapshot_try(now_ns() / 1000000ull); }
++
 +// Called from the game thread every controller read. Per-frame budget: ~2 ms.
 +void dm_hudmove_frame(void) {
 +    if (!enabled()) return;
++    snapshot_tick();
 +    if (atomic_load(&g_done_scan)) return;
 +    static int logged; if (!logged++) LOG("[hudmove] HUD 移位框架启动（默认开，DM_HUDMOVE=0 关；诊断=%d，手柄 presence=%d，锚0=%s）", dump_requested(), atomic_load(&g_pad_present), anchors[0]);   // 锚0 直用：防 LTO strip 字面量
 +    if (!g_hi) {
