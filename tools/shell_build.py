@@ -105,12 +105,12 @@ def main():
     if not (UPSTREAM / 'dm/host/lan_native.h').exists():
         die('树上 dm/host/lan_native.h 不存在（patch 新建文件未落地——快照/补丁状态不一致）')
     _hm = UPSTREAM / 'dm/host/hle_hudmove.c'
-    # 哨兵 = 现行锚串字面量（5eb65ff 换成 .ui 池中实证串；旧串「…Globes」完整路径并不存在，
-    # 此前靠旧文件头注释偶然满足——2026-11-05 重写头注释后暴露，哨兵随之更新到现行锚）。
+    # 哨兵 = 补丁落地的存在性校验。2026-11-05 运行时插桩（锚串扫描/元素表导出）整体删除，
+    # hle_hudmove.c 只剩 presence 接口桩，校验其保留接口字面量（旧锚串字面量已不存在）。
     _hmb = _hm.read_bytes() if _hm.exists() else b''
-    if b'ConsoleHUD_main.LayoutRoot' not in _hmb or b'hp_bar_template_player' not in _hmb:
-        die(f'树上 hle_hudmove.c 缺锚串字面量（{_hm.stat().st_size if _hm.exists() else "文件缺失"}）'
-            '——不是当前补丁的产物（扫描器会空转）')
+    if b'dm_hudmove_set_controller' not in _hmb or b'dm_hudmove_snapshot_status' not in _hmb:
+        die(f'树上 hle_hudmove.c 缺接口字面量（{_hm.stat().st_size if _hm.exists() else "文件缺失"}）'
+            '——不是当前补丁的产物')
     # The shell embeds no module images: no -segprot link flags for them, and the graphics layer's
     # DM_SHELL branch (ships in patches/nxnative.patch) is compiled in so shader sources are compiled on device.
     config = re.sub(r'^(OTHER_CFLAGS = .*)$', r'\1 -DDM_SHELL', config, flags=re.M)
