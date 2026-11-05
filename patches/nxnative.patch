@@ -1835,10 +1835,10 @@ index 0000000..b39a06b
 +}
 +void dm_controller_effects_stop(void) {initialized();atomic_fetch_add(&generation,1);synchronous(^{stop_all();});}
 diff --git a/dm/host/dm.h b/dm/host/dm.h
-index fda33ac..cb2665f 100644
+index fda33ac..106fcf7 100644
 --- a/dm/host/dm.h
 +++ b/dm/host/dm.h
-@@ -46,7 +46,15 @@ extern module_t g_mod[MAX_MOD];
+@@ -46,7 +46,16 @@ extern module_t g_mod[MAX_MOD];
  extern int g_nmod;
  // main's build ID (empty if none). DM_D2R_BUILD = the D2R build that the code inherited from d2r-mobile belongs to: code with fixed D2R addresses or that edits D2R saves runs only on it
  #define DM_D2R_BUILD "db0507f36b84200ac05f75d76ed5026f"
@@ -1848,6 +1848,7 @@ index fda33ac..cb2665f 100644
 +// controller-presence sync (front end's GameController connect/disconnect). on by default (DM_HUDMOVE=0 turns it off).
 +void dm_hudmove_frame(void);
 +void dm_hudmove_set_controller(int present);
++void dm_hudmove_snapshot_status(int *state, float *frac);   // hle_hudmove.c: 快照进度（0 待/1 中/2 完成），前端浮窗轮询
 +void svc_guest_range(uint8_t **base, size_t *size);   // hle_svc.c: whole guest address-space block
 +int dm_guest_heap_readable(uint64_t a, size_t n);     // hle_svc.c: committed-heap readability probe
 +int dm_guest_readable(uint64_t a, size_t n);          // hle_svc.c: heap + alias-region page bitmap (memory scanners)
@@ -2353,10 +2354,10 @@ index 561a3c8..f8e02e2 100644
 +}
 diff --git a/dm/host/hle_hudmove.c b/dm/host/hle_hudmove.c
 new file mode 100644
-index 0000000..838d1ab
+index 0000000..9062beb
 --- /dev/null
 +++ b/dm/host/hle_hudmove.c
-@@ -0,0 +1,249 @@
+@@ -0,0 +1,260 @@
 +// HUD 移位（触摸模式生效、物理手柄接入自动还原）——结构校准阶段。
 +// 原理：.ui 加载后节点路径是堆里的明文串；在 guest 堆里搜目标节点的路径串
 +// （ConsoleHUD_main.LayoutRoot.Globes = 血球容器），再搜指向它的指针（节点记录），
@@ -2530,7 +2531,17 @@ index 0000000..838d1ab
 +#include <unistd.h>
 +
 +static _Atomic int g_snap_state;          // 0=待触发 1=进行中 2=完成/跳过
++static _Atomic uint64_t g_snap_scanned;   // 已扫过的字节数（进度分子；分母 = g_hi-g_lo）
 +static uint64_t g_snap_anchor_ms, g_snap_boot_ms;
++// 前端浮窗轮询：state 0=未触发 1=进行中 2=完成；frac = 已扫范围占比（进行中才有意义）
++void dm_hudmove_snapshot_status(int *state, float *frac) {
++    if (state) *state = atomic_load(&g_snap_state);
++    if (frac) {
++        uint64_t total = g_hi > g_lo ? g_hi - g_lo : 1;
++        *frac = (float)((double)atomic_load(&g_snap_scanned) / (double)total);
++        if (*frac < 0) *frac = 0; if (*frac > 1) *frac = 1;
++    }
++}
 +static int snapshot_off(void) {
 +    const char *v = getenv("DM_HUDMOVE_SNAPSHOT");
 +    return v && v[0] == '0' && !v[1];
@@ -2564,6 +2575,7 @@ index 0000000..838d1ab
 +            }
 +        }
 +        a += chunk;
++        atomic_store(&g_snap_scanned, a - g_lo);   // 浮窗进度：按已扫地址范围占比（可读性不均匀时是近似）
 +    }
 +    fclose(bin); fclose(idx);
 +    FILE *done = fopen("hud-dump.done", "w");

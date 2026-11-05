@@ -69,7 +69,31 @@ CGRect dm_ios_game_frame(void) { return g_game_frame; }   // DmGamepad 触摸透
 @property (nonatomic, strong) DmGameView *game;
 @property (nonatomic, strong) UIView *pad;
 @end
-@implementation DmRootVC
+@implementation DmRootVC {
+    UILabel *snapLabel;   // 内存快照导出进度浮窗（宿主 hudmove 提供；一次性校准数据采集）
+    NSTimer *snapTimer;
+    BOOL snapSawActive, snapShownDone;   // 见过「进行中」才展示「完成」（历史 done 的启动不弹窗）
+}
+- (void)snapTick {   // 每秒问宿主要状态：未触发不显示、进行中显示百分比、完成显示 10 秒后收场
+    if (!snapLabel) return;
+    int state = 0; float frac = 0;
+    dm_hudmove_snapshot_status(&state, &frac);
+    if (state == 1) {
+        snapSawActive = YES;
+        snapLabel.hidden = NO;
+        snapLabel.text = [NSString stringWithFormat:@"内存快照导出中 %d%%（完成后拷回 hud-dump.bin，此期间游戏可能略卡）", (int)(frac * 100)];
+    } else if (state == 2) {
+        if (snapSawActive && !snapShownDone) {
+            snapShownDone = YES; snapLabel.hidden = NO;
+            snapLabel.text = @"内存快照完成 ✓  文件 App → DR3Mobile：hud-dump.bin/.idx 拷回电脑";
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+                snapLabel.hidden = YES; [snapTimer invalidate]; snapTimer = nil;
+            });
+        } else if (!snapSawActive) {   // 历史已完成：不会再导出，浮窗永不出现，定时器直接停
+            [snapTimer invalidate]; snapTimer = nil;
+        }
+    }
+}
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.view.backgroundColor = UIColor.blackColor;
@@ -86,10 +110,23 @@ CGRect dm_ios_game_frame(void) { return g_game_frame; }   // DmGamepad 触摸透
     self.pad = dm_gamepad_view(self.view.bounds);
     self.pad.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     [self.view addSubview:self.pad];
+    // 快照进度浮窗：顶部中央、半透明黑底白字、不挡触摸（hud-dump.done 已存在时宿主直接报 2，浮窗闪一下完成提示即撤）
+    snapLabel = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, self.view.bounds.size.width - 24, 34)];
+    snapLabel.center = CGPointMake(self.view.bounds.size.width / 2, 0);
+    snapLabel.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleBottomMargin;
+    snapLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
+    snapLabel.textColor = UIColor.whiteColor; snapLabel.textAlignment = NSTextAlignmentCenter;
+    snapLabel.layer.backgroundColor = [UIColor colorWithWhite:0 alpha:0.72].CGColor;
+    snapLabel.layer.cornerRadius = 8; snapLabel.layer.masksToBounds = YES;
+    snapLabel.hidden = YES; snapLabel.userInteractionEnabled = NO;
+    // 贴着安全区顶（布局回调里再校正 y）
+    [self.view addSubview:snapLabel];
+    snapTimer = [NSTimer scheduledTimerWithTimeInterval:1.0 target:self selector:@selector(snapTick) userInfo:nil repeats:YES];
 }
 - (void)viewDidLayoutSubviews {
     [super viewDidLayoutSubviews];
     CGRect b = self.view.bounds; if (!self.game) return;
+    snapLabel.center = CGPointMake(b.size.width / 2, self.view.safeAreaInsets.top + 8 + snapLabel.bounds.size.height / 2);
     CGFloat w = b.size.width, h = b.size.height;
     CGFloat aspect=g_aspect?g_screen_aspect:g_wide?1568.0/720.0:16.0/9.0;
     // Fill the matching Air panel; preserve geometry on differently shaped iPads.
