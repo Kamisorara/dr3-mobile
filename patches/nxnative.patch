@@ -2354,7 +2354,7 @@ index 561a3c8..f8e02e2 100644
 +}
 diff --git a/dm/host/hle_hudmove.c b/dm/host/hle_hudmove.c
 new file mode 100644
-index 0000000..acd5716
+index 0000000..e939e36
 --- /dev/null
 +++ b/dm/host/hle_hudmove.c
 @@ -0,0 +1,65 @@
@@ -2411,8 +2411,8 @@ index 0000000..acd5716
 +        const char *e = getenv("DM_HUDMOVE_BOTTOM");
 +        touch_b = SZ_BOTTOM_TOUCH_DEFAULT;
 +        if (e) { char *end; float v = strtof(e, &end);
-+                 if (end != e && !*end && v > 0.5f && v < SZ_BOTTOM_DEF) touch_b = v;
-+                 else LOG("HUD 移位：DM_HUDMOVE_BOTTOM=%s 非法（要求 0.5–0.97 之间），用默认 %.2f", e, (double)touch_b); }
++                 if (end != e && !*end && v >= 0.2f && v < SZ_BOTTOM_DEF) touch_b = v;   // 下限 0.2：更低底部锚定 UI 开始越过顶边被裁
++                 else LOG("HUD 移位：DM_HUDMOVE_BOTTOM=%s 非法（要求 0.2–0.97 之间），用默认 %.2f", e, (double)touch_b); }
 +    }
 +    float *p = (float *)(base + SZ_BOTTOM_OFF);
 +    float want = atomic_load(&g_pad_present) ? SZ_BOTTOM_DEF : touch_b;
