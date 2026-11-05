@@ -2354,42 +2354,74 @@ index 561a3c8..f8e02e2 100644
 +}
 diff --git a/dm/host/hle_hudmove.c b/dm/host/hle_hudmove.c
 new file mode 100644
-index 0000000..2106879
+index 0000000..acd5716
 --- /dev/null
 +++ b/dm/host/hle_hudmove.c
-@@ -0,0 +1,33 @@
-+// HUD 移位（触摸模式生效、物理手柄接入自动还原）——实现挂起，等静态逆向出结果。
-+// 2026-11-05 决策：位置坐标已证明不在 .ui 文件里（docs/H2O静态解析突破-2026-11-05 §一），
-+// 移位 = 运行时写节点对象的计算后位置。此前的运行时插桩（锚串内存扫描 / 元素表导出 /
-+// 全量内存快照）全部删除——每轮「出包-装机-拷日志」成本高且首跑未命中，改走纯静态：
-+// 解 .ui 真解析器（0x7477d8 的 vt+0xC0）拿节点记录结构 → 解锚定布局计算拿位置字段偏移
-+// → 直接实现写值（一次性写对，不靠真机采样校准）。
-+// 前端接口保留：presence 同步（dm_hudmove_set_controller）与浮窗轮询
-+// （dm_hudmove_snapshot_status，恒返回「完成」= 永不弹窗）。
-+// | HUD relocation — implementation parked pending static RE. Positions live only in
-+// | runtime node objects (never in the .ui files), so the final implementation writes
-+// | computed positions into live nodes; all runtime instrumentation (anchor scanning /
-+// | element-table export / full memory snapshot) was removed in favour of decoding the
-+// | .ui parser statically and writing the right offsets first try. Front-end interfaces
-+// | remain: controller-presence sync and the floating-window poll (always "done").
+@@ -0,0 +1,65 @@
++// HUD 移位 = D3 官方安全区（SafeZone）四边浮点直写。逆向实证见 docs/H2O静态解析突破-2026-11-05.md §十一：
++//   视频设置对象（main .bss 全局）内 flSafeZoneBottom @ +0x181b870；存储语义 = 边界坐标
++//   （默认 Left/Top 0.03 内缩、Right/Bottom 0.97 边界）。布局引擎每个 pass 用它重算锚定矩形
++//   （FUN_004279f0 = ApplySafeZoneToRect，15 个调用点横跨布局/动画/场景构建），直写后下一个
++//   布局 pass 生效——无需逐节点写内存、无需调用游戏函数。
++// 触摸模式把底边从 0.97 收到 0.72 → 底部锚定的 HUD（血球/技能条/提示条）整体上移约 26% 屏高，
++// 让开虚拟按键拇指区；手柄接入写回 0.97 还原官方布局。每帧读回自愈：启动时设置存档重放
++// （FUN_0037b6f0 → FUN_0037c1a0）或玩家在游戏里手调安全区覆盖了值，下一帧自动改回。
++// 只写 Bottom 一个浮点：Left/Top/Right 保持游戏现值（玩家自己的安全区偏好不动）。
++// | HUD relocation = direct write of the game's own safe-zone setting. The layout engine
++// | re-derives its anchor rect from flSafeZoneBottom (+0x181b870 in the D3 main image) on
++// | every layout pass, so one float write shifts all bottom-anchored HUD up; gamepad
++// | presence restores 0.97. Per-frame read-back heals overwrites (settings replay, manual
++// | in-game adjust) on the next frame.
 +#include "dm.h"
 +#include <stdatomic.h>
++#include <stdlib.h>
 +
-+// Physical controller presence (synced by the front end; 1 = hide/restore HUD)
++#define SZ_BOTTOM_OFF           0x181b870UL
++#define SZ_BOTTOM_DEF           0.97f
++#define SZ_BOTTOM_TOUCH_DEFAULT 0.72f
++
++// Physical controller presence (synced by the front end; 1 = restore official layout)
 +static _Atomic int g_pad_present;
 +void dm_hudmove_set_controller(int present) { atomic_store(&g_pad_present, !!present); }
 +
-+// 浮窗轮询桩：恒「完成」，前端永不弹窗（接口不变，删除实现后前端零改动）。
++// 浮窗轮询桩：恒「完成」，前端永不弹窗（接口不变）。
 +// | Stub poll: always "done" so the floating window never shows; keeps the interface.
 +void dm_hudmove_snapshot_status(int *state, float *frac) {
 +    if (state) *state = 2;
 +    if (frac) *frac = 1.0f;
 +}
 +
-+// Called from the game thread every controller read. Implementation pending: the
-+// per-frame position write lands here once the static side pins the node layout.
++// Called from the game thread every controller read (hle_hid.c fill()).
 +void dm_hudmove_frame(void) {
-+    if (!atomic_load(&g_pad_present)) return;   // 手柄未接入：后续写值路径在此展开
++    static int off = -1;
++    if (off < 0) {
++        const char *e = getenv("DM_HUDMOVE");
++        off = e && !strcmp(e, "0");
++        if (off) LOG("HUD 移位：DM_HUDMOVE=0，安全区改写关闭");
++    }
++    if (off || strcmp(dm_main_build(), DM_D3_BUILD)) return;   // 四字节偏移只认 D3 构建
++    static uint8_t *base;
++    if (!base) {
++        for (int i = 0; i < g_nmod; i++)
++            if (!strcmp(g_mod[i].name, "main") && !strcmp(g_mod[i].build_id, DM_D3_BUILD)) base = g_mod[i].base;
++        if (!base) return;
++    }
++    static float touch_b = -1;
++    if (touch_b < 0) {
++        const char *e = getenv("DM_HUDMOVE_BOTTOM");
++        touch_b = SZ_BOTTOM_TOUCH_DEFAULT;
++        if (e) { char *end; float v = strtof(e, &end);
++                 if (end != e && !*end && v > 0.5f && v < SZ_BOTTOM_DEF) touch_b = v;
++                 else LOG("HUD 移位：DM_HUDMOVE_BOTTOM=%s 非法（要求 0.5–0.97 之间），用默认 %.2f", e, (double)touch_b); }
++    }
++    float *p = (float *)(base + SZ_BOTTOM_OFF);
++    float want = atomic_load(&g_pad_present) ? SZ_BOTTOM_DEF : touch_b;
++    float cur = *p;
++    if (cur == want) return;
++    dm_guest_write_prepare(p, sizeof *p);
++    *p = want;
++    LOG("HUD 移位：SafeZoneBottom %g → %g（%s；布局 pass 下次重算生效）", (double)cur, (double)want,
++        want == SZ_BOTTOM_DEF ? "手柄接入还原官方布局" : "触摸模式收底边让开拇指区");
 +}
 diff --git a/dm/host/hle_lan_hooks.c b/dm/host/hle_lan_hooks.c
 new file mode 100644
