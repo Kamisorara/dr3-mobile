@@ -105,7 +105,10 @@ def main():
     if not (UPSTREAM / 'dm/host/lan_native.h').exists():
         die('树上 dm/host/lan_native.h 不存在（patch 新建文件未落地——快照/补丁状态不一致）')
     _hm = UPSTREAM / 'dm/host/hle_hudmove.c'
-    if not _hm.exists() or b'ConsoleHUD_main.LayoutRoot.Globes' not in _hm.read_bytes():
+    # 哨兵 = 现行锚串字面量（5eb65ff 换成 .ui 池中实证串；旧串「…Globes」完整路径并不存在，
+    # 此前靠旧文件头注释偶然满足——2026-11-05 重写头注释后暴露，哨兵随之更新到现行锚）。
+    _hmb = _hm.read_bytes() if _hm.exists() else b''
+    if b'ConsoleHUD_main.LayoutRoot' not in _hmb or b'hp_bar_template_player' not in _hmb:
         die(f'树上 hle_hudmove.c 缺锚串字面量（{_hm.stat().st_size if _hm.exists() else "文件缺失"}）'
             '——不是当前补丁的产物（扫描器会空转）')
     # The shell embeds no module images: no -segprot link flags for them, and the graphics layer's
