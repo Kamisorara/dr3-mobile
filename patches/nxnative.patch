@@ -2354,10 +2354,10 @@ index 561a3c8..f8e02e2 100644
 +}
 diff --git a/dm/host/hle_hudmove.c b/dm/host/hle_hudmove.c
 new file mode 100644
-index 0000000..ae7c45c
+index 0000000..deff372
 --- /dev/null
 +++ b/dm/host/hle_hudmove.c
-@@ -0,0 +1,393 @@
+@@ -0,0 +1,425 @@
 +// HUD 移位（触摸模式生效、物理手柄接入自动还原）——结构校准阶段。
 +// 两路数据源（2026-11-05 起）：① 锚串内存扫描（本文件上半部）——guest 堆里搜节点路径串
 +// （ConsoleHUD_main.LayoutRoot），再搜引用指针，周边内存 float 对解读 → 位置字段偏移；
@@ -2529,7 +2529,11 @@ index 0000000..ae7c45c
 +// 布局对象 +0x64 = 加载名（strncpy 原文，按名加载路径），+0x1070/74/78 = 位宽，+0x1060 元素数，
 +// +0x1058 记录数组）。导出：匹配布局名的全部 {key→记录} 行 + 布局头字段 + 记录数组 hexdump
 +// → 全进 log（MB 级文本，文件 App 直接拷）。在游戏线程按帧预算增量走（游戏线程是唯一写者；
-+// 条目只头插、既有链路稳定，走链无需加锁）；走完写 hud-htbl.done，成功一次不再重复。
++// 条目只头插、既有链路稳定，走链无需加锁）；命中即收（写 hud-htbl.done，一次不再重复）。
++// 触发：启动即走，无锚串/定时依赖；零命中 = 45 秒后重走（表随布局加载只增不减，
++// ConsoleHUD 一入表必被抓到；最多 40 次）。注意两段地址空间：表头在模块 BSS（宿主直读，
++// ht_mod_read 按模块 size 越界检查——dm_guest_readable 只认 guest 块，模块基址在块外），
++// 条目/记录/布局对象在游戏堆（dm_guest_readable 探针 + 直接解引用）。
 +// DM_HUDMOVE_SNAPSHOT 环境变量已废弃（原全量快照功能删除）。
 +// | Element-table export (targeted dump; replaces the old multi-GB memory snapshot).
 +// | Walks the global element hash table (main+0x1900F20, built by 0x4AE400 — see
@@ -2537,7 +2541,9 @@ index 0000000..ae7c45c
 +// | budget: the game thread is the only writer and entries are head-inserted, so walking
 +// | an established chain needs no locking. Prints matched {key→record} lines, layout
 +// | header fields (bit widths, element count) and the record-array hexdump to the log;
-+// | hud-htbl.done makes it run once. DM_HUDMOVE_SNAPSHOT is obsolete.
++// | hud-htbl.done makes it run once. Starts immediately (no anchor/timer gating); a walk
++// | with zero matches retries every 45 s — the table only grows as layouts load, so the
++// | HUD layouts are caught as soon as they enter it. DM_HUDMOVE_SNAPSHOT is obsolete.
 +#include <unistd.h>
 +
 +#define HT_TABLE_OFF  0x1900F20ull   // 哈希表头 {mask, count, alloc, buckets} | hash table header
@@ -2549,14 +2555,16 @@ index 0000000..ae7c45c
 +
 +static const char *const ht_want[] = { "consolehud", "minimap", "gamehud" };   // 匹配子串（小写）| name substrings of interest
 +
-+static _Atomic int g_snap_state;          // 0=待触发 1=导出中 2=完成/跳过（前端浮窗轮询，语义不变）
++static _Atomic int g_snap_state;          // 0=未就绪/等待重试 1=走表中 2=完成/放弃（前端浮窗轮询，语义不变）
 +static _Atomic uint64_t g_snap_scanned;   // 已走桶数（浮窗进度分子；分母 = mask+1）
-+static uint64_t g_snap_anchor_ms, g_snap_boot_ms;
++static module_t *g_ht_mod;                // main 模块（表头在它的 BSS，宿主直读）
 +static uint64_t g_ht_table, g_ht_buckets; // host 指针：表头 / 桶数组 | host pointers
 +static uint32_t g_ht_mask, g_ht_count;
-+static int g_ht_phase;                    // 1=走桶 2=逐布局导出 3=完成（0=未开始）
++static int g_ht_phase;                    // 1=走桶 2=逐布局导出（0=未初始化）
 +static uint64_t g_ht_cursor;
-+static int g_ht_lines, g_ht_bad, g_ht_nlay, g_ht_nseen;
++static int g_ht_lines, g_ht_bad, g_ht_nlay, g_ht_nseen, g_ht_emitted_seen;
++static int g_ht_retries;                  // 零命中重试次数（表随加载增长，命中即收）
++static uint64_t g_ht_retry_at;            // 下次重走的时间（ms）
 +static uint64_t g_ht_lay[HT_LAYOUT_CAP];              // 匹配的布局对象（去重）
 +static char g_ht_lname[HT_LAYOUT_CAP][HT_NAME_CAP];
 +static char g_ht_seen[HT_SUMMARY_CAP][HT_NAME_CAP];   // 见过的可打印布局名（总览）
@@ -2570,6 +2578,15 @@ index 0000000..ae7c45c
 +        *frac = (float)((double)atomic_load(&g_snap_scanned) / (double)total);
 +        if (*frac < 0) *frac = 0; if (*frac > 1) *frac = 1;
 +    }
++}
++// 模块映像内直读（映像整段已映射，越界检查即可，不走 dm_guest_readable——
++// 那个只认 guest 块 alias/堆，模块基址 0x1180c8000 在块外，2026-11-05 真机 log 实证）。
++// | Module-image reads are plain host memory: bounds-check against m->size; the guest
++// | readability probe only covers the guest block (heap/alias), not the module image.
++static int ht_mod_read(uint64_t off, void *out, size_t n) {
++    if (!g_ht_mod || off > g_ht_mod->size || n > g_ht_mod->size - off) return 0;
++    memcpy(out, (const uint8_t *)g_ht_mod->base + off, n);
++    return 1;
 +}
 +
 +static int ht_ci_sub(const char *hay, const char *ned) {   // ASCII 大小写不敏感子串 | case-insensitive substring
@@ -2667,10 +2684,28 @@ index 0000000..ae7c45c
 +    if (g_ht_phase == 1) {
 +        while (now_ns() / 1000000ull < deadline) {
 +            if (g_ht_cursor > g_ht_mask) {
-+                LOG("[htbl] 走表完成：条目行 %d、坏条目 %d、布局名总览 %d 种、匹配布局 %d", g_ht_lines, g_ht_bad, g_ht_nseen, g_ht_nlay);
-+                for (int i = 0; !g_ht_lines && i < g_ht_nseen; i++)   // 零匹配：名字总览就是线索（下次改过滤器）
-+                    LOG("[htbl] 布局名[%d] '%s' ×%u", i, g_ht_seen[i], g_ht_seen_n[i]);
-+                g_ht_phase = 2; g_ht_cursor = 0;
++                if (g_ht_lines) {   // 命中：转布局导出
++                    LOG("[htbl] 走表完成：条目行 %d、坏条目 %d、布局名总览 %d 种、匹配布局 %d", g_ht_lines, g_ht_bad, g_ht_nseen, g_ht_nlay);
++                    g_ht_phase = 2; g_ht_cursor = 0;
++                    return;
++                }
++                // 零命中：表随布局加载增长，45 秒后重走（状态回落 0，浮窗隐藏；命中重走时再亮）
++                g_ht_retries++;
++                uint64_t now_ms = now_ns() / 1000000ull;
++                if (g_ht_retries > 40) {
++                    LOG("[htbl] %d 次重走零命中（ConsoleHUD/Minimap/GameHUD 均未入表），本轮放弃（下次启动重试）", g_ht_retries - 1);
++                    for (int i = 0; i < g_ht_nseen; i++) LOG("[htbl] 布局名[%d] '%s' ×%u", i, g_ht_seen[i], g_ht_seen_n[i]);
++                    g_ht_phase = 0;
++                    atomic_store(&g_snap_state, 2);
++                    return;
++                }
++                if (g_ht_nseen > g_ht_emitted_seen) {   // 只在新名字出现时补总览（免刷屏）
++                    for (int i = g_ht_emitted_seen; i < g_ht_nseen; i++) LOG("[htbl] 布局名[%d] '%s' ×%u（暂无匹配，继续等 HUD 加载）", i, g_ht_seen[i], g_ht_seen_n[i]);
++                    g_ht_emitted_seen = g_ht_nseen;
++                }
++                g_ht_retry_at = now_ms + 45000;
++                g_ht_cursor = 0;
++                atomic_store(&g_snap_state, 0);
 +                return;
 +            }
 +            uint32_t bi = (uint32_t)g_ht_cursor++;
@@ -2683,49 +2718,47 @@ index 0000000..ae7c45c
 +        ht_dump_layout((int)g_ht_cursor++);
 +    if (g_ht_cursor >= (uint64_t)g_ht_nlay) {
 +        FILE *done = fopen("hud-htbl.done", "w");
-+        if (done) { fprintf(done, "entries=%d bad=%d layouts=%d seen=%d\n", g_ht_lines, g_ht_bad, g_ht_nlay, g_ht_nseen); fclose(done); }
++        if (done) { fprintf(done, "entries=%d bad=%d layouts=%d seen=%d retries=%d\n", g_ht_lines, g_ht_bad, g_ht_nlay, g_ht_nseen, g_ht_retries); fclose(done); }
 +        LOG("[hudmove] 元素表导出完成（hud-htbl.done 已写，此后不再重复；拷 log.txt 回来即可）");
 +        g_ht_phase = 0;
 +        atomic_store(&g_snap_state, 2);
 +    }
 +}
-+static void htbl_try(uint64_t now_ms) {
-+    if (atomic_load(&g_snap_state)) return;
++// 启动即初始化（无锚串/定时依赖——表随布局加载增长，零命中由 htbl_tick 重走兜底）。
++// 模块/表未就绪 = 静默重试（前几帧 BSS 可能还没被 0x4AE400 填）；build/基址不符 = fatal。
++static void htbl_try(void) {
++    if (atomic_load(&g_snap_state) || g_ht_phase) {
++        if (atomic_load(&g_snap_state) == 0 && g_ht_phase == 1 && g_ht_retry_at && now_ns() / 1000000ull >= g_ht_retry_at) {
++            atomic_store(&g_snap_state, 1);   // 重走到点：恢复亮表状态
++            LOG("[htbl] 第 %d 次重走元素表（等 HUD 布局入表）", g_ht_retries + 1);
++        }
++        return;
++    }
 +    static int checked_done;
 +    if (!checked_done++) {
 +        if (access("hud-htbl.done", F_OK) == 0) { LOG("[hudmove] 已有元素表导出（hud-htbl.done），跳过"); atomic_store(&g_snap_state, 2); return; }
 +    }
-+    if (!g_snap_boot_ms) g_snap_boot_ms = now_ms;
-+    int due = 0;
-+    if (g_st[0].addr) {   // 主锚命中：再等 5 秒让 HUD 元素建全（布局已登记进哈希表）
-+        if (!g_snap_anchor_ms) g_snap_anchor_ms = now_ms;
-+        if (now_ms - g_snap_anchor_ms >= 5000) due = 1;
-+    } else if (now_ms - g_snap_boot_ms >= 300000) due = 1;   // 保底：游戏跑了 5 分钟（用户应已在主城）
-+    if (!due) return;
-+    module_t *m = NULL;
-+    for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) { m = &g_mod[i]; break; }
-+    if (!m || !m->base) { LOG("[hudmove] 元素表导出：main 模块未就绪，放弃（重启重试）"); atomic_store(&g_snap_state, 2); return; }
-+    if (m->build_id[0] && strcmp(m->build_id, DM_D3_BUILD)) {   // 0x1900F20 等地址是 D3 2.77 专属
-+        LOG("[hudmove] 元素表导出：build %s ≠ D3 %.8s…（固定地址不适用），放弃", m->build_id, DM_D3_BUILD);
++    if (!g_ht_mod) {
++        for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) { g_ht_mod = &g_mod[i]; break; }
++        if (!g_ht_mod || !g_ht_mod->base) return;   // 模块未映射完，下帧再看
++    }
++    if (g_ht_mod->build_id[0] && strcmp(g_ht_mod->build_id, DM_D3_BUILD)) {   // 0x1900F20 等地址是 D3 2.77 专属
++        LOG("[hudmove] 元素表导出：build %s ≠ D3 %.8s…（固定地址不适用），放弃", g_ht_mod->build_id, DM_D3_BUILD);
 +        atomic_store(&g_snap_state, 2); return;
 +    }
-+    uint64_t img = (uint64_t)(uintptr_t)m->base;
-+    if (!dm_guest_readable(img + HT_MAGIC_OFF, 9) ||
-+        memcmp((const void *)(uintptr_t)(img + HT_MAGIC_OFF), "H2OLayout", 9)) {   // base==NSO vaddr0 语义校验
++    uint8_t magic[9];
++    if (!ht_mod_read(HT_MAGIC_OFF, magic, 9) || memcmp(magic, "H2OLayout", 9)) {   // base==NSO vaddr0 语义校验
 +        LOG("[hudmove] 元素表导出：base+0x%llx ≠ \"H2OLayout\"（基址语义不符），放弃", HT_MAGIC_OFF);
 +        atomic_store(&g_snap_state, 2); return;
 +    }
-+    g_ht_table = img + HT_TABLE_OFF;
-+    if (!dm_guest_readable(g_ht_table, 0x18)) { LOG("[hudmove] 元素表头不可读（表未初始化？）"); atomic_store(&g_snap_state, 2); return; }
 +    uint64_t buckets = 0;
-+    memcpy(&g_ht_mask, (const void *)(uintptr_t)g_ht_table, 4);
-+    memcpy(&g_ht_count, (const void *)(uintptr_t)(g_ht_table + 4), 4);
-+    memcpy(&buckets, (const void *)(uintptr_t)(g_ht_table + 0x10), 8);
-+    if ((g_ht_mask & (g_ht_mask + 1)) || g_ht_mask > 0x400000u || g_ht_count > 4000000u ||
-+        !buckets || !dm_guest_readable(buckets, ((uint64_t)g_ht_mask + 1) * 8)) {
-+        LOG("[hudmove] 元素表头不合理：mask=%u count=%u buckets=%012llx（放弃）", g_ht_mask, g_ht_count, (unsigned long long)buckets);
-+        atomic_store(&g_snap_state, 2); return;
-+    }
++    if (!ht_mod_read(HT_TABLE_OFF, &g_ht_mask, 4) || !ht_mod_read(HT_TABLE_OFF + 4, &g_ht_count, 4) ||
++        !ht_mod_read(HT_TABLE_OFF + 0x10, &buckets, 8))
++        return;   // BSS 尚未初始化（表头全零），静默等
++    if ((g_ht_mask & (g_ht_mask + 1)) || g_ht_mask > 0x400000u || g_ht_count > 4000000u || !buckets ||
++        !dm_guest_readable(buckets, ((uint64_t)g_ht_mask + 1) * 8))
++        return;   // 表还没建好（或指针未生效），静默等下一帧
++    g_ht_table = (uint64_t)(uintptr_t)g_ht_mod->base + HT_TABLE_OFF;
 +    g_ht_buckets = buckets;
 +    g_ht_phase = 1; g_ht_cursor = 0;
 +    atomic_store(&g_snap_state, 1);
@@ -2736,8 +2769,7 @@ index 0000000..ae7c45c
 +// Called from the game thread every controller read. Per-frame budget: ~2 ms.
 +void dm_hudmove_frame(void) {
 +    if (!enabled()) return;
-+    uint64_t now_ms = now_ns() / 1000000ull;
-+    htbl_try(now_ms);      // 元素表导出（targeted dump；触发条件与原快照一致）
++    htbl_try();            // 元素表导出（targeted dump；启动即走，零命中自动重试）
 +    htbl_tick();
 +    if (atomic_load(&g_done_scan)) return;
 +    static int logged; if (!logged++) LOG("[hudmove] HUD 移位框架启动（默认开，DM_HUDMOVE=0 关；诊断=%d，手柄 presence=%d，锚0=%s）", dump_requested(), atomic_load(&g_pad_present), anchors[0]);   // 锚0 直用：防 LTO strip 字面量
