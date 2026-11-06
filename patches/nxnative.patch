@@ -3398,10 +3398,10 @@ index 96d2674..579e8ae 100644
      if (!wh) { hle_bind_system_event(ev, 0); pthread_mutex_lock(&g_se_lock); wh = se_find(ev); pthread_mutex_unlock(&g_se_lock); }
 diff --git a/dm/host/hle_uistate.c b/dm/host/hle_uistate.c
 new file mode 100644
-index 0000000..c2a830b
+index 0000000..0f75bd4
 --- /dev/null
 +++ b/dm/host/hle_uistate.c
-@@ -0,0 +1,143 @@
+@@ -0,0 +1,150 @@
 +// UI 状态采样诊断包（docs/H2O静态解析突破-2026-11-05.md §16.5 步骤 1）：
 +//   ① UI 状态机真值表（§16.2 链：[0x114a8d0]→*→+0x1f8→*→+0 = 状态号）→ 虚拟按键显隐依据
 +//   ② HUD 7 槽实时数据 hexdump（§13：技能槽缓存 @0x197ac90+player*0x4d8+0x128，0x30/槽）
@@ -3513,15 +3513,20 @@ index 0000000..c2a830b
 +            p[16],p[17],p[18],p[19],p[20],p[21],p[22],p[23],p[24],p[25],p[26],p[27],p[28],p[29],p[30],p[31]);
 +    }
 +
-+    // ④ 原型：UIID→impl 解析（FUN_00431190 静态复刻；mgr 槽 0x114a840 运行时直读）
++    // ④ 原型：UIID→impl 解析（FUN_00431190 静态复刻；mgr 槽 0x114a840 运行时直读）。
++    //    v4 闪退根因：buckets 偏移错——反编译 (uint*)desc+4 是 uint 算术（=+16 字节），
++    //    按 +4 字节读出垃圾指针 → 桶数组野读 sig=11。v5：+16 修正 + 全链 dm_guest_readable 护栏。
 +    void *m16 = *(void **)(base + 0x114a840UL);
 +    void *mgr = m16 ? *(void **)((uint8_t *)m16 + 0x10) : NULL;
-+    if (!mgr) { LOG("[uiimpl] mgr 未就绪"); return; }
++    if (!mgr || !dm_guest_readable((uint64_t)mgr, 0xb88)) { LOG("[uiimpl] mgr 未就绪"); return; }
 +    void *pp = *(void **)((uint8_t *)mgr + 0xb80);
 +    void *desc = pp ? *(void **)pp : NULL;
-+    if (!desc) { LOG("[uiimpl] UIID 表未就绪"); return; }
++    if (!desc || !dm_guest_readable((uint64_t)desc, 24)) { LOG("[uiimpl] UIID 表未就绪"); return; }
 +    uint32_t mask = *(uint32_t *)desc;
-+    uint8_t *buckets = *(uint8_t **)((uint8_t *)desc + 4);
++    uint8_t *buckets = *(uint8_t **)((uint8_t *)desc + 16);   // (uint*)+4 = +16 字节（v4 修正）
++    if (!buckets || !dm_guest_readable((uint64_t)buckets, ((uint64_t)mask + 1) * 8)) {
++        LOG("[uiimpl] 桶数组不可读 mask=%#x buckets=%p", mask, (void *)buckets); return;
++    }
 +    LOG("[uiimpl] mgr=%p desc=%p mask=%#x buckets=%p", mgr, desc, mask, (void *)buckets);
 +    // 模板缓存槽（+8*idx）：0x05=hp_bar_player、0x08=HP_Globe、0x13=PotionIcon、0x14=PotionButton
 +    static const int slots[] = {5, 8, 13, 14};
@@ -3533,13 +3538,15 @@ index 0000000..c2a830b
 +        uint32_t h = (uint32_t)uiid;
 +        uint32_t b = ((((h & 0xff ^ 0x811c9dc5) * 0x1000193 ^ (h >> 8 & 0xff)) * 0x1000193 ^ (h >> 16 & 0xff)) * 0x1000193 ^ (h >> 24)) * 0x1000193 & mask;
 +        uint8_t *n = *(uint8_t **)(buckets + (uint64_t)b * 8);
-+        void *impl = NULL; uint64_t found = 0;
-+        while (n) {
++        void *impl = NULL; int steps = 0;
++        while (n && steps++ < 64) {   // 链表逐节点护栏：可读才解引用，上限 64 步
++            if (!dm_guest_readable((uint64_t)n, 24)) break;
 +            uint64_t key = *(uint64_t *)(n + 8);
-+            if (key == uiid) { impl = *(void **)(n + 16); found = key; break; }
++            if (key == uiid) { impl = *(void **)(n + 16); break; }
 +            n = *(uint8_t **)n;
 +        }
 +        if (!impl) { LOG("[uiimpl] %s: UIID %016llx 未命中", names[k], (unsigned long long)uiid); continue; }
++        if (!dm_guest_readable((uint64_t)impl, 0x500)) { LOG("[uiimpl] %s: impl 不可读 %p", names[k], impl); continue; }
 +        LOG("[uiimpl] %s: impl=%p pos=(%.1f,%.1f) f4f8=%08x f4fc=%08x", names[k], impl,
 +            *(float *)((uint8_t *)impl + 0x1ec), *(float *)((uint8_t *)impl + 0x1f0),
 +            *(uint32_t *)((uint8_t *)impl + 0x4f8), *(uint32_t *)((uint8_t *)impl + 0x4fc));
