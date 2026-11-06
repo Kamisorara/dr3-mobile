@@ -3398,10 +3398,10 @@ index 96d2674..579e8ae 100644
      if (!wh) { hle_bind_system_event(ev, 0); pthread_mutex_lock(&g_se_lock); wh = se_find(ev); pthread_mutex_unlock(&g_se_lock); }
 diff --git a/dm/host/hle_uistate.c b/dm/host/hle_uistate.c
 new file mode 100644
-index 0000000..46f4945
+index 0000000..6c5dbdd
 --- /dev/null
 +++ b/dm/host/hle_uistate.c
-@@ -0,0 +1,106 @@
+@@ -0,0 +1,115 @@
 +// UI 状态采样诊断包（docs/H2O静态解析突破-2026-11-05.md §16.5 步骤 1）：
 +//   ① UI 状态机真值表（§16.2 链：[0x114a8d0]→*→+0x1f8→*→+0 = 状态号）→ 虚拟按键显隐依据
 +//   ② HUD 7 槽实时数据 hexdump（§13：技能槽缓存 @0x197ac90+player*0x4d8+0x128，0x30/槽）
@@ -3421,7 +3421,7 @@ index 0000000..46f4945
 +#define HUDROOT_SLOT       0x114eee8UL   // HUD 根名句柄槽（游戏态非空）
 +#define HUD_MAIN_PTR       0x197ac78UL   // HUD 状态主指针（0=HUD 未构建）
 +#define HUD_HOST0          0x197ac90UL   // 玩家0 模板缓存宿主（+0x4d8/玩家）
-+#define SLOT_DUMP_LO       0x0F8UL       // 覆盖槽索引区（+0x100 前一点）到槽区尾
++#define SLOT_DUMP_LO       0x000UL       // 模板缓存从 0 起（u64 路径哈希槽区确认初始化）
 +#define SLOT_DUMP_HI       0x248UL       // 0x128 + 6*0x30 = 0x238，留 0x10 余量
 +#define EVT_SLOT_A         0x1153d08UL   // UIStackSplit_Console_OnAccept
 +#define EVT_SLOT_B         0x1153e68UL   // UIInventory_OnLeftStick
@@ -3486,19 +3486,28 @@ index 0000000..46f4945
 +            (unsigned long long)a0, (unsigned long long)a1);
 +    }
 +
-+    // ② HUD 槽区 hexdump（HUD 构建后才有意义）
-+    uint64_t hudmain = *(uint64_t *)(base + HUD_MAIN_PTR);
-+    if (hudmain) {
-+        uint8_t *host = base + HUD_HOST0;
-+        for (uint32_t a = SLOT_DUMP_LO; a < SLOT_DUMP_HI; a += 32) {
-+            uint8_t *p = host + a;
-+            LOG("[uislots] +%03x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x "
-+                "%02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x",
-+                a, p[0],p[1],p[2],p[3],p[4],p[5],p[6],p[7],p[8],p[9],p[10],p[11],p[12],p[13],p[14],p[15],
-+                p[16],p[17],p[18],p[19],p[20],p[21],p[22],p[23],p[24],p[25],p[26],p[27],p[28],p[29],p[30],p[31]);
-+        }
-+    } else {
-+        LOG("[uislots] HUD 未构建（main=%llu）", (unsigned long long)hudmain);
++    // ② HUD 表裸 dump（v2 教训：0x197ac78 是状态表基址不是标量标志，首 u32 恒 0，
++    //    拿它当门槛把数据区挡住了。v2 起无条件 dump）
++    // ②a 表头 0x18 字节 + buff 槽区采样（0x4164e0 写 [player*0x4d8 + slot*40 + 0x94*4]）
++    uint8_t *tbl = base + HUD_MAIN_PTR;
++    LOG("[uitbl] hdr %08x %08x %08x %08x %08x %08x",
++        *(uint32_t *)(tbl + 0), *(uint32_t *)(tbl + 4), *(uint32_t *)(tbl + 8),
++        *(uint32_t *)(tbl + 12), *(uint32_t *)(tbl + 16), *(uint32_t *)(tbl + 20));
++    for (int s = 0; s < 3; s++) {   // 玩家0 buff 槽 0-2（+0x94 起，40 字节/槽）
++        uint8_t *b = tbl + 0x94 * 4 + s * 40;
++        LOG("[uibuff] p0s%d %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x",
++            s, *(uint32_t *)(b + 0), *(uint32_t *)(b + 4), *(uint32_t *)(b + 8), *(uint32_t *)(b + 12),
++            *(uint32_t *)(b + 16), *(uint32_t *)(b + 20), *(uint32_t *)(b + 24), *(uint32_t *)(b + 28),
++            *(uint32_t *)(b + 32), *(uint32_t *)(b + 36));
++    }
++    // ②b 模板缓存（0x197ac90 起：u64 路径哈希槽 + 技能槽区 0x128 起 0x30/槽）
++    uint8_t *host = base + HUD_HOST0;
++    for (uint32_t a = SLOT_DUMP_LO; a < SLOT_DUMP_HI; a += 32) {
++        uint8_t *p = host + a;
++        LOG("[uislots] +%03x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x "
++            "%02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x",
++            a, p[0],p[1],p[2],p[3],p[4],p[5],p[6],p[7],p[8],p[9],p[10],p[11],p[12],p[13],p[14],p[15],
++            p[16],p[17],p[18],p[19],p[20],p[21],p[22],p[23],p[24],p[25],p[26],p[27],p[28],p[29],p[30],p[31]);
 +    }
 +
 +    // ③ handler 槽运行时值：第一轮已确认 = main 代码区 C 函数指针（OnAccept my 0x22dc50 /
