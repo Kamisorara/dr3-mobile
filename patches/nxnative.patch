@@ -3398,10 +3398,10 @@ index 96d2674..579e8ae 100644
      if (!wh) { hle_bind_system_event(ev, 0); pthread_mutex_lock(&g_se_lock); wh = se_find(ev); pthread_mutex_unlock(&g_se_lock); }
 diff --git a/dm/host/hle_uistate.c b/dm/host/hle_uistate.c
 new file mode 100644
-index 0000000..8f8102d
+index 0000000..727d29f
 --- /dev/null
 +++ b/dm/host/hle_uistate.c
-@@ -0,0 +1,83 @@
+@@ -0,0 +1,96 @@
 +// UI 状态采样诊断包（docs/H2O静态解析突破-2026-11-05.md §16.5 步骤 1）：
 +//   ① UI 状态机真值表（§16.2 链：[0x114a8d0]→*→+0x1f8→*→+0 = 状态号）→ 虚拟按键显隐依据
 +//   ② HUD 7 槽实时数据 hexdump（§13：技能槽缓存 @0x197ac90+player*0x4d8+0x128，0x30/槽）
@@ -3454,15 +3454,27 @@ index 0000000..8f8102d
 +    if (now < next_ms) return;
 +    next_ms = now + 1000;
 +
-+    // ① 状态机链（逐层判空，断哪层日志可见）
++    // ① 状态机链（第一轮教训：服务查找走 TLS 静态不可复刻；改为 dump 各层原始内存，
++    //    由「主菜单/游戏/背包」三态比对挑信号位）
 +    void *p1 = *(void **)(base + UISTATE_MGR_SLOT);
-+    void *obj = p1 ? *(void **)p1 : NULL;
-+    void *sm = obj ? *(void **)((uint8_t *)obj + 0x1f8) : NULL;
-+    uint32_t state = 0xffffffff, mode_a = 0, mode_b = 0;
-+    if (sm) { state = *(uint32_t *)sm; mode_a = *(uint32_t *)((uint8_t *)sm + 0x7c); mode_b = *(uint32_t *)((uint8_t *)sm + 0x84); }
++    void *x0 = p1 ? *(void **)p1 : NULL;
++    uint32_t svcbid = x0 ? *(uint32_t *)((uint8_t *)x0 + 0xc) : 0;
 +    void *hudroot = *(void **)(base + HUDROOT_SLOT);
-+    LOG("[uistate] p1=%p obj=%p sm=%p state=%u w07c=%08x w084=%d hudroot=%p",
-+        p1, obj, sm, state, mode_a, (int)mode_b, hudroot);
++    uint64_t guard = *(uint64_t *)(base + HUD_MAIN_PTR);
++    LOG("[uistate] p1=%p x0=%p svcid=%u hudroot=%p(→my 0x%llx) guard197ac78=%llu",
++        p1, x0, svcbid, hudroot,
++        hudroot ? (unsigned long long)((uint8_t *)hudroot - base) : 0ull,
++        (unsigned long long)guard);
++    // ①b HUD 根表 .bss 区（hudroot 槽指向处，进游戏后填充；三态比对挑显隐信号）
++    if (hudroot && (uint8_t *)hudroot >= base && (uint8_t *)hudroot < base + 0x1aa6000UL) {
++        uint8_t *r = (uint8_t *)hudroot;
++        LOG("[uiroot] %016llx %016llx %016llx %016llx",
++            *(unsigned long long *)(r + 0), *(unsigned long long *)(r + 8),
++            *(unsigned long long *)(r + 16), *(unsigned long long *)(r + 24));
++        LOG("[uiroot] %016llx %016llx %016llx %016llx",
++            *(unsigned long long *)(r + 32), *(unsigned long long *)(r + 40),
++            *(unsigned long long *)(r + 48), *(unsigned long long *)(r + 56));
++    }
 +
 +    // ② HUD 槽区 hexdump（HUD 构建后才有意义）
 +    uint64_t hudmain = *(uint64_t *)(base + HUD_MAIN_PTR);
@@ -3479,11 +3491,12 @@ index 0000000..8f8102d
 +        LOG("[uislots] HUD 未构建（main=%llu）", (unsigned long long)hudmain);
 +    }
 +
-+    // ③ handler 槽运行时值（首次非零时打，各打一次）
-+    static int logged_a, logged_b;
++    // ③ handler 槽运行时值：第一轮已确认 = main 代码区 C 函数指针（OnAccept my 0x22dc50 /
++    //    OnLeftStick my 0x1f6900）；改为每拍监测前 4 槽地址是否随屏幕切换变化（换 handler=切屏信号）
++    static uint64_t prev_va;
 +    uint64_t va = *(uint64_t *)(base + EVT_SLOT_A), vb = *(uint64_t *)(base + EVT_SLOT_B);
-+    if (va && !logged_a) { logged_a = 1; LOG("[uievt] OnAccept 槽 = %016llx", (unsigned long long)va); }
-+    if (vb && !logged_b) { logged_b = 1; LOG("[uievt] OnLeftStick 槽 = %016llx", (unsigned long long)vb); }
++    if (va != prev_va) { LOG("[uievt] OnAccept 槽 %016llx → %016llx", (unsigned long long)prev_va, (unsigned long long)va); prev_va = va; }
++    (void)vb;
 +}
 diff --git a/dm/host/lan_discovery_apple.m b/dm/host/lan_discovery_apple.m
 new file mode 100644
