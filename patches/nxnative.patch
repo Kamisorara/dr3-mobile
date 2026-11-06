@@ -3398,10 +3398,10 @@ index 96d2674..579e8ae 100644
      if (!wh) { hle_bind_system_event(ev, 0); pthread_mutex_lock(&g_se_lock); wh = se_find(ev); pthread_mutex_unlock(&g_se_lock); }
 diff --git a/dm/host/hle_uistate.c b/dm/host/hle_uistate.c
 new file mode 100644
-index 0000000..6c5dbdd
+index 0000000..2f7bfaa
 --- /dev/null
 +++ b/dm/host/hle_uistate.c
-@@ -0,0 +1,115 @@
+@@ -0,0 +1,143 @@
 +// UI 状态采样诊断包（docs/H2O静态解析突破-2026-11-05.md §16.5 步骤 1）：
 +//   ① UI 状态机真值表（§16.2 链：[0x114a8d0]→*→+0x1f8→*→+0 = 状态号）→ 虚拟按键显隐依据
 +//   ② HUD 7 槽实时数据 hexdump（§13：技能槽缓存 @0x197ac90+player*0x4d8+0x128，0x30/槽）
@@ -3453,6 +3453,9 @@ index 0000000..6c5dbdd
 +    uint64_t now = now_ms();
 +    if (now < next_ms) return;
 +    next_ms = now + 1000;
++    static int beats;   // 静态区只在前 3 拍打（v3 实证它们恒定），活值区每拍打
++    int verbose = beats < 3;
++    beats++;
 +
 +    // ① 状态机链（第一轮教训：服务查找走 TLS 静态不可复刻；改为 dump 各层原始内存，
 +    //    由「主菜单/游戏/背包」三态比对挑信号位）
@@ -3468,10 +3471,10 @@ index 0000000..6c5dbdd
 +    // ①b HUD 根表 .bss 区（hudroot 槽指向处，进游戏后填充；三态比对挑显隐信号）
 +    if (hudroot && (uint8_t *)hudroot >= base && (uint8_t *)hudroot < base + 0x1aa6000UL) {
 +        uint8_t *r = (uint8_t *)hudroot;
-+        LOG("[uiroot] %016llx %016llx %016llx %016llx",
++        if (verbose) LOG("[uiroot] %016llx %016llx %016llx %016llx",
 +            *(unsigned long long *)(r + 0), *(unsigned long long *)(r + 8),
 +            *(unsigned long long *)(r + 16), *(unsigned long long *)(r + 24));
-+        LOG("[uiroot] %016llx %016llx %016llx %016llx",
++        if (verbose) LOG("[uiroot] %016llx %016llx %016llx %016llx",
 +            *(unsigned long long *)(r + 32), *(unsigned long long *)(r + 40),
 +            *(unsigned long long *)(r + 48), *(unsigned long long *)(r + 56));
 +    }
@@ -3482,7 +3485,7 @@ index 0000000..6c5dbdd
 +        void *slot = *(void **)(base + off);
 +        uint64_t a0 = slot ? *(uint64_t *)((uint8_t *)slot + 0) : 0;
 +        uint64_t a1 = slot ? *(uint64_t *)((uint8_t *)slot + 8) : 0;
-+        LOG("[uiscr] my 0x%llx 槽=%p [%016llx %016llx]", (unsigned long long)off, slot,
++        if (verbose) LOG("[uiscr] my 0x%llx 槽=%p [%016llx %016llx]", (unsigned long long)off, slot,
 +            (unsigned long long)a0, (unsigned long long)a1);
 +    }
 +
@@ -3490,12 +3493,12 @@ index 0000000..6c5dbdd
 +    //    拿它当门槛把数据区挡住了。v2 起无条件 dump）
 +    // ②a 表头 0x18 字节 + buff 槽区采样（0x4164e0 写 [player*0x4d8 + slot*40 + 0x94*4]）
 +    uint8_t *tbl = base + HUD_MAIN_PTR;
-+    LOG("[uitbl] hdr %08x %08x %08x %08x %08x %08x",
++    if (verbose) LOG("[uitbl] hdr %08x %08x %08x %08x %08x %08x",
 +        *(uint32_t *)(tbl + 0), *(uint32_t *)(tbl + 4), *(uint32_t *)(tbl + 8),
 +        *(uint32_t *)(tbl + 12), *(uint32_t *)(tbl + 16), *(uint32_t *)(tbl + 20));
 +    for (int s = 0; s < 3; s++) {   // 玩家0 buff 槽 0-2（+0x94 起，40 字节/槽）
 +        uint8_t *b = tbl + 0x94 * 4 + s * 40;
-+        LOG("[uibuff] p0s%d %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x",
++        if (verbose) LOG("[uibuff] p0s%d %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x",
 +            s, *(uint32_t *)(b + 0), *(uint32_t *)(b + 4), *(uint32_t *)(b + 8), *(uint32_t *)(b + 12),
 +            *(uint32_t *)(b + 16), *(uint32_t *)(b + 20), *(uint32_t *)(b + 24), *(uint32_t *)(b + 28),
 +            *(uint32_t *)(b + 32), *(uint32_t *)(b + 36));
@@ -3504,18 +3507,43 @@ index 0000000..6c5dbdd
 +    uint8_t *host = base + HUD_HOST0;
 +    for (uint32_t a = SLOT_DUMP_LO; a < SLOT_DUMP_HI; a += 32) {
 +        uint8_t *p = host + a;
-+        LOG("[uislots] +%03x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x "
++        if (verbose) LOG("[uislots] +%03x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x "
 +            "%02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x",
 +            a, p[0],p[1],p[2],p[3],p[4],p[5],p[6],p[7],p[8],p[9],p[10],p[11],p[12],p[13],p[14],p[15],
 +            p[16],p[17],p[18],p[19],p[20],p[21],p[22],p[23],p[24],p[25],p[26],p[27],p[28],p[29],p[30],p[31]);
 +    }
 +
-+    // ③ handler 槽运行时值：第一轮已确认 = main 代码区 C 函数指针（OnAccept my 0x22dc50 /
-+    //    OnLeftStick my 0x1f6900）；改为每拍监测前 4 槽地址是否随屏幕切换变化（换 handler=切屏信号）
-+    static uint64_t prev_va;
-+    uint64_t va = *(uint64_t *)(base + EVT_SLOT_A), vb = *(uint64_t *)(base + EVT_SLOT_B);
-+    if (va != prev_va) { LOG("[uievt] OnAccept 槽 %016llx → %016llx", (unsigned long long)prev_va, (unsigned long long)va); prev_va = va; }
-+    (void)vb;
++    // ④ 原型：UIID→impl 解析（FUN_00431190 静态复刻；mgr 槽 0x114a840 运行时直读）
++    void *m16 = *(void **)(base + 0x114a840UL);
++    void *mgr = m16 ? *(void **)((uint8_t *)m16 + 0x10) : NULL;
++    if (!mgr) { LOG("[uiimpl] mgr 未就绪"); return; }
++    void *pp = *(void **)((uint8_t *)mgr + 0xb80);
++    void *desc = pp ? *(void **)pp : NULL;
++    if (!desc) { LOG("[uiimpl] UIID 表未就绪"); return; }
++    uint32_t mask = *(uint32_t *)desc;
++    uint8_t *buckets = *(uint8_t **)((uint8_t *)desc + 4);
++    LOG("[uiimpl] mgr=%p desc=%p mask=%#x buckets=%p", mgr, desc, mask, (void *)buckets);
++    // 模板缓存槽（+8*idx）：0x05=hp_bar_player、0x08=HP_Globe、0x13=PotionIcon、0x14=PotionButton
++    static const int slots[] = {5, 8, 13, 14};
++    static const char *names[] = {"hp_bar_player", "HP_Globe", "PotionIcon", "PotionButton"};
++    uint64_t *cache = (uint64_t *)(base + HUD_HOST0);
++    for (int k = 0; k < 4; k++) {
++        uint64_t uiid = cache[slots[k]];
++        if (!uiid) { LOG("[uiimpl] %s: UIID=0", names[k]); continue; }
++        uint32_t h = (uint32_t)uiid;
++        uint32_t b = ((((h & 0xff ^ 0x811c9dc5) * 0x1000193 ^ (h >> 8 & 0xff)) * 0x1000193 ^ (h >> 16 & 0xff)) * 0x1000193 ^ (h >> 24)) * 0x1000193 & mask;
++        uint8_t *n = *(uint8_t **)(buckets + (uint64_t)b * 8);
++        void *impl = NULL; uint64_t found = 0;
++        while (n) {
++            uint64_t key = *(uint64_t *)(n + 8);
++            if (key == uiid) { impl = *(void **)(n + 16); found = key; break; }
++            n = *(uint8_t **)n;
++        }
++        if (!impl) { LOG("[uiimpl] %s: UIID %016llx 未命中", names[k], (unsigned long long)uiid); continue; }
++        LOG("[uiimpl] %s: impl=%p pos=(%.1f,%.1f) f4f8=%08x f4fc=%08x", names[k], impl,
++            *(float *)((uint8_t *)impl + 0x1ec), *(float *)((uint8_t *)impl + 0x1f0),
++            *(uint32_t *)((uint8_t *)impl + 0x4f8), *(uint32_t *)((uint8_t *)impl + 0x4fc));
++    }
 +}
 diff --git a/dm/host/lan_discovery_apple.m b/dm/host/lan_discovery_apple.m
 new file mode 100644
