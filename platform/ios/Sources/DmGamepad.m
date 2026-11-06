@@ -80,6 +80,9 @@ static __weak DmGamepad *g_view;
     CGFloat _artUnit, _artScale;
     CAShapeLayer *_swap; CATextLayer *_swapLabel; BOOL _swapHeld;
     BOOL _sticksShown;                             // a stick was held at the last refresh
+    BOOL _menuMode;                                // 菜单态：摇杆+技能环隐藏（包/单/±打开，✕关闭）；菜单内点击→方向注入
+    BOOL _menuPending;                             // 菜单态切换已排队（防重入）
+    uint64_t _pulse;                               // 菜单点击单发脉冲位（130ms 自动抬）| one-shot key pulses for menu clicks
     BOOL _full;                                    // the 3D layout is current
     BOOL _d3;                                      // D3 专用布局：技能环 + 语义标签（键=真实键，只改几何/标签）
 }
@@ -147,8 +150,29 @@ static BOOL fullOnly(int b) {   // 仅 3D 布局显示的键（显式列举：�
         b == B_LEFT || b == B_UP || b == B_RIGHT || b == B_DOWN ||
         b == B_PLUS || b == B_MINUS) : (fullOnly(b) && !_full);   // D3：±本体隐藏（包/单 pill = 同功能的语义入口）
     _ring[1].hidden = _knob[1].hidden = _d3 || !_full;
+    if (_menuMode) {   // 菜单态：摇杆+技能环+药水全隐，只留图标栏（✕/单/包/城 = 菜单操作键）
+        for (int b = 0; b < B_N; b++) _key[b].hidden = !(b == B_B || b == B_BAG || b == B_MENU || b == B_ZR);
+        _ring[0].hidden = _knob[0].hidden = YES;
+        _swap.hidden = _swapLabel.hidden = YES;
+    } else {
+        _swap.hidden = _swapLabel.hidden = NO;
+    }
     _swapLabel.string = _d3 ? @"D3" : _full ? @"3D" : @"2D";
     [CATransaction commit];
+}
+- (void)setMenuMode:(BOOL)m {   // 菜单态切换：清空全部按住的触摸（防止键卡住）后重排可见性
+    if (m == _menuMode) return;
+    [self reset];
+    _menuMode = m;
+    [self applyLayout]; [self setNeedsLayout];
+}
+- (void)pulse:(int)b {   // 菜单点击单发脉冲：按下约 130ms 后自动抬起（点击→方向→注入，§15 路线 A）
+    pthread_mutex_lock(&g_mu); _pulse |= 1ull << b; pthread_mutex_unlock(&g_mu);
+    [self recompute];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 130 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+        pthread_mutex_lock(&g_mu); _pulse &= ~(1ull << b); pthread_mutex_unlock(&g_mu);
+        [self recompute];
+    });
 }
 - (void)setFull:(BOOL)full {   // switch layouts: release every touch first (no key stays held), save, lay out again
     if (full == _full && !_d3) return;
@@ -291,6 +315,17 @@ static CGFloat dist(CGPoint a, CGPoint b) { return hypot(a.x - b.x, a.y - b.y); 
     if (btn & (1ull << B_BAG)) face |= 1ull << B_PLUS;
     if (btn & (1ull << B_MENU)) face |= 1ull << B_MINUS;
     btn &= ~(1ull << B_BAG | 1ull << B_MENU);
+    // 菜单态状态机（纯壳侧，docs §15/§16）：包/单/± 按下 = 进菜单（隐摇杆+技能环）；
+    // ✕(B_B) 按下 = 关菜单恢复。城(B_ZR) 不触发（战斗技能）。异步排队防重入。
+    // | Menu-mode state machine, shell-side only: bag/menu keys open (hide stick+ring), ✕ closes.
+    uint64_t pressed = (btn | face) & ~(_btnBits | _faceBits);
+    if ((pressed & ((1ull << B_BAG) | (1ull << B_MENU) | (1ull << B_MINUS) | (1ull << B_PLUS))) && !_menuMode && !_menuPending) {
+        _menuPending = YES;
+        dispatch_async(dispatch_get_main_queue(), ^{ _menuPending = NO; [self setMenuMode:YES]; });
+    } else if ((pressed & (1ull << B_B)) && _menuMode && !_menuPending) {
+        _menuPending = YES;
+        dispatch_async(dispatch_get_main_queue(), ^{ _menuPending = NO; [self setMenuMode:NO]; });
+    }
     int32_t ax[4] = {0};
     for (int i = 0; i < 2; i++) {
         CGPoint o = [self knobOffset:i]; CGFloat R = [self stickR:i], d = hypot(o.x, o.y), dz = R * K_DEAD;
@@ -301,7 +336,7 @@ static CGFloat dist(CGPoint a, CGPoint b) { return hypot(a.x - b.x, a.y - b.y); 
     BOOL changed = face != _faceBits || dpad != _dpadBits || btn != _btnBits || swap != _swapHeld;
     _faceBits = face; _dpadBits = dpad; _btnBits = btn; _swapHeld = swap;
     pthread_mutex_lock(&g_mu);
-    g_touch_btn = face | dpad | btn; g_touch_lx = ax[0]; g_touch_ly = ax[1]; g_touch_rx = ax[2]; g_touch_ry = ax[3];
+    g_touch_btn = face | dpad | btn | _pulse; g_touch_lx = ax[0]; g_touch_ly = ax[1]; g_touch_rx = ax[2]; g_touch_ry = ax[3];
     pthread_mutex_unlock(&g_mu);
     publish();
     [self syncGameTouches];
@@ -314,6 +349,22 @@ static CGFloat dist(CGPoint a, CGPoint b) { return hypot(a.x - b.x, a.y - b.y); 
         CGPoint p = [t locationInView:self]; int hit = [self btnAt:p];
         if (hit >= 0) { [_owner setObject:@(C_BTN | (uint64_t)hit << 8) forKey:t]; continue; }
         if ([self inSwap:p]) { [_owner setObject:@(C_SWAP) forKey:t]; continue; }
+        if (_menuMode) {   // 菜单态点击（§15 路线 A）：中心圆 = A 确认；外围 = 按角度十字键步进一格。
+            // 游戏内轮盘/列表都有各自选中高亮，走游戏自己的管线（纯壳侧零游戏内存访问）。
+            CGRect f = dm_ios_game_frame();
+            CGPoint c = f.size.width > 0
+                ? CGPointMake(f.origin.x + f.size.width / 2, f.origin.y + f.size.height / 2)
+                : CGPointMake(CGRectGetMidX(self.bounds), CGRectGetMidY(self.bounds));
+            CGFloat dx = p.x - c.x, dy = p.y - c.y;
+            if (hypot(dx, dy) < 0.22 * self.bounds.size.height) [self pulse:B_A];
+            else {
+                CGFloat a = atan2(dy, dx) * 180 / M_PI;   // UIKit y 向下；上推 = 菜单「上」
+                int b = a >= -45 && a < 45 ? B_RIGHT : a >= 45 && a < 135 ? B_DOWN
+                      : (a >= 135 || a < -135) ? B_LEFT : B_UP;
+                [self pulse:b];
+            }
+            continue;   // 该触摸不进任何控件/透传（D3 游戏不读触屏）
+        }
         // diamond, D-pad, the two sticks: take the one with the smallest distance / grab radius, if it is <= 1
         CGFloat best = 1; int kind = C_NONE, idx = 0;
         if (_d3) { if ([self faceAt:p]) { kind = C_FACE; best = 0; } }   // D3：点中技能环/图标栏具体键才抢，否则透传游戏区（弧外的点击是拾取/移动；固定半径竞争公式够不着技能弧 111u+）
@@ -447,7 +498,7 @@ static UIImage *controlImage(CGSize size,CGFloat scale,void (^draw)(CGContextRef
         _key[B_ZR].hidden = NO; _label[B_ZR].hidden = NO;
         // Skill4（B_R）在环上（k_btns 循环按顶部泪滴画过，这里重画到环位）
         CGPoint r4 = [self facePos:B_R]; setPath(_key[B_R], circlePath(r4, 27 * u));
-        placeLabel(_label[B_R], r4, 18 * u); _key[B_R].hidden = NO; _label[B_R].hidden = NO;
+        placeLabel(_label[B_R], r4, 18 * u); _key[B_R].hidden = _menuMode; _label[B_R].hidden = _menuMode;   // 菜单态随技能环一起隐
     } else {
         static NSString *const names[B_N] = {@"A", @"B", @"X", @"Y", @"L3", @"R3", @"L", @"R", @"ZL", @"ZR", @"+", @"−", @"←", @"↑", @"→", @"↓", @"包", @"单"};
         for (int b = 0; b < B_N; b++) if (names[b]) _label[b].string = names[b];
