@@ -3398,10 +3398,10 @@ index 96d2674..579e8ae 100644
      if (!wh) { hle_bind_system_event(ev, 0); pthread_mutex_lock(&g_se_lock); wh = se_find(ev); pthread_mutex_unlock(&g_se_lock); }
 diff --git a/dm/host/hle_uistate.c b/dm/host/hle_uistate.c
 new file mode 100644
-index 0000000..727d29f
+index 0000000..46f4945
 --- /dev/null
 +++ b/dm/host/hle_uistate.c
-@@ -0,0 +1,96 @@
+@@ -0,0 +1,106 @@
 +// UI 状态采样诊断包（docs/H2O静态解析突破-2026-11-05.md §16.5 步骤 1）：
 +//   ① UI 状态机真值表（§16.2 链：[0x114a8d0]→*→+0x1f8→*→+0 = 状态号）→ 虚拟按键显隐依据
 +//   ② HUD 7 槽实时数据 hexdump（§13：技能槽缓存 @0x197ac90+player*0x4d8+0x128，0x30/槽）
@@ -3474,6 +3474,16 @@ index 0000000..727d29f
 +        LOG("[uiroot] %016llx %016llx %016llx %016llx",
 +            *(unsigned long long *)(r + 32), *(unsigned long long *)(r + 40),
 +            *(unsigned long long *)(r + 48), *(unsigned long long *)(r + 56));
++    }
++    // ①c 屏幕实例化双槽（0x348320/0x329de0 实证）：[0x11509f0]=屏幕句柄容器、
++    //     [0x1150ee0]=UIID→impl 管理器——打开背包/菜单必然改变屏幕集合
++    for (int k = 0; k < 2; k++) {
++        uint64_t off = k == 0 ? 0x11509f0UL : 0x1150ee0UL;
++        void *slot = *(void **)(base + off);
++        uint64_t a0 = slot ? *(uint64_t *)((uint8_t *)slot + 0) : 0;
++        uint64_t a1 = slot ? *(uint64_t *)((uint8_t *)slot + 8) : 0;
++        LOG("[uiscr] my 0x%llx 槽=%p [%016llx %016llx]", (unsigned long long)off, slot,
++            (unsigned long long)a0, (unsigned long long)a1);
 +    }
 +
 +    // ② HUD 槽区 hexdump（HUD 构建后才有意义）
