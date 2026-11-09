@@ -59,7 +59,9 @@ static const CGFloat
     K_DPAD_R = 48, K_ARM_W = 17, K_ARM_IN = 11,     // D-pad: arm outer edge from the centre, half-width, tip from the centre
     K_DPAD_GRAB = 1.3,                              // D-pad grab radius (times the outer edge)
     K_RSTICK_R = 60, K_RKNOB_R = 24,                // right stick: ring and knob radius
-    K_CLICK_X = 102, K_CLICK_R = 17;                // L3 / R3: centre from the outer edge (level with ZL / ZR), radius
+    K_CLICK_X = 102, K_CLICK_R = 17,                // L3 / R3: centre from the outer edge (level with ZL / ZR), radius
+    K_ARC_R = 100;                                  // D3 技能弧半径（主攻心到弧键心；角度组避让右上图标栏）
+static const CGFloat K_ARC_DEG[5] = {112, 140, 168, 196, 222};   // 技能 2-6 弧位（数学角；UIKit y 向下 → (cos, −sin)）
 static const int k_btns[] = {B_ZL, B_L, B_ZR, B_R, B_MINUS, B_PLUS, B_BAG, B_MENU, B_LS, B_RS};   // keys locked at touch-down (L3 / R3 only in the 3D layout)
 static NSString *const k_layout_key = @"DmPadLayout";   // NSUserDefaults: 1 = 3D, 0 = 2D
 
@@ -85,6 +87,8 @@ static __weak DmGamepad *g_view;
     uint64_t _pulse;                               // 菜单点击单发脉冲位（130ms 自动抬）| one-shot key pulses for menu clicks
     BOOL _full;                                    // the 3D layout is current
     BOOL _d3;                                      // D3 专用布局：技能环 + 语义标签（键=真实键，只改几何/标签）
+    CAShapeLayer *_skillCd[6];                     // D3 技能冷却扇形遮罩（slot 0=主攻 1-5=弧键；数据由 hle 层每帧推）
+    float _cdFrac[6];                              // 最近一次推送的冷却比例（-1=无冷却），重画节流用
 }
 
 static UIColor *k_idle, *k_on, *k_line, *k_text, *k_textOn;
@@ -102,6 +106,15 @@ static CATextLayer *label(CALayer *parent, NSString *s) {
 }
 static BOOL fullOnly(int b) {   // 仅 3D 布局显示的键（显式列举：包/单等尾部枚举不受影响）
     return b == B_LS || b == B_RS || b == B_LEFT || b == B_UP || b == B_RIGHT || b == B_DOWN;
+}
+static CGPathRef piePath(CGPoint c, CGFloat r, float frac) {   // 冷却遮罩扇形：正上起顺时针扫剩余比例
+    if (frac <= 0) return NULL;
+    if (frac > 1) frac = 1;
+    CGMutablePathRef p = CGPathCreateMutable();
+    CGPathMoveToPoint(p, NULL, c.x, c.y);
+    CGPathAddArc(p, NULL, c.x, c.y, r, -M_PI_2, -M_PI_2 + 2 * (CGFloat)M_PI * frac, NO);
+    CGPathCloseSubpath(p);
+    return p;
 }
 
 - (instancetype)initWithFrame:(CGRect)f {
@@ -136,6 +149,14 @@ static BOOL fullOnly(int b) {   // 仅 3D 布局显示的键（显式列举：�
             if (names[b]) _label[b] = label(_key[b], names[b]);   // the D-pad arms carry no label
         }
         _swap = shape(self.layer); _swapLabel = label(_swap, @"");
+        static const int skillKeyOf[6] = {B_A, B_X, B_Y, B_R, B_B, B_L};   // D3 技能槽→键（0=主攻 1-5=弧）
+        for (int i = 0; i < 6; i++) {   // 冷却扇形遮罩：挂在键 layer 内、标签之下（盖 socket 不盖编号）
+            _skillCd[i] = [CAShapeLayer layer];
+            _skillCd[i].fillColor = [[UIColor colorWithWhite:0 alpha:0.55] CGColor];
+            _skillCd[i].strokeColor = nil; _skillCd[i].lineWidth = 0; _skillCd[i].hidden = YES;
+            [_key[skillKeyOf[i]] insertSublayer:_skillCd[i] below:_label[skillKeyOf[i]]];
+            _cdFrac[i] = -1;
+        }
         NSNumber *saved = [NSUserDefaults.standardUserDefaults objectForKey:k_layout_key];
         // 三态布局：0 = 2D、1 = 3D、2 = D3（旧布尔 0/1 迁移）；D3 为触控模式默认意图见 setD3
         int mode = saved ? saved.intValue : (DM_GAME_PAD_FULL ? 1 : 0);
@@ -146,17 +167,19 @@ static BOOL fullOnly(int b) {   // 仅 3D 布局显示的键（显式列举：�
 }
 - (void)applyLayout {   // show / hide the controls for the current layout
     [CATransaction begin]; [CATransaction setDisableActions:YES];
-    for (int b = 0; b < B_N; b++) _key[b].hidden = _d3 ? (b == B_LS || b == B_RS || b == B_L ||
+    for (int b = 0; b < B_N; b++) _key[b].hidden = _d3 ? (b == B_LS || b == B_RS ||
         b == B_LEFT || b == B_UP || b == B_RIGHT || b == B_DOWN ||
-        b == B_PLUS || b == B_MINUS) : (fullOnly(b) && !_full);   // D3：±本体隐藏（包/单 pill = 同功能的语义入口）
+        b == B_PLUS || b == B_MINUS) : (fullOnly(b) && !_full);   // D3：±本体隐藏（B_L=Skill6 上弧；包/单 pill = 同功能的语义入口）
     _ring[1].hidden = _knob[1].hidden = _d3 || !_full;
-    if (_menuMode) {   // 菜单态：摇杆+技能环+药水全隐，只留图标栏（✕/单/包/城 = 菜单操作键）
+    if (_d3) _label[B_B].string = _menuMode ? @"✕" : @"5";   // B_B 双语义：游戏态=Skill5，菜单态=✕ 取消
+    if (_menuMode) {   // 菜单态：摇杆+技能弧+药水全隐，只留图标栏（✕/单/包/城 = 菜单操作键）
         for (int b = 0; b < B_N; b++) _key[b].hidden = !(b == B_B || b == B_BAG || b == B_MENU || b == B_ZR);
         _ring[0].hidden = _knob[0].hidden = YES;
         _swap.hidden = _swapLabel.hidden = YES;
     } else {
         _swap.hidden = _swapLabel.hidden = NO;
     }
+    for (int i = 0; i < 6; i++) _skillCd[i].hidden = !(_d3 && !_menuMode);   // 冷却遮罩随技能弧
     _swapLabel.string = _d3 ? @"D3" : _full ? @"3D" : @"2D";
     [CATransaction commit];
 }
@@ -165,6 +188,16 @@ static BOOL fullOnly(int b) {   // 仅 3D 布局显示的键（显式列举：�
     [self reset];
     _menuMode = m;
     [self applyLayout]; [self setNeedsLayout];
+}
+- (void)updateSkillCd:(int)slot {   // 冷却遮罩重画（数据已入 _cdFrac；主线程）
+    static const int skillKeyOf[6] = {B_A, B_X, B_Y, B_R, B_B, B_L};
+    if (!_d3 || slot < 0 || slot >= 6) return;
+    int b = skillKeyOf[slot];
+    float frac = _cdFrac[slot];
+    _skillCd[slot].hidden = frac <= 0 || _menuMode;
+    CGPathRef p = piePath([self facePos:b], [self faceKeyR:b] * 0.97, frac);
+    _skillCd[slot].path = p;   // frac<=0 → NULL = 清空
+    if (p) CGPathRelease(p);
 }
 - (void)pulse:(int)b {   // 菜单点击单发脉冲：按下约 130ms 后自动抬起（点击→方向→注入，§15 路线 A）
     pthread_mutex_lock(&g_mu); _pulse |= 1ull << b; pthread_mutex_unlock(&g_mu);
@@ -198,24 +231,23 @@ static CGPoint side(CGRect s, int right, CGFloat dx, CGFloat y) { return CGPoint
 - (CGFloat)faceGap { return K_FACE_GAP * self.u; }
 - (CGFloat)faceR { return K_FACE_R * self.u; }
 - (CGPoint)facePos:(int)b {
-    if (_d3) {   // 现代手游几何（暗黑不朽式）：主攻贴右下角，技能弧绕主键拇指可达，低频键收右上图标栏
+    if (_d3) {   // 暗黑不朽式 6 技能：主攻大键贴右下角，技能 2-6 弧形绕主攻（左上扇形，避让右上图标栏），✕ 菜单态回图标栏
         CGPoint c = self.faceCenter; CGFloat u = self.u;   // faceCenter = 右下角骨架原点 (W-81u, H-82u)
-        CGPoint hero = CGPointMake(c.x - 37 * u, c.y - 14 * u);
-        CGFloat w = self.bounds.size.width;
-        switch (b) {
-            case B_A: return hero;                                                        // Skill1 主攻
-            case B_X: return CGPointMake(hero.x - 114 * u, hero.y - 20 * u);              // Skill2 左
-            case B_Y: return CGPointMake(hero.x - 50 * u, hero.y - 107 * u);              // Skill3 上偏左
-            case B_R: return CGPointMake(hero.x + 40 * u, hero.y - 111 * u);              // Skill4 上偏右
-            case B_B: return CGPointMake(w - K_BAR_X * u, K_BAR_Y * u);                   // ✕ 取消 → 图标栏最右
-            default:  return hero;
+        CGPoint hero = CGPointMake(c.x - 37 * u, c.y + 6 * u);
+        if (b == B_A) return hero;                                      // Skill1 主攻（大键）
+        if (b == B_B && _menuMode) return [self d3BarPos:B_B];          // 菜单态 ✕ 回图标栏最右
+        static const int arcKey[5] = {B_X, B_Y, B_R, B_B, B_L};         // Skill2-6（B_B 游戏态=Skill5）
+        for (int i = 0; i < 5; i++) if (arcKey[i] == b) {
+            CGFloat a = K_ARC_DEG[i] * M_PI / 180;
+            return CGPointMake(hero.x + K_ARC_R * u * cos(a), hero.y - K_ARC_R * u * sin(a));
         }
+        return hero;
     }
     CGPoint c = self.faceCenter; CGFloat g = self.faceGap;
     switch (b) { case B_A: return CGPointMake(c.x + g, c.y); case B_B: return CGPointMake(c.x, c.y + g); case B_X: return CGPointMake(c.x, c.y - g); default: return CGPointMake(c.x - g, c.y); }
 }
-- (CGFloat)faceKeyR:(int)b {   // 键面半径（D3：主攻大键，技能/取消小键）
-    if (_d3) { CGFloat u = self.u; return b == B_A ? 48 * u : (b == B_B ? 22 * u : 26 * u); }
+- (CGFloat)faceKeyR:(int)b {   // 键面半径（D3：主攻大键，弧键次之；菜单态 ✕ 用图标栏半径）
+    if (_d3) { CGFloat u = self.u; return b == B_A ? 48 * u : (b == B_B && _menuMode ? K_BAR_R * u : 26 * u); }
     return self.faceR;
 }
 - (CGPoint)stickHome:(int)i { CGRect s = self.corner; CGFloat u = self.u;
@@ -250,6 +282,7 @@ static CGFloat dist(CGPoint a, CGPoint b) { return hypot(a.x - b.x, a.y - b.y); 
     for (int i = 0; i < (int)(sizeof k_btns / sizeof *k_btns); i++) { int b = k_btns[i];
         if (fullOnly(b) && !_full) continue;
         if (_d3 && (b == B_PLUS || b == B_MINUS)) continue;   // D3：±本体已隐藏（功能=包/单图标键）
+        if (_d3 && (b == B_R || b == B_L || b == B_B)) continue;   // D3：弧键组走 faceAt（滑动换键）
         BOOL hit = isDrop(b) ? dist(p, [self dropCenter:b]) <= (b == B_ZR && _d3 ? K_BAR_R : [self dropR:b]) * 1.2
                  : isClick(b) ? dist(p, [self clickCenter:b]) <= K_CLICK_R * u * 1.35
                  : CGRectContainsPoint(CGRectInset([self pillRect:b], -(b == B_BAG || b == B_MENU ? (_d3 ? 2 : 8) : 8) * u, -(b == B_BAG || b == B_MENU ? (_d3 ? 2 : 8) : 8) * u), p);
@@ -259,11 +292,12 @@ static CGFloat dist(CGPoint a, CGPoint b) { return hypot(a.x - b.x, a.y - b.y); 
 - (BOOL)inSwap:(CGPoint)p { return dist(p, self.swapCenter) <= K_SWAP_R * self.u * 1.6; }
 - (uint64_t)faceAt:(CGPoint)p {   // keys under the finger in the diamond (between two keys both count)
     uint64_t m = 0;
-    if (_d3) {   // 技能环：中心键大半径，环键小半径；只报一个最近的（技能环没有"两键之间"语义）
+    if (_d3) {   // 技能弧 6 键：主攻大半径，弧键小半径；只报一个最近的（弧没有"两键之间"语义）
+        static const int skillKeys[6] = {B_A, B_X, B_Y, B_R, B_B, B_L};
         int best = -1; CGFloat bestd = 1e9;
-        for (int b = B_A; b <= B_Y; b++) { CGFloat d = dist(p, [self facePos:b]); if (d < bestd) { bestd = d; best = b; } }
+        for (int i = 0; i < 6; i++) { CGFloat d = dist(p, [self facePos:skillKeys[i]]); if (d < bestd) { bestd = d; best = skillKeys[i]; } }
         CGFloat u = self.u;
-        if (best >= 0 && bestd <= (best == B_A ? 50 * u : best == B_B ? 24 * u : 28 * u)) m |= 1ull << best;
+        if (best >= 0 && bestd <= (best == B_A ? 50 * u : 28 * u)) m |= 1ull << best;
         return m;
     }
     CGFloat r = self.faceR * 1.25;
@@ -488,18 +522,26 @@ static UIImage *controlImage(CGSize size,CGFloat scale,void (^draw)(CGContextRef
         _knob[i].contentsScale=_artScale;CGPathRef shadow=circlePath(CGPointMake(k,k),k*.89);_knob[i].shadowPath=shadow;CGPathRelease(shadow);
     }
     if (_d3) {   // D3 语义标签 + 药水/城键重摆（键 = 真实手柄键，只改几何与标签；映射见 docs/移动端虚拟按键设计.md）
-        static NSString *const d3names[B_N] = {@"攻", @"B", @"2", @"3", @"L3", @"R3", @"L", @"4", @"药", @"城", @"+", @"−", @"包", @"单"};
+        static NSString *const d3names[B_N] = {@"攻", @"5", @"2", @"3", @"L3", @"R3", @"6", @"4", @"药", @"城", @"+", @"−", @"包", @"单"};
         for (int b = 0; b < B_N; b++) if (d3names[b]) _label[b].string = d3names[b];
+        _label[B_B].string = _menuMode ? @"✕" : @"5";   // B_B 双语义（applyLayout 同步切）
         // 药水（B_ZL）：左摇杆右上；城（B_ZR）：右上图标栏最左（泪滴改圆；包/单的图标栏圆由 k_btns 循环按 pillRect D3 分支画出）
         CGPoint pot = [self stickHome:0]; pot.x += 118 * u; pot.y -= 46 * u;
         setPath(_key[B_ZL], circlePath(pot, 26 * u)); placeLabel(_label[B_ZL], pot, 18 * u);
         CGPoint tp = [self d3BarPos:B_ZR];
         setPath(_key[B_ZR], circlePath(tp, K_BAR_R * u)); placeLabel(_label[B_ZR], tp, 18 * u);
         _key[B_ZR].hidden = NO; _label[B_ZR].hidden = NO;
-        // Skill4（B_R）在环上（k_btns 循环按顶部泪滴画过，这里重画到环位）
-        CGPoint r4 = [self facePos:B_R]; setPath(_key[B_R], circlePath(r4, 27 * u));
-        placeLabel(_label[B_R], r4, 18 * u); _key[B_R].hidden = _menuMode; _label[B_R].hidden = _menuMode;   // 菜单态随技能环一起隐
+        // 技能弧键（B_R/B_B/B_L 原画在泪滴/pill 位，重画圆到弧位；菜单态 B_B 由 applyLayout 隐弧显图标栏）
+        for (int b = 0; b < B_N; b++) { BOOL arc = b == B_R || b == B_B || b == B_L;
+            if (!arc) continue;
+            BOOL menuHide = _menuMode && b != B_B;
+            CGPoint cp = [self facePos:b]; setPath(_key[b], circlePath(cp, [self faceKeyR:b]));
+            placeLabel(_label[b], cp, 18 * u);
+            _key[b].hidden = menuHide; _label[b].hidden = menuHide;
+        }
+        for (int i = 0; i < 6; i++) [self updateSkillCd:i];   // 遮罩随布局重摆
     } else {
+        for (int i = 0; i < 6; i++) { _skillCd[i].path = NULL; _skillCd[i].hidden = YES; }   // 离开 D3 清遮罩
         static NSString *const names[B_N] = {@"A", @"B", @"X", @"Y", @"L3", @"R3", @"L", @"R", @"ZL", @"ZR", @"+", @"−", @"←", @"↑", @"→", @"↓", @"包", @"单"};
         for (int b = 0; b < B_N; b++) if (names[b]) _label[b].string = names[b];
         // 泪滴恢复（drop 形状在上方 k_btns 循环里按默认几何画过；这里恢复 ZL/ZR 位置为标准位）
@@ -531,6 +573,16 @@ static UIImage *controlImage(CGSize size,CGFloat scale,void (^draw)(CGContextRef
 }
 
 @end
+
+void dm_gamepad_skill(int slot, float frac);   // hle 层每帧推 D3 技能冷却（slot 0=主攻 1-5=弧键；frac∈[0,1] 剩余比例，<0 无冷却）
+void dm_gamepad_skill(int slot, float frac) {
+    DmGamepad *v = g_view;
+    if (!v || slot < 0 || slot >= 6) return;
+    if (fabsf(v->_cdFrac[slot] - frac) < 0.01f) return;   // 1% 节流
+    v->_cdFrac[slot] = frac;
+    if ([NSThread isMainThread]) [v updateSkillCd:slot];
+    else dispatch_async(dispatch_get_main_queue(), ^{ [v updateSkillCd:slot]; });
+}
 
 static void physical_present(int present) {
     g_view.hidden = present;
