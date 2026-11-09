@@ -4,7 +4,7 @@
 //   左半屏动态摇杆：落指处生成底环，抬手消失——不预画固定环，不再与血球抢左下角；
 //   右下固定技能簇：大攻击键(A) + 5 技能弧(X/Y/ZR/L/B) + 药水(R)——键位对照游戏主机默认
 //   （HUD 提示：药=R、技能含 ZR）；冷却扇形遮罩由 hle skills_frame 10Hz 推送；
-//   顶右系统键排：包(+)、单(−)、城(ZL)。
+//   顶右系统键排：包(+)、单(−)、城(ZL)、赛(赛季设置面板)。
 // 输入 = dm_input_set 真键：A=确认、B=取消、摇杆=导航，游戏菜单天然可用（无需菜单态切换）。
 // 显隐 = 进游戏门控 dm_ingame（HUD 根槽，hle_uistate 1Hz）∧ 无物理手柄 ∧ 前台激活。
 // | D3-specific touch overlay — full rewrite. DI-style: dynamic left joystick born under the
@@ -14,9 +14,11 @@
 #include <pthread.h>
 #include "dm_input.h"
 #include "game_profile.h"
+#import "SeasonPanel.h"
 
-enum { B_A = 0, B_B, B_X, B_Y, B_LS, B_RS, B_L, B_R, B_ZL, B_ZR, B_PLUS, B_MINUS, B_N };
-// 本界面只发这些键：A 攻击 / X Y ZR L B 技能弧 / R 药水 / ZL 城 / + 包 / − 单（= NpadButton 位序）
+enum { B_A = 0, B_B, B_X, B_Y, B_LS, B_RS, B_L, B_R, B_ZL, B_ZR, B_PLUS, B_MINUS, B_SEASON, B_N };
+// 本界面只发这些键：A 攻击 / X Y ZR L B 技能弧 / R 药水 / ZL 城 / + 包 / − 单（= NpadButton 位序）；
+// B_SEASON 不是 Npad 键：点按开赛季设置面板（SeasonPanel，壳侧自绘，kb/18 A 路线）
 
 static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
 static uint64_t g_touch_btn;
@@ -119,8 +121,8 @@ static CGPathRef piePath(CGPoint c, CGFloat r, float frac) {   // 冷却遮罩�
     CGPoint atk = CGPointMake(r.size.width - K_ATK_DX * u, r.size.height - K_ATK_DY * u);
     if (b == B_A) return atk;
     if (b == B_R) return CGPointMake(r.size.width - K_POT_DX * u, r.size.height - K_POT_DY * u);
-    if (b == B_ZL || b == B_PLUS || b == B_MINUS) {
-        int i = b == B_PLUS ? 0 : b == B_MINUS ? 1 : 2;   // 自右向左：包/单/城
+    if (b == B_ZL || b == B_PLUS || b == B_MINUS || b == B_SEASON) {
+        int i = b == B_PLUS ? 0 : b == B_MINUS ? 1 : b == B_ZL ? 2 : 3;   // 自右向左：包/单/城/赛
         return CGPointMake(r.size.width - (K_SYS_DX0 + i * K_SYS_STEP) * u, K_SYS_DY * u + self.safeAreaInsets.top);
     }
     for (int i = 0; i < 5; i++) if (K_ARC_KEY[i] == b) {
@@ -131,7 +133,7 @@ static CGPathRef piePath(CGPoint c, CGFloat r, float frac) {   // 冷却遮罩�
 }
 - (CGFloat)keyR:(int)b {
     CGFloat u = self.u;
-    return b == B_A ? K_ATK_R * u : b == B_R ? K_POT_R * u : (b == B_ZL || b == B_PLUS || b == B_MINUS) ? K_SYS_R * u : K_ARC_R_KEY * u;
+    return b == B_A ? K_ATK_R * u : b == B_R ? K_POT_R * u : (b == B_ZL || b == B_PLUS || b == B_MINUS || b == B_SEASON) ? K_SYS_R * u : K_ARC_R_KEY * u;
 }
 - (instancetype)initWithFrame:(CGRect)f {
     if ((self = [super initWithFrame:f])) {
@@ -144,10 +146,10 @@ static CGPathRef piePath(CGPoint c, CGFloat r, float frac) {   // 冷却遮罩�
         });
         _joyRing = mkShape(self.layer); _joyRing.fillColor = UIColor.clearColor.CGColor; _joyRing.hidden = YES;
         _joyKnob = mkShape(self.layer); _joyKnob.hidden = YES;
-        static NSString *const names[B_N] = {@"攻", @"6", @"2", @"3", nil, nil, @"5", @"药", @"城", @"4", @"包", @"单"};
+        static NSString *const names[B_N] = {@"攻", @"6", @"2", @"3", nil, nil, @"5", @"药", @"城", @"4", @"包", @"单", @"赛"};
         // 弧键标签 = 槽序数字（图标管线接通后换贴图）：X=2 Y=3 ZR=4 L=5 B=6
         for (int b = 0; b < B_N; b++) {
-            if (!(b == B_A || b == B_R || b == B_ZL || b == B_PLUS || b == B_MINUS || b == B_X || b == B_Y || b == B_ZR || b == B_L || b == B_B)) continue;
+            if (!(b == B_A || b == B_R || b == B_ZL || b == B_PLUS || b == B_MINUS || b == B_X || b == B_Y || b == B_ZR || b == B_L || b == B_B || b == B_SEASON)) continue;
             _key[b] = mkShape(self.layer);
             if (names[b]) _lab[b] = mkLabel(_key[b], names[b]);
         }
@@ -187,7 +189,7 @@ static CGPathRef piePath(CGPoint c, CGFloat r, float frac) {   // 冷却遮罩�
         CGPoint c = [self keyCenter:b]; CGFloat r = [self keyR:b];
         CGPathRef p = circleAt(c, r); _key[b].path = p; _key[b].shadowPath = p; CGPathRelease(p);
         if (_lab[b]) {
-            CGFloat fs = b == B_A ? 22 * u : (b == B_R || b == B_ZL || b == B_PLUS || b == B_MINUS) ? 14 * u : 16 * u;
+            CGFloat fs = b == B_A ? 22 * u : (b == B_R || b == B_ZL || b == B_PLUS || b == B_MINUS || b == B_SEASON) ? 14 * u : 16 * u;
             _lab[b].fontSize = fs;   // 只设 fontSize：CATextLayer 默认系统字体（font 属性要 CTFontRef 桥接，CI 教训）
             _lab[b].frame = CGRectMake(c.x - fs * 1.6, c.y - fs * 0.75, fs * 3.2, fs * 1.5);
         }
@@ -225,8 +227,8 @@ static CGPathRef piePath(CGPoint c, CGFloat r, float frac) {   // 冷却遮罩�
     _pie[slot].path = p;
     if (p) CGPathRelease(p);
 }
-- (int)keyAt:(CGPoint)p {   // 命中测试：最近键且在半径 1.15 倍内（技能簇 + 药水 + 系统排）
-    static const int keys[] = {B_A, B_X, B_Y, B_ZR, B_L, B_B, B_R, B_ZL, B_PLUS, B_MINUS};
+- (int)keyAt:(CGPoint)p {   // 命中测试：最近键且在半径 1.15 倍内（技能簇 + 药水 + 系统排 + 赛季钮）
+    static const int keys[] = {B_A, B_X, B_Y, B_ZR, B_L, B_B, B_R, B_ZL, B_PLUS, B_MINUS, B_SEASON};
     int best = -1; CGFloat bestd = 1e9;
     for (int i = 0; i < (int)(sizeof keys / sizeof *keys); i++) {
         int b = keys[i];
@@ -240,6 +242,11 @@ static CGPathRef piePath(CGPoint c, CGFloat r, float frac) {   // 冷却遮罩�
     for (UITouch *t in ts) {
         CGPoint p = [t locationInView:self];
         int k = [self keyAt:p];
+        if (k == B_SEASON) {   // 赛季面板：点按即开，不进游戏键位图（recompute 只认 'K' 标）
+            [_owner setObject:@((uint64_t)'S' << 8) forKey:t];
+            [SeasonPanel presentInView:self];
+            continue;
+        }
         if (k >= 0) { [_owner setObject:@((uint64_t)'K' << 8 | (uint64_t)k) forKey:t]; continue; }
         if (!_joy && p.x < r.size.width * K_JOY_ZONE_X && p.y > r.size.height * K_JOY_ZONE_Y) {
             _joy = t; _joyBase = p; _joyNow = p;
