@@ -26,6 +26,7 @@ static uint64_t g_touch_btn;
 static int32_t g_touch_lx, g_touch_ly, g_touch_rx, g_touch_ry;
 void dm_gamepad_start(void (*on_present)(int present));
 void dm_physical_gamepad_reset(void);
+int dm_ingame(void);   // hle_uistate：HUD 根槽非空 = 游戏态（进游戏门控信号，0.5s 轮询）
 // 游戏区触摸透传（hle_touch.c 合成 nn::hid::TouchScreenState，游戏 main 0x1b65260 原生读取）：
 // 坐标 = 出图画面归一化 [0,1)，原点左上；frame 由 front_ios 的 dm_ios_game_frame 提供（letterbox/适配几何都在里面）。
 // | Game-area touch passthrough: coordinates normalized to the output frame, origin top left.
@@ -70,6 +71,7 @@ static NSString *const k_layout_key = @"DmPadLayout";   // NSUserDefaults: 1 = 3
 @interface DmGamepad : UIView
 @end
 static __weak DmGamepad *g_view;
+static BOOL g_phys;   // 物理手柄在场（虚拟键显隐 = g_phys || 进游戏门控）
 
 @implementation DmGamepad {
     NSMapTable<UITouch *, NSNumber *> *_owner;     // touch → control (with the key for C_BTN or the stick for C_STICK, << 8)
@@ -89,6 +91,7 @@ static __weak DmGamepad *g_view;
     uint64_t _pulse;                               // 菜单点击单发脉冲位（130ms 自动抬）| one-shot key pulses for menu clicks
     BOOL _full;                                    // the 3D layout is current
     BOOL _d3;                                      // D3 专用布局：技能环 + 语义标签（键=真实键，只改几何/标签）
+    BOOL _ingameGate;                              // 进游戏门控现值（游戏 HUD 未现=不显示，2026-11-09 用户要求）
     CAShapeLayer *_skillCd[6];                     // D3 技能冷却扇形遮罩（slot 0=主攻 1-5=弧键；数据由 hle 层每帧推）
     float _cdFrac[6];                              // 最近一次推送的冷却比例（-1=无冷却），重画节流用
 }
@@ -163,6 +166,21 @@ static CGPathRef piePath(CGPoint c, CGFloat r, float frac) {   // 冷却遮罩�
         // 三态布局：0 = 2D、1 = 3D、2 = D3（旧布尔 0/1 迁移）；D3 为触控模式默认意图见 setD3
         int mode = saved ? saved.intValue : (DM_GAME_PAD_FULL ? 1 : 0);
         _d3 = mode == 2; _full = mode == 1;
+        // 进游戏门控：初始隐藏，游戏 HUD 根槽非空（dm_ingame，hle_uistate 1Hz 采样）才显示——
+        // 启动器/加载/过场不再出现虚拟键（2026-11-09 用户要求「游戏进去之后才开始加载虚拟按键」）
+        _ingameGate = NO; self.hidden = YES;
+        __weak typeof(self) wself = self;
+        [NSTimer scheduledTimerWithTimeInterval:0.5 repeats:YES block:^(NSTimer *t) {
+            __typeof__(self) s = wself;
+            if (!s) { [t invalidate]; return; }
+            int ing = dm_ingame();
+            if (ing != s->_ingameGate) {
+                s->_ingameGate = ing;
+                NSLog(@"[dm] 虚拟键显隐 → %d（游戏 HUD 根槽）", ing);
+            }
+            if (!ing) { if (!s.hidden) { [s reset]; s.hidden = YES; } }   // 离开游戏态：清按住的触摸再隐
+            else if (s.hidden && !g_phys) s.hidden = NO;                  // 游戏态且无物理手柄才显示
+        }];
         [self applyLayout];
     }
     return self;
@@ -588,7 +606,8 @@ void dm_gamepad_skill(int slot, float frac) {
 @end
 
 static void physical_present(int present) {
-    g_view.hidden = present;
+    g_phys = present;
+    g_view.hidden = present || !dm_ingame();
     if (present) { [g_view reset]; dm_input_clear(); }
     dm_hudmove_set_controller(present);   // HUD 移位随物理手柄插拔切换（用户确认的还原约束）| relocation toggles with the pad
 }
