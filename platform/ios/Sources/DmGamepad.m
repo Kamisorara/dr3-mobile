@@ -156,8 +156,7 @@ static CGPathRef piePath(CGPoint c, CGFloat r, float frac) {   // 冷却遮罩�
         CGPathRef p = circleAt(c, r); _key[b].path = p; _key[b].shadowPath = p; CGPathRelease(p);
         if (_lab[b]) {
             CGFloat fs = b == B_A ? 22 * u : (b == B_R || b == B_ZL || b == B_PLUS || b == B_MINUS) ? 14 * u : 16 * u;
-            _lab[b].font = [UIFont systemFontOfSize:fs weight:UIFontWeightMedium];
-            _lab[b].fontSize = fs;
+            _lab[b].fontSize = fs;   // 只设 fontSize：CATextLayer 默认系统字体（font 属性要 CTFontRef 桥接，CI 教训）
             _lab[b].frame = CGRectMake(c.x - fs * 1.6, c.y - fs * 0.75, fs * 3.2, fs * 1.5);
         }
         _key[b].contentsScale = self.window.screen.scale ?: self.contentScaleFactor;
