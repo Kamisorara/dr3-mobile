@@ -52,7 +52,9 @@ static const CGFloat
     K_SWAP_R = 15,                                  // layout button: top centre, level with − / +
     K_STICK_X = 81, K_STICK_R = 77, K_KNOB_R = 30,  // left stick: mirrors the diamond, the ring as large as the whole diamond (key distance + key radius), the knob a little larger than a diamond key
     K_STICK_GRAB = 1.4,                             // how near the ring centre a touch-down grabs a stick (times the ring radius)
-    K_FULL = 0.8,                                   // full tilt at this fraction of the ring radius (the knob still travels to the ring edge)
+    K_FULL = 0.55,                                  // full tilt at this fraction of the ring radius (the knob still travels to the ring edge).
+                                                    //   0.8→0.55（2026-11-09）：满拨指点距摇杆心 0.8R≈62u 太远，往下滑自然过冲贴到屏底边系统手势区
+                                                    //   → 触摸被取消人物停（「下滑不动」主嫌）；0.55R≈42u 满拨指点距屏底 ~73pt，过冲余量大。摇杆输出等价满速
     K_DEAD = 0.1,                                   // stick dead zone (times the ring radius)
     // controls only the 3D layout has
     K_LOW_X = 231, K_LOW_Y = 64,                    // D-pad / right stick centre from the outer edge and the bottom (inward of and below the left stick / the diamond, as on a Pro Controller)
@@ -60,7 +62,7 @@ static const CGFloat
     K_DPAD_GRAB = 1.3,                              // D-pad grab radius (times the outer edge)
     K_RSTICK_R = 60, K_RKNOB_R = 24,                // right stick: ring and knob radius
     K_CLICK_X = 102, K_CLICK_R = 17,                // L3 / R3: centre from the outer edge (level with ZL / ZR), radius
-    K_ARC_R = 100;                                  // D3 技能弧半径（主攻心到弧键心；角度组避让右上图标栏）
+    K_ARC_R = 92;                                   // D3 技能弧半径（主攻心到弧键心；角度组避让右上图标栏）。100→92：收紧贴主攻（不朽观感）
 static const CGFloat K_ARC_DEG[5] = {110, 138, 166, 194, 218};   // 技能 2-6 弧位（数学角；UIKit y 向下 → (cos, −sin)）。218° 尾键随 K_PAD_Y 上移收 4° 防下缘出屏
 static const int k_btns[] = {B_ZL, B_L, B_ZR, B_R, B_MINUS, B_PLUS, B_BAG, B_MENU, B_LS, B_RS};   // keys locked at touch-down (L3 / R3 only in the 3D layout)
 static NSString *const k_layout_key = @"DmPadLayout";   // NSUserDefaults: 1 = 3D, 0 = 2D
@@ -525,8 +527,8 @@ static UIImage *controlImage(CGSize size,CGFloat scale,void (^draw)(CGContextRef
         static NSString *const d3names[B_N] = {@"攻", @"5", @"2", @"3", @"L3", @"R3", @"6", @"4", @"药", @"城", @"+", @"−", @"包", @"单"};
         for (int b = 0; b < B_N; b++) if (d3names[b]) _label[b].string = d3names[b];
         _label[B_B].string = _menuMode ? @"✕" : @"5";   // B_B 双语义（applyLayout 同步切）
-        // 药水（B_ZL）：左摇杆右上；城（B_ZR）：右上图标栏最左（泪滴改圆；包/单的图标栏圆由 k_btns 循环按 pillRect D3 分支画出）
-        CGPoint pot = [self stickHome:0]; pot.x += 118 * u; pot.y -= 46 * u;
+        // 药水（B_ZL）：左摇杆右上（118,−46→104,−54：收拢贴摇杆，不再漂在场中央）；城（B_ZR）：右上图标栏最左（泪滴改圆；包/单的图标栏圆由 k_btns 循环按 pillRect D3 分支画出）
+        CGPoint pot = [self stickHome:0]; pot.x += 104 * u; pot.y -= 54 * u;
         setPath(_key[B_ZL], circlePath(pot, 26 * u)); placeLabel(_label[B_ZL], pot, 18 * u);
         CGPoint tp = [self d3BarPos:B_ZR];
         setPath(_key[B_ZR], circlePath(tp, K_BAR_R * u)); placeLabel(_label[B_ZR], tp, 18 * u);

@@ -2217,7 +2217,7 @@ index 3d309a1..ec44a2c 100644
 +    (void)infos; (void)capacity; return 0;
 +}
 diff --git a/dm/host/hle_hid.c b/dm/host/hle_hid.c
-index 561a3c8..cff61cd 100644
+index 561a3c8..b20b2f5 100644
 --- a/dm/host/hle_hid.c
 +++ b/dm/host/hle_hid.c
 @@ -1,8 +1,12 @@
@@ -2282,15 +2282,25 @@ index 561a3c8..cff61cd 100644
      memset(s, 0, sizeof *s);
      s->sampling = atomic_fetch_add(&g_sampling, 1) + 1;
      if (!(style_of(id) & style)) return;   // no controller of this id / style: attributes = 0
-@@ -95,6 +132,7 @@ static void fill(NpadState *s, uint32_t id, uint32_t style) {
+@@ -94,7 +131,17 @@ static void fill(NpadState *s, uint32_t id, uint32_t style) {
+     if (s->rx > STICK_THRESH) b |= 1u << 22;
      if (s->ry < -STICK_THRESH) b |= 1u << 23;
      s->buttons = b;
++    // [uipad] 摇杆轴值诊断（2026-11-09「下滑人物不动」排查）：只在有轴位移时节流打点，无轴静止零行。
++    //   判读：复现下滑后 [uipad] 无行 = 触摸没抓成摇杆（壳侧问题）；有行且 ly<0 = 负 ly 已送达 HID
++    //   （dm_input_set→fill 链有单测证明直通，则嫌疑移到游戏侧消费，如下滑方向被别的系统吃掉）。
++    static int64_t uipad_next;
++    int64_t un = (int64_t)(now_ns() / 1000000);
++    if ((s->lx || s->ly || s->rx || s->ry) && un >= uipad_next) {
++        uipad_next = un + 250;
++        LOG("[uipad] lx=%d ly=%d rx=%d ry=%d btn=%#llx", s->lx, s->ly, s->rx, s->ry, (unsigned long long)b);
++    }
      s->attributes = ATTR_CONNECTED | (id == NPAD_HANDHELD ? ATTR_WIRED | ATTR_LEFT_CONN | ATTR_LEFT_WIRED | ATTR_RIGHT_CONN | ATTR_RIGHT_WIRED : ATTR_LEFT_CONN | ATTR_RIGHT_CONN);
 +    receipt(s, id, style, start);
  }
  // GetNpadStates(out, n, id): returns the number written, newest first. The host keeps no history: only 1 current state (callers handle the returned count)
  static int states(NpadState *out, int n, uint32_t id, uint32_t style) { if (n <= 0) return 0; fill(out, id, style); return 1; }
-@@ -121,21 +159,39 @@ HLE_FORCE("_ZN2nn3hid20StopLrAssignmentModeEv", "L/R 分配模式；宿主忽略
+@@ -121,21 +168,39 @@ HLE_FORCE("_ZN2nn3hid20StopLrAssignmentModeEv", "L/R 分配模式；宿主忽略
  // Controller applet (system UI): report "1 player, current controller selected" directly. ControllerSupportResultInfo = { int playerCount; uint32_t selectedId; }
  HLE_FORCE("_ZN2nn3hid21ShowControllerSupportEPNS0_27ControllerSupportResultInfoERKNS0_20ControllerSupportArgE", "手柄小程序；宿主直接报已选好",
            Result, h_hid_ShowCtrl, int32_t *info, const void *arg) { (void)arg; if (info) { info[0] = 1; info[1] = (int32_t)connected_id(); } return RES_OK; }
@@ -2339,7 +2349,7 @@ index 561a3c8..cff61cd 100644
  // Mouse / keyboard: not connected
  HLE_FORCE("_ZN2nn3hid15InitializeMouseEv", "鼠标；宿主不提供", void, h_hid_InitMouse, void) {}
  HLE_FORCE("_ZN2nn3hid14GetMouseStatesEPNS0_10MouseStateEi", "鼠标状态：0 条", int, h_hid_MouseStates, void *out, int n) { (void)out; (void)n; return 0; }
-@@ -209,6 +265,11 @@ HLE_FORCE("_ZN2nn3hid32GetSixAxisSensorFusionParametersEPfS1_RKNS0_19SixAxisSens
+@@ -209,6 +274,11 @@ HLE_FORCE("_ZN2nn3hid32GetSixAxisSensorFusionParametersEPfS1_RKNS0_19SixAxisSens
  HLE_FORCE("_ZN2nn3hid32SetSixAxisSensorFusionParametersERKNS0_19SixAxisSensorHandleEff", "六轴融合参数；宿主忽略", void, h_hid_FusionSet, const uint32_t *h, float a, float b) { (void)h; (void)a; (void)b; }
  HLE_FORCE("_ZN2nn3hid34ResetSixAxisSensorFusionParametersERKNS0_19SixAxisSensorHandleE", "六轴融合参数；宿主忽略", void, h_hid_FusionReset, const uint32_t *h) { (void)h; }
  HLE_FORCE("_ZN2nn3hid41IsFirmwareUpdateAvailableForSixAxisSensorERKNS0_19SixAxisSensorHandleE", "六轴固件更新：无", unsigned, h_hid_SixFw, const uint32_t *h) { (void)h; return 0; }
@@ -3398,10 +3408,10 @@ index 96d2674..579e8ae 100644
      if (!wh) { hle_bind_system_event(ev, 0); pthread_mutex_lock(&g_se_lock); wh = se_find(ev); pthread_mutex_unlock(&g_se_lock); }
 diff --git a/dm/host/hle_uistate.c b/dm/host/hle_uistate.c
 new file mode 100644
-index 0000000..a36e1d4
+index 0000000..1710492
 --- /dev/null
 +++ b/dm/host/hle_uistate.c
-@@ -0,0 +1,225 @@
+@@ -0,0 +1,226 @@
 +// UI 状态采样诊断包（docs/H2O静态解析突破-2026-11-05.md §16.5 步骤 1）：
 +//   ① UI 状态机真值表（§16.2 链：[0x114a8d0]→*→+0x1f8→*→+0 = 状态号）→ 虚拟按键显隐依据
 +//   ② HUD 7 槽实时数据 hexdump（§13：技能槽缓存 @0x197ac90+player*0x4d8+0x128，0x30/槽）
@@ -3481,6 +3491,7 @@ index 0000000..a36e1d4
 +            }
 +            if (impl && dm_guest_readable((uint64_t)impl, 0x6a0)) {
 +                int rem = 0; int via = 0;
++                uint32_t skid = *(uint32_t *)((uint8_t *)impl + 0x4fc);   // kb/12：impl+0x4fc = 技能 id（图标映射键）
 +                uint64_t embed = *(uint64_t *)((uint8_t *)impl + 0x4c8);
 +                if (embed && dm_guest_readable(embed, 0x1d4)) {   // 取法 B：embed 是子对象指针
 +                    rem = *(int *)((uint8_t *)embed + 0x1d0) - *(int *)((uint8_t *)embed + 0x1cc); via = 2;
@@ -3492,8 +3503,8 @@ index 0000000..a36e1d4
 +                    if ((float)rem > maxdur[i]) maxdur[i] = (float)rem;
 +                    frac = maxdur[i] > 0 ? (float)rem / maxdur[i] : 1.0f;
 +                }
-+                if (diag) LOG("[uiskill] slot%d uiid=%016llx impl=%p via=%d rem=%d max=%.0f frac=%.2f",
-+                              i, (unsigned long long)uiid, impl, via, rem, maxdur[i], frac);
++                if (diag) LOG("[uiskill] slot%d skid=%u uiid=%016llx impl=%p via=%d rem=%d max=%.0f frac=%.2f",
++                              i, skid, (unsigned long long)uiid, impl, via, rem, maxdur[i], frac);
 +            } else if (diag) {
 +                LOG("[uiskill] slot%d uiid=%016llx impl=%p%s", i, (unsigned long long)uiid, impl,
 +                    impl ? "（impl 不可读 0x6a0）" : "（UIID 未命中）");
