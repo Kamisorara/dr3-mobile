@@ -45,7 +45,7 @@ static const CGFloat
     K_L_X = 44, K_L_Y = 108, K_L_R = 24,            // L / R: same column as ZL / ZR
     K_DROP_TIP = 1.45,                              // teardrop tip distance from the centre (times the radius)
     K_CORNER_IN = 0.5,                              // how far the bottom-corner controls reach into the side safe-area inset (in landscape there is only the rounded screen corner there; the Dynamic Island is mid-edge)
-    K_FACE_X = 81, K_PAD_Y = 82,                    // diamond centre from the outer edge; diamond and stick centre from the bottom (B's lower edge about 5 above it)
+    K_FACE_X = 81, K_PAD_Y = 94,                    // diamond/stick centre from the bottom. 82→94（2026-11-09）：摇杆满拨下缘 82-77=5pt 贴屏边，向下推手指易滑出屏 → 触摸结束人物停（「往下划不动」根因）；94 给 17pt 缓冲
     K_FACE_GAP = 50, K_FACE_R = 27,                 // diamond: key distance from the centre, key radius
     K_PILL_DX = 52, K_PILL_Y = 22, K_PILL_W = 50, K_PILL_H = 28,   // − / +: centre from the screen's midline (the middle goes to the layout button) and from the top, size
     K_BAR_X = 60, K_BAR_Y = 195, K_BAR_DX = 46, K_BAR_R = 22,      // D3 图标栏：✕/单/包/城 自右向左等距（城市键离最远，贴 mockup）
@@ -61,7 +61,7 @@ static const CGFloat
     K_RSTICK_R = 60, K_RKNOB_R = 24,                // right stick: ring and knob radius
     K_CLICK_X = 102, K_CLICK_R = 17,                // L3 / R3: centre from the outer edge (level with ZL / ZR), radius
     K_ARC_R = 100;                                  // D3 技能弧半径（主攻心到弧键心；角度组避让右上图标栏）
-static const CGFloat K_ARC_DEG[5] = {112, 140, 168, 196, 222};   // 技能 2-6 弧位（数学角；UIKit y 向下 → (cos, −sin)）
+static const CGFloat K_ARC_DEG[5] = {110, 138, 166, 194, 218};   // 技能 2-6 弧位（数学角；UIKit y 向下 → (cos, −sin)）。218° 尾键随 K_PAD_Y 上移收 4° 防下缘出屏
 static const int k_btns[] = {B_ZL, B_L, B_ZR, B_R, B_MINUS, B_PLUS, B_BAG, B_MENU, B_LS, B_RS};   // keys locked at touch-down (L3 / R3 only in the 3D layout)
 static NSString *const k_layout_key = @"DmPadLayout";   // NSUserDefaults: 1 = 3D, 0 = 2D
 
