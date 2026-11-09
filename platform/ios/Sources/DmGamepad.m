@@ -77,9 +77,41 @@ static CGPathRef piePath(CGPoint c, CGFloat r, float frac) {   // 冷却遮罩�
     UITouch *_joy; CGPoint _joyBase, _joyNow;    // 摇杆触摸与底环圆心/当前指位
     CAShapeLayer *_key[B_N], *_pie[6];
     CATextLayer *_lab[B_N];
+    CALayer *_icon[B_N];                         // 技能图标（图集推送后贴上；圆形裁切）
     CAShapeLayer *_joyRing, *_joyKnob;
     float _cdFrac[6];
     uint64_t _held;                              // 当前按住的键位图（亮态）
+}
+- (void)applySkillAtlas:(const unsigned char *)rgba w:(int)w h:(int)h {
+    CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+    CGContextRef ctx = CGBitmapContextCreate((void *)rgba, w, h, 8, w * 4, cs, kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big);
+    CGColorSpaceRelease(cs);
+    if (!ctx) return;
+    CGImageRef img = CGBitmapContextCreateImage(ctx);
+    CFRelease(ctx);
+    if (!img) return;
+    [CATransaction begin]; [CATransaction setDisableActions:YES];
+    for (int i = 0; i < 6; i++) {   // row0 前 6 格 = 技能 1-6（128px/格，texdump 离线实证的网格）
+        int b = K_CD_KEY[i];
+        if (!_key[b]) continue;
+        CGImageRef tile = CGImageCreateWithImageInRect(img, CGRectMake(i * 128, 0, 128, 128));
+        if (!tile) continue;
+        if (!_icon[b]) {
+            _icon[b] = [CALayer layer];
+            _icon[b].contentsGravity = kCAGravityResizeAspect;
+            _icon[b].masksToBounds = YES;
+            [_key[b] insertSublayer:_icon[b] above:_pie[i]];   // 图标盖冷却扇形
+        }
+        CGPoint c = [self keyCenter:b]; CGFloat r = [self keyR:b];
+        _icon[b].frame = CGRectMake(c.x - r * 0.86, c.y - r * 0.86, r * 1.72, r * 1.72);
+        _icon[b].cornerRadius = r * 0.86;   // 圆形裁切（暗黑不朽观感）
+        _icon[b].contents = (__bridge id)tile;
+        _icon[b].contentsScale = self.window.screen.scale ?: 2;
+        CGImageRelease(tile);
+        if (_lab[b]) _lab[b].hidden = YES;   // 有图标就不显示槽序数字
+    }
+    [CATransaction commit];
+    CGImageRelease(img);
 }
 - (CGFloat)u { return MIN(self.bounds.size.height / 430.0, 1.3); }
 - (CGPoint)keyCenter:(int)b {
@@ -274,6 +306,20 @@ void dm_gamepad_skill(int slot, float frac) {
     v->_cdFrac[slot] = frac;
     if ([NSThread isMainThread]) [v drawPie:slot];
     else dispatch_async(dispatch_get_main_queue(), ^{ [v drawPie:slot]; });
+}
+
+// nvn_mtl 推技能图标图集（游戏运行时去排布解码的 1024×512 RGBA，非主线程）。
+// 异步主线程贴键；buffer 调用方随即 free → 这里复制后移交 block 释放。
+void dm_gamepad_skill_atlas(const unsigned char *rgba, int w, int h) {
+    D3TouchUI *v = g_view;
+    if (!v || w != 1024 || h != 512 || !rgba) return;
+    unsigned char *copy = malloc((size_t)w * 4 * h);
+    if (!copy) return;
+    memcpy(copy, rgba, (size_t)w * 4 * h);
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [v applySkillAtlas:copy w:w h:h];
+        free(copy);
+    });
 }
 @end
 
