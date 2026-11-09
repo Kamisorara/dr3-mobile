@@ -1906,10 +1906,10 @@ index 0000000..b39a06b
 +}
 +void dm_controller_effects_stop(void) {initialized();atomic_fetch_add(&generation,1);synchronous(^{stop_all();});}
 diff --git a/dm/host/dm.h b/dm/host/dm.h
-index fda33ac..bdc10fe 100644
+index fda33ac..2f822c5 100644
 --- a/dm/host/dm.h
 +++ b/dm/host/dm.h
-@@ -46,7 +46,17 @@ extern module_t g_mod[MAX_MOD];
+@@ -46,7 +46,18 @@ extern module_t g_mod[MAX_MOD];
  extern int g_nmod;
  // main's build ID (empty if none). DM_D2R_BUILD = the D2R build that the code inherited from d2r-mobile belongs to: code with fixed D2R addresses or that edits D2R saves runs only on it
  #define DM_D2R_BUILD "db0507f36b84200ac05f75d76ed5026f"
@@ -1919,6 +1919,7 @@ index fda33ac..bdc10fe 100644
 +// controller-presence sync (front end's GameController connect/disconnect). on by default (DM_HUDMOVE=0 turns it off).
 +void dm_hudmove_frame(void);
 +void dm_uistate_frame(void);   // hle_uistate.c: UI 状态采样诊断（§16.5；DM_UISTATE=0 关）
++void dm_season_frame(void);    // hle_season.c: 赛季轮换拍（kb/17 A/B/E 层；1Hz 重载 $DM_SAVE/dm-season.tsv；DM_SEASON_FRAME=0 关，D3 构建 only）
 +void dm_hudmove_set_controller(int present);
 +void dm_hudmove_snapshot_status(int *state, float *frac);   // hle_hudmove.c: 快照进度（0 待/1 中/2 完成），前端浮窗轮询
 +void svc_guest_range(uint8_t **base, size_t *size);   // hle_svc.c: whole guest address-space block
@@ -2255,6 +2256,18 @@ index 1a63bd7..9fcffec 100644
  void stubs_report(void) { LOG("stubs=%u", g_nstub); }
  
  // ---------- Host gate dispatch ----------
+diff --git a/dm/host/hle.h b/dm/host/hle.h
+index 79fda3d..8a7ffc3 100644
+--- a/dm/host/hle.h
++++ b/dm/host/hle.h
+@@ -77,4 +77,6 @@ uint64_t dm_audio_render_calls(void);   // Cumulative sound card callback count
+ //   0x8c   Current act saved while in a rift (when the character is in a rift map w9 is replaced with 4 = Act V, writes x9; x8 always 0) dm_rift.c      0x6fa9d0 (branch gate: x8≠0 jumps to 0x6fa9d4, otherwise executes the original instruction and returns to 0x6fa9d4)
+ //   0x8d   Extra mercenary equipment slots (mercenary + rift level ≥10 + belt / boots / gloves / ring / amulet: w0 is replaced with 1, writes x0; x8 always 0) dm_rift.c      0x64a34c (branch gate: x8≠0 jumps to 0x64a350, otherwise executes the original instruction and returns to 0x64a350)
+ //   0x8e   Client-side check for the extra mercenary equipment slots (rift level ≥10 + the item is a belt / boots / gloves / ring / amulet: w1 is replaced with the item's own type number, writes x1; x8 always 0) dm_rift.c      0x3beb58 (branch gate: x8≠0 jumps to 0x3beb5c, otherwise executes the original instruction and returns to 0x3beb5c)
+-enum { SVC_HOST_TACT_ZLIB = 0x80, SVC_HOST_C2S_DELIVER = 0x81, SVC_HOST_C2S_SYS = 0x82, SVC_HOST_GRANNY_A = 0x83, SVC_HOST_GRANNY_B = 0x84, SVC_HOST_PRIVATE_SKILL_RENDER = 0x85, SVC_HOST_PRIVATE_SKILL_AIM = 0x86, SVC_HOST_GROUND_ASSET = 0x87, SVC_HOST_DROP_SOUND = 0x88, SVC_HOST_RIFT_EXIT = 0x89, SVC_HOST_JOIN_SPAWN = 0x8a, SVC_HOST_JOIN_CORPSE = 0x8b, SVC_HOST_SAVE_ACT = 0x8c, SVC_HOST_MERC_SLOT = 0x8d, SVC_HOST_MERC_SLOT_CL = 0x8e };   // 0x87: fetch the model path for ground items (dm_dropfilter.c drop light)   // 0x83/0x84: Granny per-block decode call sites (hle_granny.c)
++//   0x8f   赛季开关查询：GameIsSeasonal 入口，kb/17 层 A，宿主开=恒 1（全链 55 消费者按赛季走）关=原查询，处理器 hle_season.c，剪口 main 0x4c8df0（分支门：x8≠0 跳 0x1ab0000 补丁区首 season_pass 即 mov w0,#1;ret，否则执行原指令回 0x4c8df4）
++//   0x90   赛季英雄校验放行：角色↔档案赛季校验入口，kb/17 层 B，宿主开=放行（dis_4b1b0 0x14b298 返回 1=通过）并盖 hero+0x12C bit1，关=原校验，处理器 hle_season.c，剪口 main 0x4b1b0（分支门：x8≠0 跳 0x1ab0000 补丁区首 season_pass 即 mov w0,#1;ret，否则执行原指令回 0x4b1b4）
++enum { SVC_HOST_TACT_ZLIB = 0x80, SVC_HOST_C2S_DELIVER = 0x81, SVC_HOST_C2S_SYS = 0x82, SVC_HOST_GRANNY_A = 0x83, SVC_HOST_GRANNY_B = 0x84, SVC_HOST_PRIVATE_SKILL_RENDER = 0x85, SVC_HOST_PRIVATE_SKILL_AIM = 0x86, SVC_HOST_GROUND_ASSET = 0x87, SVC_HOST_DROP_SOUND = 0x88, SVC_HOST_RIFT_EXIT = 0x89, SVC_HOST_JOIN_SPAWN = 0x8a, SVC_HOST_JOIN_CORPSE = 0x8b, SVC_HOST_SAVE_ACT = 0x8c, SVC_HOST_MERC_SLOT = 0x8d, SVC_HOST_MERC_SLOT_CL = 0x8e, SVC_HOST_SEASON_QUERY = 0x8f, SVC_HOST_SEASON_HERO = 0x90 };   // 0x87: fetch the model path for ground items (dm_dropfilter.c drop light)   // 0x83/0x84: Granny per-block decode call sites (hle_granny.c)   // 0x8f/0x90: season toggle (hle_season.c, this game only)
 diff --git a/dm/host/hle_account.c b/dm/host/hle_account.c
 index 362a6c2..61dbe98 100644
 --- a/dm/host/hle_account.c
@@ -2288,7 +2301,7 @@ index 3d309a1..ec44a2c 100644
 +    (void)infos; (void)capacity; return 0;
 +}
 diff --git a/dm/host/hle_hid.c b/dm/host/hle_hid.c
-index 561a3c8..b20b2f5 100644
+index 561a3c8..4b99aa7 100644
 --- a/dm/host/hle_hid.c
 +++ b/dm/host/hle_hid.c
 @@ -1,8 +1,12 @@
@@ -2319,7 +2332,7 @@ index 561a3c8..b20b2f5 100644
  uint64_t dm_input_samples(void) { return (uint64_t)atomic_load(&g_sampling); }
  // DM_KEYS scripted input (for tests): "seconds:key[+key][~hold seconds][*count/interval seconds],...", e.g. "8:A,12:A,15:Down~0.5,16:A+B,40:A*80/2" (A every 2 s from 40 s on, 80 times). Key names A B X Y LS RS L R ZL ZR Plus Minus Left Up Right Down, left stick LLeft LUp LRight LDown;
  //   held 0.15 s by default, at most 1024 steps (counted after repeats are expanded). Goes through the controller path (dm_pad_set), ORed with keyboard / touch, neither overrides the other. Times are counted from host start.
-@@ -77,7 +88,33 @@ static uint32_t style_of(uint32_t id) { return id != connected_id() ? 0 : id ==
+@@ -77,7 +88,34 @@ static uint32_t style_of(uint32_t id) { return id != connected_id() ? 0 : id ==
  static int32_t ax(uint64_t v, int i) { return (int16_t)(v >> (16 * i)); }
  static int32_t pick(int32_t a, int32_t b) { return (a < 0 ? -a : a) >= (b < 0 ? -b : b) ? a : b; }   // whichever of the two paths is deflected more
  
@@ -2350,10 +2363,11 @@ index 561a3c8..b20b2f5 100644
 +    uint64_t start = now_ns();
 +    dm_hudmove_frame();   // HUD 移位节拍：与读手柄同帧（游戏线程；内部 5 秒节流）| same-frame tick as the controller read
 +    dm_uistate_frame();   // UI 状态采样诊断（内部 1 秒节流）| UI-state sampling probe (1 s throttle)
++    dm_season_frame();    // 赛季轮换拍（hle_season.c：1Hz 重载 dm-season.tsv + 轮换/主题探针；D3 构建 only）| season rotation tick (1 s)
      memset(s, 0, sizeof *s);
      s->sampling = atomic_fetch_add(&g_sampling, 1) + 1;
      if (!(style_of(id) & style)) return;   // no controller of this id / style: attributes = 0
-@@ -94,7 +131,17 @@ static void fill(NpadState *s, uint32_t id, uint32_t style) {
+@@ -94,7 +132,17 @@ static void fill(NpadState *s, uint32_t id, uint32_t style) {
      if (s->rx > STICK_THRESH) b |= 1u << 22;
      if (s->ry < -STICK_THRESH) b |= 1u << 23;
      s->buttons = b;
@@ -2371,7 +2385,7 @@ index 561a3c8..b20b2f5 100644
  }
  // GetNpadStates(out, n, id): returns the number written, newest first. The host keeps no history: only 1 current state (callers handle the returned count)
  static int states(NpadState *out, int n, uint32_t id, uint32_t style) { if (n <= 0) return 0; fill(out, id, style); return 1; }
-@@ -121,21 +168,39 @@ HLE_FORCE("_ZN2nn3hid20StopLrAssignmentModeEv", "L/R 分配模式；宿主忽略
+@@ -121,21 +169,39 @@ HLE_FORCE("_ZN2nn3hid20StopLrAssignmentModeEv", "L/R 分配模式；宿主忽略
  // Controller applet (system UI): report "1 player, current controller selected" directly. ControllerSupportResultInfo = { int playerCount; uint32_t selectedId; }
  HLE_FORCE("_ZN2nn3hid21ShowControllerSupportEPNS0_27ControllerSupportResultInfoERKNS0_20ControllerSupportArgE", "手柄小程序；宿主直接报已选好",
            Result, h_hid_ShowCtrl, int32_t *info, const void *arg) { (void)arg; if (info) { info[0] = 1; info[1] = (int32_t)connected_id(); } return RES_OK; }
@@ -2420,7 +2434,7 @@ index 561a3c8..b20b2f5 100644
  // Mouse / keyboard: not connected
  HLE_FORCE("_ZN2nn3hid15InitializeMouseEv", "鼠标；宿主不提供", void, h_hid_InitMouse, void) {}
  HLE_FORCE("_ZN2nn3hid14GetMouseStatesEPNS0_10MouseStateEi", "鼠标状态：0 条", int, h_hid_MouseStates, void *out, int n) { (void)out; (void)n; return 0; }
-@@ -209,6 +274,11 @@ HLE_FORCE("_ZN2nn3hid32GetSixAxisSensorFusionParametersEPfS1_RKNS0_19SixAxisSens
+@@ -209,6 +275,11 @@ HLE_FORCE("_ZN2nn3hid32GetSixAxisSensorFusionParametersEPfS1_RKNS0_19SixAxisSens
  HLE_FORCE("_ZN2nn3hid32SetSixAxisSensorFusionParametersERKNS0_19SixAxisSensorHandleEff", "六轴融合参数；宿主忽略", void, h_hid_FusionSet, const uint32_t *h, float a, float b) { (void)h; (void)a; (void)b; }
  HLE_FORCE("_ZN2nn3hid34ResetSixAxisSensorFusionParametersERKNS0_19SixAxisSensorHandleE", "六轴融合参数；宿主忽略", void, h_hid_FusionReset, const uint32_t *h) { (void)h; }
  HLE_FORCE("_ZN2nn3hid41IsFirmwareUpdateAvailableForSixAxisSensorERKNS0_19SixAxisSensorHandleE", "六轴固件更新：无", unsigned, h_hid_SixFw, const uint32_t *h) { (void)h; return 0; }
@@ -3410,6 +3424,190 @@ index 367779a..9eccbc0 100644
  HLE_FORCE("nnsocketGAIStrError", "解析错误文字", const char *, h_c_sk_GaiStr, int e) { (void)e; return "network unavailable"; }
 +
 +#endif
+diff --git a/dm/host/hle_season.c b/dm/host/hle_season.c
+new file mode 100644
+index 0000000..0ccdf3e
+--- /dev/null
++++ b/dm/host/hle_season.c
+@@ -0,0 +1,178 @@
++// 赛季轮换（kb/17 五层的 A/B/E 层 + D 层探针；2026-11-10 安卓参考项目 r177 拆解后自研落地，见 kb/17 附录）：
++//   配置 = $DM_SAVE/dm-season.tsv（壳设置页 SeasonPanel 写；宿主 1Hz stat 重载，改动即生效、不用重启）：
++//     enabled\t0|1        赛季总开关（两道门跟着走；缺省 0 = 游戏原行为）
++//     mode\tfixed|rotate  固定赛季 / 自动轮换（E 层日历）
++//     season\t<N>         fixed=固定赛季号；rotate=起始赛季号（S14–S27 循环，参考项目 Perk.CommunityEvent* 共 14 季）
++//     days\t<N>           轮换周期天（缺省 30）
++//     origin\tYYYY-MM-DD  轮换起始日（当日为第 0 天）
++//   A 层：GameIsSeasonal(my 0x4c8df0) 入口门 svc 0x8f（patch_nso.py D3 块发射；TLS 会话位链见 kb/17 §1.1）：
++//         开 → 恒 1，全链 55 个消费者（角色筛选/掉落/任务门/UI 徽章）按赛季走；关 → 原查询。
++//   B 层：角色↔档案赛季校验(my 0x4b1b0) 入口门 svc 0x90：开 → 放行（_scratch/dis_4b1b0.txt 0x14b298 返回 1=通过），
++//         并顺手把该校验英雄的 hero+0x12C 置 bit1（幂等；记录按 my 0x520360 查——只盖"被查英雄"，
++//         角色列表批量盖缺列表锚点，kb/99）；关 → 原校验。
++//   D 层（探针）：生效赛季变化时 my 0x748450(0x1d, "P74_ItemPassive_SeasonTheme_%03u") 解析主题 SNO 号（只读，
++//         PowerSNOFromName 内部真查找同名参数）。PowerCreateBuff(my 0x902880) 是脚本帧 ABI（0xb19xxx accessor 族，
++//         宿主直调不可行）——主题 buff 施放下一轮接，kb/99。
++//   边界：不写角色 Digest season_created（kb/17 §3.4 未解）、不碰官方 .D3.Client.Preferences（kb/18 §3.3）。
++// | Season rotation (kb/17 layers A/B/E + D probe). Config $DM_SAVE/dm-season.tsv written by the shell's
++// | settings panel, reloaded by the host at 1 Hz. Layer A gates GameIsSeasonal (svc 0x8f): on = always
++// | seasonal for all 55 consumers. Layer B gates the hero↔profile season check (svc 0x90): on = pass and
++// | set the checked hero's +0x12C bit1. Layer D probes the theme power SNO id by name (read-only).
++#include "dm.h"
++#include "hle.h"
++#include <stdatomic.h>
++#include <pthread.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/stat.h>
++#include <time.h>
++
++#define SEASON_LO 14
++#define SEASON_HI 27                          // S14–S27 共 14 季循环
++#define SEASON_SPAN (SEASON_HI - SEASON_LO + 1)
++#define THEME_NAME_OFF 0x748450UL             // 名字→id 解析器（kb/18 §3；0x9b8340 = 0x748450(0x1d, name) 尾调包装）
++#define HERO_LOOKUP_OFF 0x520360UL            // 英雄号→记录（kb/17 §1.3：0x4b1b0 内 bl 0x520360 取 x20=记录）
++#define HERO_FLAG_OFF 0x12cUL                 // 记录 +0x12C：bit1=赛季、bit0=专家（kb/17 §1.3，读侧确认）
++
++static _Atomic int g_enabled;                 // A/B 两道门读的开关快照（1Hz 重载线程写，门线程读）
++static _Atomic int g_season;                  // 当前生效赛季号（写于重载/轮换拍）
++static struct { int mode_rotate, base, days, origin_days; } cfg;
++static long cfg_mtime = -1;
++static int cfg_loaded, cfg_missing_logged;
++
++// ---- 配置 ----
++static void config_load(void) {
++    const char *sv = getenv("DM_SAVE");
++    char path[1024];
++    if (!sv || (size_t)snprintf(path, sizeof path, "%s/dm-season.tsv", sv) >= sizeof path) return;
++    FILE *f = fopen(path, "r");
++    if (!f) {
++        if (!cfg_missing_logged) { cfg_missing_logged = 1; LOG("赛季轮换：还没有 %s（壳设置页写入后生效），当前关", path); }
++        atomic_store(&g_enabled, 0);
++        return;
++    }
++    int enabled = 0, rotate = 0, season = SEASON_HI, days = 30;
++    long origin = -1;
++    char line[256];
++    while (fgets(line, sizeof line, f)) {
++        char key[32], val[64];
++        if (sscanf(line, "%31s\t%63s", key, val) != 2 || key[0] == '#') continue;
++        if (!strcmp(key, "enabled")) enabled = !strcmp(val, "1") || !strcmp(val, "on");
++        else if (!strcmp(key, "mode")) rotate = !strcmp(val, "rotate");
++        else if (!strcmp(key, "mode\trotate")) rotate = 1;   // 容错：整行被当成 key 时不至于静默丢
++        else if (!strcmp(key, "season")) season = atoi(val);
++        else if (!strcmp(key, "days")) days = atoi(val);
++        else if (!strcmp(key, "origin")) {
++            int y, m, d;
++            if (sscanf(val, "%d-%d-%d", &y, &m, &d) == 3) {
++                y -= m <= 2;
++                long era = (y >= 0 ? y : y - 399) / 400;
++                unsigned yoe = (unsigned)(y - era * 400);
++                unsigned doy = (153u * (unsigned)(m + (m > 2 ? -3 : 9)) + 2) / 5 + (unsigned)d - 1;
++                unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
++                origin = era * 146097L + (long)doe - 719468L;   // Howard Hinnant days_from_civil
++            }
++        }
++    }
++    fclose(f);
++    if (days < 1) days = 1;
++    if (season < SEASON_LO || season > SEASON_HI) season = SEASON_HI;
++    cfg.mode_rotate = rotate;
++    cfg.base = season;
++    cfg.days = days;
++    cfg.origin_days = (int)(origin >= 0 ? origin : time(NULL) / 86400);
++    atomic_store(&g_season, season);          // 轮换出的生效号由 frame 拍计算写入
++    atomic_store(&g_enabled, enabled);
++    cfg_loaded = 1;
++    struct stat st;
++    cfg_mtime = stat(path, &st) ? -1 : (long)st.st_mtime;
++    LOG("赛季轮换：enabled=%d mode=%s season=%d days=%d（%s）", enabled, rotate ? "rotate" : "fixed", season, days, path);
++}
++
++static void config_reload_if_changed(void) {
++    const char *sv = getenv("DM_SAVE");
++    char path[1024];
++    if (!sv || (size_t)snprintf(path, sizeof path, "%s/dm-season.tsv", sv) >= sizeof path) return;
++    struct stat st;
++    long m = stat(path, &st) ? -1 : (long)st.st_mtime;
++    if (m != cfg_mtime) config_load();
++}
++
++// ---- 轮换日历（E 层）：fixed=固定号；rotate=从 origin 起每 days 天进一季，S14–S27 循环 ----
++static int season_effective(void) {
++    int s = atomic_load(&g_season);
++    if (!cfg.mode_rotate) return s;
++    long idx = (long)(time(NULL) / 86400) - cfg.origin_days;
++    if (idx < 0) idx = 0;
++    return SEASON_LO + (cfg.base - SEASON_LO + (int)(idx / cfg.days)) % SEASON_SPAN;
++}
++
++// ---- A/B 层门处理器（hle_svc.c svc_dispatch → host_stubs.c 委托；调用号登记 hle.h 0x8f/0x90）----
++// 约定与 D2R 分支门一致：处理完置 regs 后 return 1；x8 = 门块分支信号（1=走捷径，0=原指令）。
++int dm_season_svc(int num, uint64_t *regs) {
++    if (num != SVC_HOST_SEASON_QUERY && num != SVC_HOST_SEASON_HERO) return 0;
++    static pthread_once_t once = PTHREAD_ONCE_INIT;
++    pthread_once(&once, config_load);         // 门可能先于第一次 fill() 触发：首次同步装配置
++    if (!atomic_load(&g_enabled)) { regs[8] = 0; return 1; }
++    regs[0] = 1;                              // GameIsSeasonal → 1 / 0x4b1b0 → 1（0x14b298 通过路径）
++    regs[8] = 1;
++    if (num == SVC_HOST_SEASON_HERO) {        // B 层顺手盖被查英雄的赛季位（幂等；其余系统读 +0x12C 时已一致）
++        static uint8_t *base;
++        if (!base) {
++            for (int i = 0; i < g_nmod; i++)
++                if (!strcmp(g_mod[i].name, "main") && !strcmp(g_mod[i].build_id, DM_D3_BUILD)) base = g_mod[i].base;
++        }
++        if (base) {
++            uint64_t hero = ((uint64_t(*)(uint32_t))(base + HERO_LOOKUP_OFF))((uint32_t)regs[0]);
++            if (hero && dm_guest_readable(hero + HERO_FLAG_OFF, 4)) {
++                uint32_t *f = (uint32_t *)(hero + HERO_FLAG_OFF);
++                if (!(*f & 2)) {
++                    uint32_t old = *f;
++                    *f = old | 2;
++                    LOG("赛季轮换：hero #%u +0x12C 置赛季位（原值 %#x）", (unsigned)regs[0], old);
++                }
++            }
++        }
++    }
++    return 1;
++}
++
++// ---- D 层主题 SNO 探针（只读；赛季变化时打一条）----
++static void season_theme_probe(int season) {
++    static uint8_t *base;
++    if (!base) {
++        for (int i = 0; i < g_nmod; i++)
++            if (!strcmp(g_mod[i].name, "main") && !strcmp(g_mod[i].build_id, DM_D3_BUILD)) base = g_mod[i].base;
++        if (!base) return;
++    }
++    char name[64];
++    snprintf(name, sizeof name, "P74_ItemPassive_SeasonTheme_%03u", season);
++    int sno = ((int(*)(uint32_t, const char *))(base + THEME_NAME_OFF))(0x1d, name);
++    LOG("赛季主题探针：S%d → %s → SNO %d（施放待 PowerCreateBuff 帧接入，kb/99）", season, name, sno);
++}
++
++// Called from the game thread every controller read (hle_hid.c fill()，内部 1 秒节流)。
++void dm_season_frame(void) {
++    static int off = -1;
++    if (off < 0) {
++        const char *e = getenv("DM_SEASON_FRAME");
++        off = e && !strcmp(e, "0");
++    }
++    if (off || strcmp(dm_main_build(), DM_D3_BUILD)) return;   // 门偏移只认 D3 构建
++    if (!cfg_loaded) { static pthread_once_t once = PTHREAD_ONCE_INIT; pthread_once(&once, config_load); }
++    static uint64_t next_ms;
++    uint64_t now = (uint64_t)time(NULL) * 1000;
++    if (now < next_ms) return;
++    next_ms = now + 1000;
++    config_reload_if_changed();
++    if (!atomic_load(&g_enabled)) return;
++    int cur = season_effective();
++    static int last = -1;
++    if (cur != last) {
++        LOG("赛季轮换：生效赛季 S%d（%s 模式）", cur, cfg.mode_rotate ? "轮换" : "固定");
++        atomic_store(&g_season, cur);
++        season_theme_probe(cur);
++        last = cur;
++    }
++}
 diff --git a/dm/host/hle_svc.c b/dm/host/hle_svc.c
 index 7683095..9129d3f 100644
 --- a/dm/host/hle_svc.c
@@ -3486,254 +3684,96 @@ index 96d2674..579e8ae 100644
      pthread_mutex_lock(&g_se_lock); uint32_t wh = se_find(ev); pthread_mutex_unlock(&g_se_lock);
      if (!wh) { hle_bind_system_event(ev, 0); pthread_mutex_lock(&g_se_lock); wh = se_find(ev); pthread_mutex_unlock(&g_se_lock); }
 diff --git a/dm/host/hle_uistate.c b/dm/host/hle_uistate.c
-new file mode 100644
-index 0000000..be9e83c
---- /dev/null
+index a36e1d4..be9e83c 100644
+--- a/dm/host/hle_uistate.c
 +++ b/dm/host/hle_uistate.c
-@@ -0,0 +1,244 @@
-+// UI 状态采样诊断包（docs/H2O静态解析突破-2026-11-05.md §16.5 步骤 1）：
-+//   ① UI 状态机真值表（§16.2 链：[0x114a8d0]→*→+0x1f8→*→+0 = 状态号）→ 虚拟按键显隐依据
-+//   ② HUD 7 槽实时数据 hexdump（§13：技能槽缓存 @0x197ac90+player*0x4d8+0x128，0x30/槽）
-+//      → 图标 id / 冷却秒 / 充能数字段定位 → 技能按钮图标绑定依据
-+//   ③ 事件 handler 槽运行时形态（0x1153d08 / 0x1153e68）→ 菜单点击直调（§15.4-B）依据
-+// 每秒一拍（hle_hid fill 同帧驱动）；DM_UISTATE=0 关；iOS 默认开。
-+// | UI-state sampling probe (breakthrough doc §16.5 step 1): one device run yields the
-+// | screen-state truth table, the HUD slot hexdumps for icon/cooldown field mapping,
-+// | and the runtime handler-slot shape. All offsets are D3-build only (gated).
-+#include "dm.h"
-+#include <stdatomic.h>
-+#include <stdlib.h>
-+#include <stdio.h>
-+#include <time.h>
-+
-+#define UISTATE_MGR_SLOT   0x114a8d0UL   // → *p1 → obj；obj+0x1f8 → *sm（状态机）
-+#define HUDROOT_SLOT       0x114eee8UL   // HUD 根名句柄槽（游戏态非空）
-+#define HUD_MAIN_PTR       0x197ac78UL   // HUD 状态主指针（0=HUD 未构建）
-+#define HUD_HOST0          0x197ac90UL   // 玩家0 模板缓存宿主（+0x4d8/玩家）
-+#define SLOT_DUMP_LO       0x000UL       // 模板缓存从 0 起（u64 路径哈希槽区确认初始化）
-+#define SLOT_DUMP_HI       0x248UL       // 0x128 + 6*0x30 = 0x238，留 0x10 余量
-+#define EVT_SLOT_A         0x1153d08UL   // UIStackSplit_Console_OnAccept
-+#define EVT_SLOT_B         0x1153e68UL   // UIInventory_OnLeftStick
-+
-+static uint64_t now_ms(void) {
-+    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
-+    return (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
-+}
-+
+@@ -27,6 +27,10 @@ static uint64_t now_ms(void) {
+     return (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
+ }
+ 
 +// 进游戏门控信号（iOS 虚拟键显隐）：HUD 根槽非空 = 游戏态（kb/04 §6）。hle_uistate 每秒采样时刷新。
 +static _Atomic int g_ingame;
 +int dm_ingame(void) { return atomic_load(&g_ingame); }
 +
-+#ifdef TARGET_OS_IPHONE
-+extern void dm_gamepad_skill(int slot, float frac);   // DmGamepad.m（iOS only）
-+#endif
-+
-+// ⑤ D3 技能条冷却读取 → 虚拟键扇形遮罩（kb/05 §2 + kb/12 §2 链；DM_SKILLBAR=0 关）：
-+//    模板缓存 HUD_HOST0+0x128 起技能槽区 0x30/槽 ×6，首 u64 = UIID（探针假设 A）→ UIID→impl
-+//    链（v5 复刻）→ impl+0x4c8 嵌入对象 → 剩余 = (embed+0x1d0)−(embed+0x1cc)（0x39a620 语义，
-+//    两种取法：内嵌直读 impl+0x694/0x698，或 deref embed 后同偏移——探针日志分辨）。
-+//    frac 分母无静态字段 → 每槽自学习观测最大差值。全链 dm_guest_readable 护栏，失败推 -1（无遮罩）。
-+static void skills_frame(uint8_t *base) {
-+    static int off = -1;
-+    if (off < 0) {
-+        const char *e = getenv("DM_SKILLBAR");
-+        off = e && !strcmp(e, "0");
-+        if (off) LOG("技能条：DM_SKILLBAR=0，关闭");
-+    }
-+    if (off) return;
-+    static uint64_t next_ms;
-+    uint64_t now = now_ms();
-+    if (now < next_ms) return;
-+    next_ms = now + 100;   // 10Hz：冷却动画粒度（诊断节拍独立于 ①-④ 的 1s）
-+    void *m16 = *(void **)(base + 0x114a840UL);
-+    void *mgr = m16 ? *(void **)((uint8_t *)m16 + 0x10) : NULL;
+ #ifdef TARGET_OS_IPHONE
+ extern void dm_gamepad_skill(int slot, float frac);   // DmGamepad.m（iOS only）
+ #endif
+@@ -50,15 +54,28 @@ static void skills_frame(uint8_t *base) {
+     next_ms = now + 100;   // 10Hz：冷却动画粒度（诊断节拍独立于 ①-④ 的 1s）
+     void *m16 = *(void **)(base + 0x114a840UL);
+     void *mgr = m16 ? *(void **)((uint8_t *)m16 + 0x10) : NULL;
+-    if (!mgr || !dm_guest_readable((uint64_t)mgr, 0xb88)) return;
 +    if (!mgr || !dm_guest_readable((uint64_t)mgr, 0xb88)) {
 +        static int once1; if (!once1) { once1 = 1; LOG("[uiskill] 停：m16=%p mgr=%p 未就绪", m16, mgr); }
 +        return;
 +    }
-+    void *pp = *(void **)((uint8_t *)mgr + 0xb80);
-+    void *desc = pp ? *(void **)pp : NULL;
+     void *pp = *(void **)((uint8_t *)mgr + 0xb80);
+     void *desc = pp ? *(void **)pp : NULL;
+-    if (!desc || !dm_guest_readable((uint64_t)desc, 24)) return;
 +    if (!desc || !dm_guest_readable((uint64_t)desc, 24)) {
 +        static int once2; if (!once2) { once2 = 1; LOG("[uiskill] 停：pp=%p desc=%p 未就绪", pp, desc); }
 +        return;
 +    }
-+    uint32_t mask = *(uint32_t *)desc;
-+    uint8_t *buckets = *(uint8_t **)((uint8_t *)desc + 16);
+     uint32_t mask = *(uint32_t *)desc;
+     uint8_t *buckets = *(uint8_t **)((uint8_t *)desc + 16);
+-    if (!buckets || !dm_guest_readable((uint64_t)buckets, ((uint64_t)mask + 1) * 8)) return;
 +    if (!buckets || !dm_guest_readable((uint64_t)buckets, ((uint64_t)mask + 1) * 8)) {
 +        static int once3; if (!once3) { once3 = 1; LOG("[uiskill] 停：buckets=%p mask=%#x 不可读", buckets, mask); }
 +        return;
 +    }
-+    uint8_t *host = base + HUD_HOST0;
+     uint8_t *host = base + HUD_HOST0;
+-    if (!dm_guest_readable((uint64_t)host, 0x128 + 6 * 0x30)) return;
 +    if (!dm_guest_readable((uint64_t)host, 0x128 + 6 * 0x30)) {
 +        static int once4; if (!once4) { once4 = 1; LOG("[uiskill] 停：host %p 不可读", host); }
 +        return;
 +    }
 +    static int once5; if (!once5) { once5 = 1; LOG("[uiskill] 链就绪 mgr=%p desc=%p mask=%#x", mgr, desc, mask); }
-+    static float maxdur[6];
-+    static uint32_t beat;
-+    int diag = (beat++ % 20) == 0;   // 每 2s 一拍探针日志
-+    for (int i = 0; i < 6; i++) {
-+        float frac = -1;
-+        uint64_t uiid = *(uint64_t *)(host + 0x128 + (uint32_t)i * 0x30);
-+        if (uiid) {
-+            uint32_t h = (uint32_t)uiid;
-+            uint32_t bkt = ((((h & 0xff ^ 0x811c9dc5) * 0x1000193 ^ (h >> 8 & 0xff)) * 0x1000193 ^ (h >> 16 & 0xff)) * 0x1000193 ^ (h >> 24)) * 0x1000193 & mask;
-+            uint8_t *n = *(uint8_t **)(buckets + (uint64_t)bkt * 8);
-+            void *impl = NULL; int steps = 0;
-+            while (n && steps++ < 64) {
-+                if (!dm_guest_readable((uint64_t)n, 24)) break;
-+                if (*(uint64_t *)(n + 8) == uiid) { impl = *(void **)(n + 16); break; }
-+                n = *(uint8_t **)n;
-+            }
-+            if (impl && dm_guest_readable((uint64_t)impl, 0x6a0)) {
-+                int rem = 0; int via = 0;
+     static float maxdur[6];
+     static uint32_t beat;
+     int diag = (beat++ % 20) == 0;   // 每 2s 一拍探针日志
+@@ -77,6 +94,7 @@ static void skills_frame(uint8_t *base) {
+             }
+             if (impl && dm_guest_readable((uint64_t)impl, 0x6a0)) {
+                 int rem = 0; int via = 0;
 +                uint32_t skid = *(uint32_t *)((uint8_t *)impl + 0x4fc);   // kb/12：impl+0x4fc = 技能 id（图标映射键）
-+                uint64_t embed = *(uint64_t *)((uint8_t *)impl + 0x4c8);
-+                if (embed && dm_guest_readable(embed, 0x1d4)) {   // 取法 B：embed 是子对象指针
-+                    rem = *(int *)((uint8_t *)embed + 0x1d0) - *(int *)((uint8_t *)embed + 0x1cc); via = 2;
-+                }
-+                if (rem == 0) {   // 取法 A：字段内嵌在 impl+0x4c8 区（+0x1cc/+0x1d0 → impl+0x694/0x698）
-+                    rem = *(int *)((uint8_t *)impl + 0x698) - *(int *)((uint8_t *)impl + 0x694); via = 1;
-+                }
-+                if (rem > 0) {
-+                    if ((float)rem > maxdur[i]) maxdur[i] = (float)rem;
-+                    frac = maxdur[i] > 0 ? (float)rem / maxdur[i] : 1.0f;
-+                }
+                 uint64_t embed = *(uint64_t *)((uint8_t *)impl + 0x4c8);
+                 if (embed && dm_guest_readable(embed, 0x1d4)) {   // 取法 B：embed 是子对象指针
+                     rem = *(int *)((uint8_t *)embed + 0x1d0) - *(int *)((uint8_t *)embed + 0x1cc); via = 2;
+@@ -88,8 +106,8 @@ static void skills_frame(uint8_t *base) {
+                     if ((float)rem > maxdur[i]) maxdur[i] = (float)rem;
+                     frac = maxdur[i] > 0 ? (float)rem / maxdur[i] : 1.0f;
+                 }
+-                if (diag) LOG("[uiskill] slot%d uiid=%016llx impl=%p via=%d rem=%d max=%.0f frac=%.2f",
+-                              i, (unsigned long long)uiid, impl, via, rem, maxdur[i], frac);
 +                if (diag) LOG("[uiskill] slot%d skid=%u uiid=%016llx impl=%p via=%d rem=%d max=%.0f frac=%.2f",
 +                              i, skid, (unsigned long long)uiid, impl, via, rem, maxdur[i], frac);
-+            } else if (diag) {
-+                LOG("[uiskill] slot%d uiid=%016llx impl=%p%s", i, (unsigned long long)uiid, impl,
-+                    impl ? "（impl 不可读 0x6a0）" : "（UIID 未命中）");
-+            }
-+        } else if (diag) LOG("[uiskill] slot%d uiid=0", i);
-+#ifdef TARGET_OS_IPHONE
-+        dm_gamepad_skill(i, frac);
-+#endif
-+    }
-+}
-+
-+void dm_uistate_frame(void) {
-+    static int off = -1;
-+    if (off < 0) {
-+        const char *e = getenv("DM_UISTATE");
-+#ifdef TARGET_OS_IPHONE
-+        off = e && !strcmp(e, "0");
-+#else
-+        off = !e || strcmp(e, "0");   // Mac 宿主默认关（parity 门检查日志）
-+#endif
-+        if (off) LOG("UI 采样：DM_UISTATE=0，关闭");
-+    }
-+    if (off || strcmp(dm_main_build(), DM_D3_BUILD)) return;
-+    static uint8_t *base;
-+    if (!base) {
-+        for (int i = 0; i < g_nmod; i++)
-+            if (!strcmp(g_mod[i].name, "main") && !strcmp(g_mod[i].build_id, DM_D3_BUILD)) base = g_mod[i].base;
-+        if (!base) return;
-+    }
-+    skills_frame(base);   // ⑤ D3 技能条冷却 → 虚拟键遮罩（独立 10Hz 节流，见下）
-+    static uint64_t next_ms;
-+    uint64_t now = now_ms();
-+    if (now < next_ms) return;
-+    next_ms = now + 1000;
-+    static int beats;   // 静态区只在前 3 拍打（v3 实证它们恒定），活值区每拍打
-+    int verbose = beats < 3;
-+    beats++;
-+
-+    // ① 状态机链（第一轮教训：服务查找走 TLS 静态不可复刻；改为 dump 各层原始内存，
-+    //    由「主菜单/游戏/背包」三态比对挑信号位）
-+    void *p1 = *(void **)(base + UISTATE_MGR_SLOT);
-+    void *x0 = p1 ? *(void **)p1 : NULL;
-+    uint32_t svcbid = x0 ? *(uint32_t *)((uint8_t *)x0 + 0xc) : 0;
-+    void *hudroot = *(void **)(base + HUDROOT_SLOT);
-+    uint64_t guard = *(uint64_t *)(base + HUD_MAIN_PTR);
-+    LOG("[uistate] p1=%p x0=%p svcid=%u hudroot=%p(→my 0x%llx) guard197ac78=%llu",
-+        p1, x0, svcbid, hudroot,
-+        hudroot ? (unsigned long long)((uint8_t *)hudroot - base) : 0ull,
-+        (unsigned long long)guard);
+             } else if (diag) {
+                 LOG("[uiskill] slot%d uiid=%016llx impl=%p%s", i, (unsigned long long)uiid, impl,
+                     impl ? "（impl 不可读 0x6a0）" : "（UIID 未命中）");
+@@ -139,6 +157,7 @@ void dm_uistate_frame(void) {
+         p1, x0, svcbid, hudroot,
+         hudroot ? (unsigned long long)((uint8_t *)hudroot - base) : 0ull,
+         (unsigned long long)guard);
 +    atomic_store(&g_ingame, hudroot != NULL);   // 进游戏门控（iOS 虚拟键显隐）
-+    // ①b HUD 根表 .bss 区（hudroot 槽指向处，进游戏后填充；三态比对挑显隐信号）
-+    if (hudroot && (uint8_t *)hudroot >= base && (uint8_t *)hudroot < base + 0x1aa6000UL) {
-+        uint8_t *r = (uint8_t *)hudroot;
-+        if (verbose) LOG("[uiroot] %016llx %016llx %016llx %016llx",
-+            *(unsigned long long *)(r + 0), *(unsigned long long *)(r + 8),
-+            *(unsigned long long *)(r + 16), *(unsigned long long *)(r + 24));
-+        if (verbose) LOG("[uiroot] %016llx %016llx %016llx %016llx",
-+            *(unsigned long long *)(r + 32), *(unsigned long long *)(r + 40),
-+            *(unsigned long long *)(r + 48), *(unsigned long long *)(r + 56));
-+    }
-+    // ①c 屏幕实例化双槽（0x348320/0x329de0 实证）：[0x11509f0]=屏幕句柄容器、
-+    //     [0x1150ee0]=UIID→impl 管理器——打开背包/菜单必然改变屏幕集合
-+    for (int k = 0; k < 2; k++) {
-+        uint64_t off = k == 0 ? 0x11509f0UL : 0x1150ee0UL;
-+        void *slot = *(void **)(base + off);
-+        uint64_t a0 = slot ? *(uint64_t *)((uint8_t *)slot + 0) : 0;
-+        uint64_t a1 = slot ? *(uint64_t *)((uint8_t *)slot + 8) : 0;
-+        if (verbose) LOG("[uiscr] my 0x%llx 槽=%p [%016llx %016llx]", (unsigned long long)off, slot,
-+            (unsigned long long)a0, (unsigned long long)a1);
-+    }
-+
-+    // ② HUD 表裸 dump（v2 教训：0x197ac78 是状态表基址不是标量标志，首 u32 恒 0，
-+    //    拿它当门槛把数据区挡住了。v2 起无条件 dump）
-+    // ②a 表头 0x18 字节 + buff 槽区采样（0x4164e0 写 [player*0x4d8 + slot*40 + 0x94*4]）
-+    uint8_t *tbl = base + HUD_MAIN_PTR;
-+    if (verbose) LOG("[uitbl] hdr %08x %08x %08x %08x %08x %08x",
-+        *(uint32_t *)(tbl + 0), *(uint32_t *)(tbl + 4), *(uint32_t *)(tbl + 8),
-+        *(uint32_t *)(tbl + 12), *(uint32_t *)(tbl + 16), *(uint32_t *)(tbl + 20));
-+    for (int s = 0; s < 3; s++) {   // 玩家0 buff 槽 0-2（+0x94 起，40 字节/槽）
-+        uint8_t *b = tbl + 0x94 * 4 + s * 40;
-+        if (verbose) LOG("[uibuff] p0s%d %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x",
-+            s, *(uint32_t *)(b + 0), *(uint32_t *)(b + 4), *(uint32_t *)(b + 8), *(uint32_t *)(b + 12),
-+            *(uint32_t *)(b + 16), *(uint32_t *)(b + 20), *(uint32_t *)(b + 24), *(uint32_t *)(b + 28),
-+            *(uint32_t *)(b + 32), *(uint32_t *)(b + 36));
-+    }
-+    // ②b 模板缓存（0x197ac90 起：u64 路径哈希槽 + 技能槽区 0x128 起 0x30/槽）
-+    uint8_t *host = base + HUD_HOST0;
-+    for (uint32_t a = SLOT_DUMP_LO; a < SLOT_DUMP_HI; a += 32) {
-+        uint8_t *p = host + a;
-+        if (verbose) LOG("[uislots] +%03x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x "
-+            "%02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x",
-+            a, p[0],p[1],p[2],p[3],p[4],p[5],p[6],p[7],p[8],p[9],p[10],p[11],p[12],p[13],p[14],p[15],
-+            p[16],p[17],p[18],p[19],p[20],p[21],p[22],p[23],p[24],p[25],p[26],p[27],p[28],p[29],p[30],p[31]);
-+    }
-+
-+    // ④ 原型：UIID→impl 解析（FUN_00431190 静态复刻；mgr 槽 0x114a840 运行时直读）。
-+    //    v4 闪退根因：buckets 偏移错——反编译 (uint*)desc+4 是 uint 算术（=+16 字节），
-+    //    按 +4 字节读出垃圾指针 → 桶数组野读 sig=11。v5：+16 修正 + 全链 dm_guest_readable 护栏。
-+    void *m16 = *(void **)(base + 0x114a840UL);
-+    void *mgr = m16 ? *(void **)((uint8_t *)m16 + 0x10) : NULL;
-+    if (!mgr || !dm_guest_readable((uint64_t)mgr, 0xb88)) { LOG("[uiimpl] mgr 未就绪"); return; }
-+    void *pp = *(void **)((uint8_t *)mgr + 0xb80);
-+    void *desc = pp ? *(void **)pp : NULL;
-+    if (!desc || !dm_guest_readable((uint64_t)desc, 24)) { LOG("[uiimpl] UIID 表未就绪"); return; }
-+    uint32_t mask = *(uint32_t *)desc;
-+    uint8_t *buckets = *(uint8_t **)((uint8_t *)desc + 16);   // (uint*)+4 = +16 字节（v4 修正）
-+    if (!buckets || !dm_guest_readable((uint64_t)buckets, ((uint64_t)mask + 1) * 8)) {
-+        LOG("[uiimpl] 桶数组不可读 mask=%#x buckets=%p", mask, (void *)buckets); return;
-+    }
-+    LOG("[uiimpl] mgr=%p desc=%p mask=%#x buckets=%p", mgr, desc, mask, (void *)buckets);
-+    // 模板缓存槽（+8*idx）：0x05=hp_bar_player、0x08=HP_Globe、0x13=PotionIcon、0x14=PotionButton
-+    static const int slots[] = {5, 8, 13, 14};
-+    static const char *names[] = {"hp_bar_player", "HP_Globe", "PotionIcon", "PotionButton"};
-+    uint64_t *cache = (uint64_t *)(base + HUD_HOST0);
-+    for (int k = 0; k < 4; k++) {
-+        uint64_t uiid = cache[slots[k]];
-+        if (!uiid) { LOG("[uiimpl] %s: UIID=0", names[k]); continue; }
-+        uint32_t h = (uint32_t)uiid;
-+        uint32_t b = ((((h & 0xff ^ 0x811c9dc5) * 0x1000193 ^ (h >> 8 & 0xff)) * 0x1000193 ^ (h >> 16 & 0xff)) * 0x1000193 ^ (h >> 24)) * 0x1000193 & mask;
-+        uint8_t *n = *(uint8_t **)(buckets + (uint64_t)b * 8);
-+        void *impl = NULL; int steps = 0;
-+        while (n && steps++ < 64) {   // 链表逐节点护栏：可读才解引用，上限 64 步
-+            if (!dm_guest_readable((uint64_t)n, 24)) break;
-+            uint64_t key = *(uint64_t *)(n + 8);
-+            if (key == uiid) { impl = *(void **)(n + 16); break; }
-+            n = *(uint8_t **)n;
-+        }
-+        if (!impl) { LOG("[uiimpl] %s: UIID %016llx 未命中", names[k], (unsigned long long)uiid); continue; }
-+        if (!dm_guest_readable((uint64_t)impl, 0x500)) { LOG("[uiimpl] %s: impl 不可读 %p", names[k], impl); continue; }
-+        LOG("[uiimpl] %s: impl=%p pos=(%.1f,%.1f) f4f8=%08x f4fc=%08x", names[k], impl,
-+            *(float *)((uint8_t *)impl + 0x1ec), *(float *)((uint8_t *)impl + 0x1f0),
-+            *(uint32_t *)((uint8_t *)impl + 0x4f8), *(uint32_t *)((uint8_t *)impl + 0x4fc));
-+    }
+     // ①b HUD 根表 .bss 区（hudroot 槽指向处，进游戏后填充；三态比对挑显隐信号）
+     if (hudroot && (uint8_t *)hudroot >= base && (uint8_t *)hudroot < base + 0x1aa6000UL) {
+         uint8_t *r = (uint8_t *)hudroot;
+diff --git a/dm/host/host_stubs.c b/dm/host/host_stubs.c
+index ef7f336..861146e 100644
+--- a/dm/host/host_stubs.c
++++ b/dm/host/host_stubs.c
+@@ -23,5 +23,10 @@ void dm_uiscreen_res_reread(void) {}
+ uint64_t dm_game_res(int docked) { return front_game_res(docked); }
+ int dm_screen_real(int *w, int *h) { *w = *h = 0; return 0; }
+ void dm_ui_rect(int *x, int *y, int *w, int *h) { *x = *y = *w = *h = 0; }
+-// svc #0x80.. host gates: only D2R's rewrite rules create them; they should not appear in this game's build output
+-uint64_t svc_host_call(int num, uint64_t *regs) { (void)regs; die("svc_host_call：本作没有宿主门 svc #%#x", num); }
++// svc #0x80.. host gates: D2R-specific numbers live in d2r-mobile's hle_tact.c and are not built here. This game's own host gates so far are the
++// season toggle 0x8f/0x90 (patch_nso.py D3 block → hle_season.c); anything else is still a build-output bug and must fail loudly
++uint64_t svc_host_call(int num, uint64_t *regs) {
++    int dm_season_svc(int, uint64_t *);   // hle_season.c: 0x8f/0x90; returns 0 for other numbers
++    if (dm_season_svc(num, regs)) return 1;
++    die("svc_host_call：本作没有宿主门 svc #%#x", num);
 +}
 diff --git a/dm/host/lan_discovery_apple.m b/dm/host/lan_discovery_apple.m
 new file mode 100644
@@ -4011,10 +4051,26 @@ index 4d22880..0be9257 100644
          // Derivation: pillar inner edge x = screen height * limit / 2, so for every delta added to the limit the inner edge moves outward by screen height * delta / 2 on each side. Measured on Mac 1952x900, the soft edge is <= 30 pixels wide
          // (with limit = screen aspect ratio, columns 0–20 at the right edge fade from black to bright, and it disappears once the limit is pushed to 2.4) => need delta >= 2 * 30 / 900 ~ 0.067; 0.15 is taken (about 67 pixels outward per side), leaving more than double the margin.
 diff --git a/dm/tools/patch_nso.py b/dm/tools/patch_nso.py
-index 837700c..e7019d8 100644
+index 837700c..0eec3b5 100644
 --- a/dm/tools/patch_nso.py
 +++ b/dm/tools/patch_nso.py
-@@ -680,7 +680,12 @@ for a in sorted(kinds):
+@@ -290,6 +290,15 @@ def BRK(imm): return 0xD4200000 | ((imm & 0xFFFF) << 5)
+ def BLR(n): return 0xD63F0000 | (n << 5)
+ NOP = 0xD503201F
+ 
++# D3 赛季门的共用「通过捷径」（structck ⑪ 分支门模板的「跳 0x目标」落点）：mov w0,#1; ret ——
++# GameIsSeasonal 返回 1（kb/17 §1.1）/ 角色↔档案赛季校验返回 1（_scratch/dis_4b1b0.txt 0x14b298 通过路径）。
++# 固定在补丁区首 8 字节（PATCH_OFF），地址写死在 hle.h 0x8f/0x90 登记行——D3 main 的 PATCH_OFF 由段尺寸决定，恒 0x1ab0000。
++# 放最前（site 改写循环之前发射）才占得住这个地址；DM_PRIVATE_GATES=0 时整体不发射，登记行按产物缺席跳过（structck ⑪ cut is None 分支）。
++if BUILD_ID == '2607a74f5df7754cc0357b5df7e49693' and PRIVATE_GATES:
++    SEASON_PASS = here()
++    assert SEASON_PASS == PATCH_OFF, f'赛季通过捷径必须在补丁区首：{SEASON_PASS:#x} != {PATCH_OFF:#x}'
++    emit(0x52800020); emit(0xd65f03c0)
++
+ def dis(w, addr):
+     l = list(md.disasm(struct.pack('<I', w), addr)); assert len(l) == 1, hex(w)
+     return l[0]
+@@ -680,7 +689,12 @@ for a in sorted(kinds):
      elif k in ('cntpct', 'cntvct'): st = site_gate(ins, k, arg); stat(k)
      elif k == 'ctr':   # replaced in place by a constant: DminLine = 4 (64-byte lines); movz xN, #4, lsl #16
          assert arg != 18, f'{a:x} mrs x18, ctr_el0'
@@ -4028,7 +4084,7 @@ index 837700c..e7019d8 100644
      put_branch(a, st)
  
  # Private visual branch; not OBS, 0x85 is a read-only query. Only this experimental build explicitly opts in; the original Qty/children and Update are unchanged.
-@@ -833,7 +838,16 @@ PARAMS = {'db0507f36b84200ac05f75d76ed5026f': [
+@@ -833,7 +847,16 @@ PARAMS = {'db0507f36b84200ac05f75d76ed5026f': [
      (0x1663ee8, '52838e49', 0x1663eec, '72a800e9', 9, 'KASPECTUI', '界面常量缓冲 0x15 号槽 [屏宽, 屏高, 宽高比上限]：界面精灵着色器按它在上限以外画两侧黑柱（带约 20–30 像素向内的柔边，宿主另加余量把柔边推出屏幕）'),
      (0xb152bc, '52838e48', 0xb152c0, '72a800e8', 8, 'KASPECT', '新画面模式视口：边距 = (屏宽 − 屏高 × 上限) / 2，经 0x85bc90 设居中视口'),
      (0x23e888, '52838e48', 0x23e88c, '72a800e8', 8, 'KASPECT', '新画面模式坐标钳制（0x23e760）：x 夹进 [边距, 边距 + 屏高 × 上限]，宽屏两侧的指针 / 触摸不再被夹回中间'),
@@ -4046,7 +4102,7 @@ index 837700c..e7019d8 100644
  params = PARAMS.get(BUILD_ID, [])
  for oa, wa, ob_, wb, r, key, why in params:
      for o, w0 in ((oa, wa), (ob_, wb)):
-@@ -847,6 +861,20 @@ for oa, wa, ob_, wb, r, key, why in params:
+@@ -847,6 +870,47 @@ for oa, wa, ob_, wb, r, key, why in params:
      tmp = 16 if r != 16 else 17
      emit(STUR(tmp, 31, -16)); emit(MRS_TPIDRRO(r)); emit_slot_addr(r, tmp, key); emit(LDRX(r, r)); emit(LDUR(tmp, 31, -16)); emit(B(here(), oa + 4))
      struct.pack_into('<I', IMG, oa, B(oa, start)); struct.pack_into('<I', IMG, ob_, NOP); stat('param')
@@ -4064,10 +4120,37 @@ index 837700c..e7019d8 100644
 +        struct.pack_into('<I', IMG, o, new)
 +        # cuts.tsv 的两列 hex 是字节序列（structck bytes.fromhex 后与映像原样比对），不是字值
 +        cuts.append((o, struct.pack('<I', old).hex(), struct.pack('<I', new).hex(), why, '仅宿主')); stat('d3_param_cut')
++
++# D3 赛季门（kb/17 五层 A/B；块逐字 = structck ⑪ 分支门模板，宿主处理器 hle_season.c）：壳写 $DM_SAVE/dm-season.tsv，
++# 宿主 1Hz 重载；开关开→宿主置 x8=1，门块 ldp 恢复后裸跳补丁区首 season_pass（w0=1; ret，hle.h 登记行写死地址）；
++# 关→x8=0 由 cbz 落回原指令原逻辑。DM_PRIVATE_GATES=0 时整体不发射（产物无门，宿主空转）。
++#   ① 0x4c8df0 GameIsSeasonal 入口（原 a9bf7bfd stp x29,x30,[sp,#-0x10]!）→ svc 0x8f：开=恒 1（kb/17 §1.1 全链 55 消费者按赛季走）。
++#   ② 0x4b1b0 角色↔档案赛季校验入口（原 d10143ff sub sp,sp,#0x50）→ svc 0x90：开=放行（dis_4b1b0 0x14b298 返回 1=通过）
++#      且宿主顺手把该校验英雄的 hero+0x12C 置 bit1（幂等，my 0x520360 查记录）；关=原校验（语义见 hle_season.c）。
++# 参考项目 r177 的对应做法（2 处 bl GameIsSeasonal 调用点 + 3 处 0xA26FC0 赛季源发布点）语义已核，收录 kb/17 附录备查；本实现取入口门全量生效。
++if BUILD_ID == '2607a74f5df7754cc0357b5df7e49693' and PRIVATE_GATES:
++    def season_entry_gate(off, word, num, why, statname):
++        assert off in set(starts), f'赛季门 {off:#x} 不是函数入口'
++        assert off < TEXT_END and off not in kinds and not any(seg[0].address <= off < seg[-1].address + 4 for seg in windows), f'赛季门与改写点冲突 {off:#x}'
++        start = here()
++        emit(0xA9BF7FE8)                    # stp x8,xzr,[sp,#-16]!（⑪ 模板固定首字）
++        emit(STP_PRE(29, 30, 31, -16))
++        emit_gate_call(); emit(BLR(30))
++        ret = here(); emit(LDP_POST(29, 30, 31, 16))
++        emit(0x34000068)                    # cbz w8,+12（⑪ 模板固定编码）：x8=0（关）→ 原路径
++        emit(LDP_POST(8, 31, 31, 16)); emit(B(here(), SEASON_PASS))          # 开→通过捷径（补丁区内跳转，⑩ 跟随不算出口）
++        emit(LDP_POST(8, 31, 31, 16)); emit(word); emit(B(here(), off + 4))  # 关：原指令续跑
++        gates.append((ret, 'svc', num, off))
++        put_branch(off, start); stat(statname)
++        cuts.append((off, struct.pack('<I', word).hex(), struct.pack('<I', B(off, start)).hex(), why, '仅宿主'))
++    season_entry_gate(0x4c8df0, 0xa9bf7bfd, 0x8f,
++        '赛季轮换：GameIsSeasonal 入口 → svc 0x8f：宿主开=恒 1（kb/17 §1.1 全链 55 消费者按赛季走）x8=1 跳 season_pass；关=原查询（hle_season.c，dm-season.tsv）', 'd3_season_isseasonal')
++    season_entry_gate(0x4b1b0, 0xd10143ff, 0x90,
++        '赛季轮换：角色↔档案赛季校验入口 → svc 0x90：宿主开=放行（dis_4b1b0 0x14b298 返回 1=通过）并盖 hero+0x12C bit1；关=原校验', 'd3_season_herocheck')
  
  # The three existing native rule trampolines all use only the dead temporary w8 that is overwritten afterwards, and do not change the w0/stat return, sp or NZCV.
  # 6c6290 is after the original mode3 gate; the Blaze / reference count and data invalidation 6c62dc branches before it and the state update after it are untouched.
-@@ -893,38 +921,38 @@ if FAR:   # patch area before the base: file = text + ro + data (padded to 16K)
+@@ -893,38 +957,38 @@ if FAR:   # patch area before the base: file = text + ro + data (padded to 16K)
  else:
      open(P('patched.bin'), 'wb').write(IMG + bytearray(PATCH_OFF - len(IMG)) + patch)
  import hashlib
