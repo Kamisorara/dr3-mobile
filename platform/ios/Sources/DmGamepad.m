@@ -572,9 +572,8 @@ static UIImage *controlImage(CGSize size,CGFloat scale,void (^draw)(CGContextRef
     [CATransaction commit];
 }
 
-@end
-
-void dm_gamepad_skill(int slot, float frac);   // hle 层每帧推 D3 技能冷却（slot 0=主攻 1-5=弧键；frac∈[0,1] 剩余比例，<0 无冷却）
+// hle 层每帧推 D3 技能冷却（slot 0=主攻 1-5=弧键；frac∈[0,1] 剩余比例，<0 无冷却）。
+// 定义在 @implementation 内：外部链接不变，但可访问私有 ivar（@end 后访问 _cdFrac 会报 private，CI 实证）。
 void dm_gamepad_skill(int slot, float frac) {
     DmGamepad *v = g_view;
     if (!v || slot < 0 || slot >= 6) return;
@@ -583,6 +582,8 @@ void dm_gamepad_skill(int slot, float frac) {
     if ([NSThread isMainThread]) [v updateSkillCd:slot];
     else dispatch_async(dispatch_get_main_queue(), ^{ [v updateSkillCd:slot]; });
 }
+
+@end
 
 static void physical_present(int present) {
     g_view.hidden = present;
