@@ -95,6 +95,7 @@ static CGPathRef piePath(CGPoint c, CGFloat r, float frac) {   // 冷却遮罩�
 @implementation D3TouchUI {
     DmSemRoute _route;
     DmSemLayout _lay;
+    DmSemRouteListener _ln;   // ctx=self（listener 回调的接收者；位置初始化漏 ctx=崩溃，2026-11-10 真机实证）
     BOOL _world;
     long long _owner;          // 安卓 semanticOwner：(gen<<1)|world
     // 渲染（下标 = 布局控件下标 0..15 + SEASON_IDX）
@@ -256,8 +257,9 @@ static void l_pickup(void *ctx, long long token, int phase) {
         dmroute_init(&_route);
         _route.touchSlop = 12;                     // iOS 无系统 touchSlop；UIPan 默认量级约定（安卓 ViewConfiguration 同位）
         _route.longPressMs = 500;                  // 安卓 getLongPressTimeout 缺省
-        static const DmSemRouteListener ln = { 0, l_changed, l_skills, l_tap, l_pickup };
-        _route.ln = &ln;
+        _ln.ctx = (__bridge void *)self;
+        _ln.changed_at = l_changed; _ln.skills = l_skills; _ln.tap = l_tap; _ln.pickup = l_pickup;
+        _route.ln = &_ln;
         static dispatch_once_t once;
         dispatch_once(&once, ^{
             k_idle = [UIColor colorWithWhite:0.05 alpha:0.55]; k_on = [UIColor colorWithWhite:0.24 alpha:0.85];
