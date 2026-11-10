@@ -3684,80 +3684,256 @@ index 96d2674..579e8ae 100644
      pthread_mutex_lock(&g_se_lock); uint32_t wh = se_find(ev); pthread_mutex_unlock(&g_se_lock);
      if (!wh) { hle_bind_system_event(ev, 0); pthread_mutex_lock(&g_se_lock); wh = se_find(ev); pthread_mutex_unlock(&g_se_lock); }
 diff --git a/dm/host/hle_uistate.c b/dm/host/hle_uistate.c
-index a36e1d4..be9e83c 100644
---- a/dm/host/hle_uistate.c
+new file mode 100644
+index 0000000..7543dc6
+--- /dev/null
 +++ b/dm/host/hle_uistate.c
-@@ -27,6 +27,10 @@ static uint64_t now_ms(void) {
-     return (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
- }
- 
+@@ -0,0 +1,245 @@
++// UI 状态采样诊断包（docs/H2O静态解析突破-2026-11-05.md §16.5 步骤 1）：
++//   ① UI 状态机真值表（§16.2 链：[0x114a8d0]→*→+0x1f8→*→+0 = 状态号）→ 虚拟按键显隐依据
++//   ② HUD 7 槽实时数据 hexdump（§13：技能槽缓存 @0x197ac90+player*0x4d8+0x128，0x30/槽）
++//      → 图标 id / 冷却秒 / 充能数字段定位 → 技能按钮图标绑定依据
++//   ③ 事件 handler 槽运行时形态（0x1153d08 / 0x1153e68）→ 菜单点击直调（§15.4-B）依据
++// 每秒一拍（hle_hid fill 同帧驱动）；DM_UISTATE=0 关；iOS 默认开。
++// | UI-state sampling probe (breakthrough doc §16.5 step 1): one device run yields the
++// | screen-state truth table, the HUD slot hexdumps for icon/cooldown field mapping,
++// | and the runtime handler-slot shape. All offsets are D3-build only (gated).
++#include "dm.h"
++#include <stdatomic.h>
++#include <stdlib.h>
++#include <stdio.h>
++#include <time.h>
++
++#define UISTATE_MGR_SLOT   0x114a8d0UL   // → *p1 → obj；obj+0x1f8 → *sm（状态机）
++#define HUDROOT_SLOT       0x114eee8UL   // HUD 根名句柄槽（游戏态非空）
++#define HUD_MAIN_PTR       0x197ac78UL   // HUD 状态主指针（0=HUD 未构建）
++#define HUD_HOST0          0x197ac90UL   // 玩家0 模板缓存宿主（+0x4d8/玩家）
++#define SLOT_DUMP_LO       0x000UL       // 模板缓存从 0 起（u64 路径哈希槽区确认初始化）
++#define SLOT_DUMP_HI       0x248UL       // 0x128 + 6*0x30 = 0x238，留 0x10 余量
++#define EVT_SLOT_A         0x1153d08UL   // UIStackSplit_Console_OnAccept
++#define EVT_SLOT_B         0x1153e68UL   // UIInventory_OnLeftStick
++
++static uint64_t now_ms(void) {
++    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
++    return (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
++}
++
 +// 进游戏门控信号（iOS 虚拟键显隐）：HUD 根槽非空 = 游戏态（kb/04 §6）。hle_uistate 每秒采样时刷新。
 +static _Atomic int g_ingame;
 +int dm_ingame(void) { return atomic_load(&g_ingame); }
 +
- #ifdef TARGET_OS_IPHONE
- extern void dm_gamepad_skill(int slot, float frac);   // DmGamepad.m（iOS only）
- #endif
-@@ -50,15 +54,28 @@ static void skills_frame(uint8_t *base) {
-     next_ms = now + 100;   // 10Hz：冷却动画粒度（诊断节拍独立于 ①-④ 的 1s）
-     void *m16 = *(void **)(base + 0x114a840UL);
-     void *mgr = m16 ? *(void **)((uint8_t *)m16 + 0x10) : NULL;
--    if (!mgr || !dm_guest_readable((uint64_t)mgr, 0xb88)) return;
++#ifdef TARGET_OS_IPHONE
++extern void dm_gamepad_skill(int slot, float frac);   // DmGamepad.m（iOS only）
++#endif
++
++// ⑤ D3 技能条冷却读取 → 虚拟键扇形遮罩（kb/05 §2 + kb/12 §2 链；DM_SKILLBAR=0 关）：
++//    模板缓存 HUD_HOST0+0x128 起技能槽区 0x30/槽 ×6，首 u64 = UIID（探针假设 A）→ UIID→impl
++//    链（v5 复刻）→ impl+0x4c8 嵌入对象 → 剩余 = (embed+0x1d0)−(embed+0x1cc)（0x39a620 语义，
++//    两种取法：内嵌直读 impl+0x694/0x698，或 deref embed 后同偏移——探针日志分辨）。
++//    frac 分母无静态字段 → 每槽自学习观测最大差值。全链 dm_guest_readable 护栏，失败推 -1（无遮罩）。
++static void skills_frame(uint8_t *base) {
++    static int off = -1;
++    if (off < 0) {
++        const char *e = getenv("DM_SKILLBAR");
++        off = e && !strcmp(e, "0");
++        if (off) LOG("技能条：DM_SKILLBAR=0，关闭");
++    }
++    if (off) return;
++    static uint64_t next_ms;
++    uint64_t now = now_ms();
++    if (now < next_ms) return;
++    next_ms = now + 100;   // 10Hz：冷却动画粒度（诊断节拍独立于 ①-④ 的 1s）
++    void *m16 = *(void **)(base + 0x114a840UL);
++    void *mgr = m16 ? *(void **)((uint8_t *)m16 + 0x10) : NULL;
 +    if (!mgr || !dm_guest_readable((uint64_t)mgr, 0xb88)) {
 +        static int once1; if (!once1) { once1 = 1; LOG("[uiskill] 停：m16=%p mgr=%p 未就绪", m16, mgr); }
 +        return;
 +    }
-     void *pp = *(void **)((uint8_t *)mgr + 0xb80);
-     void *desc = pp ? *(void **)pp : NULL;
--    if (!desc || !dm_guest_readable((uint64_t)desc, 24)) return;
++    void *pp = *(void **)((uint8_t *)mgr + 0xb80);
++    void *desc = pp ? *(void **)pp : NULL;
 +    if (!desc || !dm_guest_readable((uint64_t)desc, 24)) {
 +        static int once2; if (!once2) { once2 = 1; LOG("[uiskill] 停：pp=%p desc=%p 未就绪", pp, desc); }
 +        return;
 +    }
-     uint32_t mask = *(uint32_t *)desc;
-     uint8_t *buckets = *(uint8_t **)((uint8_t *)desc + 16);
--    if (!buckets || !dm_guest_readable((uint64_t)buckets, ((uint64_t)mask + 1) * 8)) return;
++    uint32_t mask = *(uint32_t *)desc;
++    uint8_t *buckets = *(uint8_t **)((uint8_t *)desc + 16);
 +    if (!buckets || !dm_guest_readable((uint64_t)buckets, ((uint64_t)mask + 1) * 8)) {
 +        static int once3; if (!once3) { once3 = 1; LOG("[uiskill] 停：buckets=%p mask=%#x 不可读", buckets, mask); }
 +        return;
 +    }
-     uint8_t *host = base + HUD_HOST0;
--    if (!dm_guest_readable((uint64_t)host, 0x128 + 6 * 0x30)) return;
++    uint8_t *host = base + HUD_HOST0;
 +    if (!dm_guest_readable((uint64_t)host, 0x128 + 6 * 0x30)) {
 +        static int once4; if (!once4) { once4 = 1; LOG("[uiskill] 停：host %p 不可读", host); }
 +        return;
 +    }
 +    static int once5; if (!once5) { once5 = 1; LOG("[uiskill] 链就绪 mgr=%p desc=%p mask=%#x", mgr, desc, mask); }
-     static float maxdur[6];
-     static uint32_t beat;
-     int diag = (beat++ % 20) == 0;   // 每 2s 一拍探针日志
-@@ -77,6 +94,7 @@ static void skills_frame(uint8_t *base) {
-             }
-             if (impl && dm_guest_readable((uint64_t)impl, 0x6a0)) {
-                 int rem = 0; int via = 0;
++    static float maxdur[6];
++    static uint32_t beat;
++    int diag = (beat++ % 20) == 0;   // 每 2s 一拍探针日志
++    for (int i = 0; i < 6; i++) {
++        float frac = -1;
++        uint64_t uiid = *(uint64_t *)(host + 0x128 + (uint32_t)i * 0x30);
++        if (uiid) {
++            uint32_t h = (uint32_t)uiid;
++            uint32_t bkt = ((((h & 0xff ^ 0x811c9dc5) * 0x1000193 ^ (h >> 8 & 0xff)) * 0x1000193 ^ (h >> 16 & 0xff)) * 0x1000193 ^ (h >> 24)) * 0x1000193 & mask;
++            uint8_t *n = *(uint8_t **)(buckets + (uint64_t)bkt * 8);
++            void *impl = NULL; int steps = 0;
++            while (n && steps++ < 64) {
++                if (!dm_guest_readable((uint64_t)n, 24)) break;
++                if (*(uint64_t *)(n + 8) == uiid) { impl = *(void **)(n + 16); break; }
++                n = *(uint8_t **)n;
++            }
++            if (impl && dm_guest_readable((uint64_t)impl, 0x6a0)) {
++                int rem = 0; int via = 0;
 +                uint32_t skid = *(uint32_t *)((uint8_t *)impl + 0x4fc);   // kb/12：impl+0x4fc = 技能 id（图标映射键）
-                 uint64_t embed = *(uint64_t *)((uint8_t *)impl + 0x4c8);
-                 if (embed && dm_guest_readable(embed, 0x1d4)) {   // 取法 B：embed 是子对象指针
-                     rem = *(int *)((uint8_t *)embed + 0x1d0) - *(int *)((uint8_t *)embed + 0x1cc); via = 2;
-@@ -88,8 +106,8 @@ static void skills_frame(uint8_t *base) {
-                     if ((float)rem > maxdur[i]) maxdur[i] = (float)rem;
-                     frac = maxdur[i] > 0 ? (float)rem / maxdur[i] : 1.0f;
-                 }
--                if (diag) LOG("[uiskill] slot%d uiid=%016llx impl=%p via=%d rem=%d max=%.0f frac=%.2f",
--                              i, (unsigned long long)uiid, impl, via, rem, maxdur[i], frac);
++                uint64_t embed = *(uint64_t *)((uint8_t *)impl + 0x4c8);
++                if (embed && dm_guest_readable(embed, 0x1d4)) {   // 取法 B：embed 是子对象指针
++                    rem = *(int *)((uint8_t *)embed + 0x1d0) - *(int *)((uint8_t *)embed + 0x1cc); via = 2;
++                }
++                if (rem == 0) {   // 取法 A：字段内嵌在 impl+0x4c8 区（+0x1cc/+0x1d0 → impl+0x694/0x698）
++                    rem = *(int *)((uint8_t *)impl + 0x698) - *(int *)((uint8_t *)impl + 0x694); via = 1;
++                }
++                if (rem > 0) {
++                    if ((float)rem > maxdur[i]) maxdur[i] = (float)rem;
++                    frac = maxdur[i] > 0 ? (float)rem / maxdur[i] : 1.0f;
++                }
 +                if (diag) LOG("[uiskill] slot%d skid=%u uiid=%016llx impl=%p via=%d rem=%d max=%.0f frac=%.2f",
 +                              i, skid, (unsigned long long)uiid, impl, via, rem, maxdur[i], frac);
-             } else if (diag) {
-                 LOG("[uiskill] slot%d uiid=%016llx impl=%p%s", i, (unsigned long long)uiid, impl,
-                     impl ? "（impl 不可读 0x6a0）" : "（UIID 未命中）");
-@@ -139,6 +157,7 @@ void dm_uistate_frame(void) {
-         p1, x0, svcbid, hudroot,
-         hudroot ? (unsigned long long)((uint8_t *)hudroot - base) : 0ull,
-         (unsigned long long)guard);
++            } else if (diag) {
++                LOG("[uiskill] slot%d uiid=%016llx impl=%p%s", i, (unsigned long long)uiid, impl,
++                    impl ? "（impl 不可读 0x6a0）" : "（UIID 未命中）");
++            }
++        } else if (diag) LOG("[uiskill] slot%d uiid=0", i);
++#ifdef TARGET_OS_IPHONE
++        dm_gamepad_skill(i, frac);
++        // 持续时间条暂不推（rem 是冷却域；buff 持续时间字段未映射，kb/12/05）——壳层收 0 即不画
++#endif
++    }
++}
++
++void dm_uistate_frame(void) {
++    static int off = -1;
++    if (off < 0) {
++        const char *e = getenv("DM_UISTATE");
++#ifdef TARGET_OS_IPHONE
++        off = e && !strcmp(e, "0");
++#else
++        off = !e || strcmp(e, "0");   // Mac 宿主默认关（parity 门检查日志）
++#endif
++        if (off) LOG("UI 采样：DM_UISTATE=0，关闭");
++    }
++    if (off || strcmp(dm_main_build(), DM_D3_BUILD)) return;
++    static uint8_t *base;
++    if (!base) {
++        for (int i = 0; i < g_nmod; i++)
++            if (!strcmp(g_mod[i].name, "main") && !strcmp(g_mod[i].build_id, DM_D3_BUILD)) base = g_mod[i].base;
++        if (!base) return;
++    }
++    skills_frame(base);   // ⑤ D3 技能条冷却 → 虚拟键遮罩（独立 10Hz 节流，见下）
++    static uint64_t next_ms;
++    uint64_t now = now_ms();
++    if (now < next_ms) return;
++    next_ms = now + 1000;
++    static int beats;   // 静态区只在前 3 拍打（v3 实证它们恒定），活值区每拍打
++    int verbose = beats < 3;
++    beats++;
++
++    // ① 状态机链（第一轮教训：服务查找走 TLS 静态不可复刻；改为 dump 各层原始内存，
++    //    由「主菜单/游戏/背包」三态比对挑信号位）
++    void *p1 = *(void **)(base + UISTATE_MGR_SLOT);
++    void *x0 = p1 ? *(void **)p1 : NULL;
++    uint32_t svcbid = x0 ? *(uint32_t *)((uint8_t *)x0 + 0xc) : 0;
++    void *hudroot = *(void **)(base + HUDROOT_SLOT);
++    uint64_t guard = *(uint64_t *)(base + HUD_MAIN_PTR);
++    LOG("[uistate] p1=%p x0=%p svcid=%u hudroot=%p(→my 0x%llx) guard197ac78=%llu",
++        p1, x0, svcbid, hudroot,
++        hudroot ? (unsigned long long)((uint8_t *)hudroot - base) : 0ull,
++        (unsigned long long)guard);
 +    atomic_store(&g_ingame, hudroot != NULL);   // 进游戏门控（iOS 虚拟键显隐）
-     // ①b HUD 根表 .bss 区（hudroot 槽指向处，进游戏后填充；三态比对挑显隐信号）
-     if (hudroot && (uint8_t *)hudroot >= base && (uint8_t *)hudroot < base + 0x1aa6000UL) {
-         uint8_t *r = (uint8_t *)hudroot;
++    // ①b HUD 根表 .bss 区（hudroot 槽指向处，进游戏后填充；三态比对挑显隐信号）
++    if (hudroot && (uint8_t *)hudroot >= base && (uint8_t *)hudroot < base + 0x1aa6000UL) {
++        uint8_t *r = (uint8_t *)hudroot;
++        if (verbose) LOG("[uiroot] %016llx %016llx %016llx %016llx",
++            *(unsigned long long *)(r + 0), *(unsigned long long *)(r + 8),
++            *(unsigned long long *)(r + 16), *(unsigned long long *)(r + 24));
++        if (verbose) LOG("[uiroot] %016llx %016llx %016llx %016llx",
++            *(unsigned long long *)(r + 32), *(unsigned long long *)(r + 40),
++            *(unsigned long long *)(r + 48), *(unsigned long long *)(r + 56));
++    }
++    // ①c 屏幕实例化双槽（0x348320/0x329de0 实证）：[0x11509f0]=屏幕句柄容器、
++    //     [0x1150ee0]=UIID→impl 管理器——打开背包/菜单必然改变屏幕集合
++    for (int k = 0; k < 2; k++) {
++        uint64_t off = k == 0 ? 0x11509f0UL : 0x1150ee0UL;
++        void *slot = *(void **)(base + off);
++        uint64_t a0 = slot ? *(uint64_t *)((uint8_t *)slot + 0) : 0;
++        uint64_t a1 = slot ? *(uint64_t *)((uint8_t *)slot + 8) : 0;
++        if (verbose) LOG("[uiscr] my 0x%llx 槽=%p [%016llx %016llx]", (unsigned long long)off, slot,
++            (unsigned long long)a0, (unsigned long long)a1);
++    }
++
++    // ② HUD 表裸 dump（v2 教训：0x197ac78 是状态表基址不是标量标志，首 u32 恒 0，
++    //    拿它当门槛把数据区挡住了。v2 起无条件 dump）
++    // ②a 表头 0x18 字节 + buff 槽区采样（0x4164e0 写 [player*0x4d8 + slot*40 + 0x94*4]）
++    uint8_t *tbl = base + HUD_MAIN_PTR;
++    if (verbose) LOG("[uitbl] hdr %08x %08x %08x %08x %08x %08x",
++        *(uint32_t *)(tbl + 0), *(uint32_t *)(tbl + 4), *(uint32_t *)(tbl + 8),
++        *(uint32_t *)(tbl + 12), *(uint32_t *)(tbl + 16), *(uint32_t *)(tbl + 20));
++    for (int s = 0; s < 3; s++) {   // 玩家0 buff 槽 0-2（+0x94 起，40 字节/槽）
++        uint8_t *b = tbl + 0x94 * 4 + s * 40;
++        if (verbose) LOG("[uibuff] p0s%d %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x",
++            s, *(uint32_t *)(b + 0), *(uint32_t *)(b + 4), *(uint32_t *)(b + 8), *(uint32_t *)(b + 12),
++            *(uint32_t *)(b + 16), *(uint32_t *)(b + 20), *(uint32_t *)(b + 24), *(uint32_t *)(b + 28),
++            *(uint32_t *)(b + 32), *(uint32_t *)(b + 36));
++    }
++    // ②b 模板缓存（0x197ac90 起：u64 路径哈希槽 + 技能槽区 0x128 起 0x30/槽）
++    uint8_t *host = base + HUD_HOST0;
++    for (uint32_t a = SLOT_DUMP_LO; a < SLOT_DUMP_HI; a += 32) {
++        uint8_t *p = host + a;
++        if (verbose) LOG("[uislots] +%03x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x "
++            "%02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x",
++            a, p[0],p[1],p[2],p[3],p[4],p[5],p[6],p[7],p[8],p[9],p[10],p[11],p[12],p[13],p[14],p[15],
++            p[16],p[17],p[18],p[19],p[20],p[21],p[22],p[23],p[24],p[25],p[26],p[27],p[28],p[29],p[30],p[31]);
++    }
++
++    // ④ 原型：UIID→impl 解析（FUN_00431190 静态复刻；mgr 槽 0x114a840 运行时直读）。
++    //    v4 闪退根因：buckets 偏移错——反编译 (uint*)desc+4 是 uint 算术（=+16 字节），
++    //    按 +4 字节读出垃圾指针 → 桶数组野读 sig=11。v5：+16 修正 + 全链 dm_guest_readable 护栏。
++    void *m16 = *(void **)(base + 0x114a840UL);
++    void *mgr = m16 ? *(void **)((uint8_t *)m16 + 0x10) : NULL;
++    if (!mgr || !dm_guest_readable((uint64_t)mgr, 0xb88)) { LOG("[uiimpl] mgr 未就绪"); return; }
++    void *pp = *(void **)((uint8_t *)mgr + 0xb80);
++    void *desc = pp ? *(void **)pp : NULL;
++    if (!desc || !dm_guest_readable((uint64_t)desc, 24)) { LOG("[uiimpl] UIID 表未就绪"); return; }
++    uint32_t mask = *(uint32_t *)desc;
++    uint8_t *buckets = *(uint8_t **)((uint8_t *)desc + 16);   // (uint*)+4 = +16 字节（v4 修正）
++    if (!buckets || !dm_guest_readable((uint64_t)buckets, ((uint64_t)mask + 1) * 8)) {
++        LOG("[uiimpl] 桶数组不可读 mask=%#x buckets=%p", mask, (void *)buckets); return;
++    }
++    LOG("[uiimpl] mgr=%p desc=%p mask=%#x buckets=%p", mgr, desc, mask, (void *)buckets);
++    // 模板缓存槽（+8*idx）：0x05=hp_bar_player、0x08=HP_Globe、0x13=PotionIcon、0x14=PotionButton
++    static const int slots[] = {5, 8, 13, 14};
++    static const char *names[] = {"hp_bar_player", "HP_Globe", "PotionIcon", "PotionButton"};
++    uint64_t *cache = (uint64_t *)(base + HUD_HOST0);
++    for (int k = 0; k < 4; k++) {
++        uint64_t uiid = cache[slots[k]];
++        if (!uiid) { LOG("[uiimpl] %s: UIID=0", names[k]); continue; }
++        uint32_t h = (uint32_t)uiid;
++        uint32_t b = ((((h & 0xff ^ 0x811c9dc5) * 0x1000193 ^ (h >> 8 & 0xff)) * 0x1000193 ^ (h >> 16 & 0xff)) * 0x1000193 ^ (h >> 24)) * 0x1000193 & mask;
++        uint8_t *n = *(uint8_t **)(buckets + (uint64_t)b * 8);
++        void *impl = NULL; int steps = 0;
++        while (n && steps++ < 64) {   // 链表逐节点护栏：可读才解引用，上限 64 步
++            if (!dm_guest_readable((uint64_t)n, 24)) break;
++            uint64_t key = *(uint64_t *)(n + 8);
++            if (key == uiid) { impl = *(void **)(n + 16); break; }
++            n = *(uint8_t **)n;
++        }
++        if (!impl) { LOG("[uiimpl] %s: UIID %016llx 未命中", names[k], (unsigned long long)uiid); continue; }
++        if (!dm_guest_readable((uint64_t)impl, 0x500)) { LOG("[uiimpl] %s: impl 不可读 %p", names[k], impl); continue; }
++        LOG("[uiimpl] %s: impl=%p pos=(%.1f,%.1f) f4f8=%08x f4fc=%08x", names[k], impl,
++            *(float *)((uint8_t *)impl + 0x1ec), *(float *)((uint8_t *)impl + 0x1f0),
++            *(uint32_t *)((uint8_t *)impl + 0x4f8), *(uint32_t *)((uint8_t *)impl + 0x4fc));
++    }
++}
 diff --git a/dm/host/host_stubs.c b/dm/host/host_stubs.c
 index ef7f336..861146e 100644
 --- a/dm/host/host_stubs.c
