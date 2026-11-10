@@ -1906,10 +1906,9 @@ index 0000000..b39a06b
 +}
 +void dm_controller_effects_stop(void) {initialized();atomic_fetch_add(&generation,1);synchronous(^{stop_all();});}
 diff --git a/dm/host/dm.h b/dm/host/dm.h
-index fda33ac..2f822c5 100644
 --- a/dm/host/dm.h
 +++ b/dm/host/dm.h
-@@ -46,7 +46,18 @@ extern module_t g_mod[MAX_MOD];
+@@ -46,7 +46,21 @@ extern module_t g_mod[MAX_MOD];
  extern int g_nmod;
  // main's build ID (empty if none). DM_D2R_BUILD = the D2R build that the code inherited from d2r-mobile belongs to: code with fixed D2R addresses or that edits D2R saves runs only on it
  #define DM_D2R_BUILD "db0507f36b84200ac05f75d76ed5026f"
@@ -1920,6 +1919,9 @@ index fda33ac..2f822c5 100644
 +void dm_hudmove_frame(void);
 +void dm_uistate_frame(void);   // hle_uistate.c: UI 状态采样诊断（§16.5；DM_UISTATE=0 关）
 +void dm_season_frame(void);    // hle_season.c: 赛季轮换拍（kb/17 A/B/E 层；1Hz 重载 $DM_SAVE/dm-season.tsv；DM_SEASON_FRAME=0 关，D3 构建 only）
++void dm_uipointer_set(int phase, float x, float y, float bx, float by, long long ms, int paired);   // hle_uipointer.c: 壳触点入队（phase 0=down 1=move 2=up 3=cancel，坐标 [0,1)；kb/07 §10）
++int dm_uipointer_back(void);                        // hle_uipointer.c: 菜单返回注入请求（提交点待接，先入标志）
++void dm_uipointer_frame(void);                      // hle_uipointer.c: UI 指针拍（kb/07 §10；DM_UIPOINTER=0 关，D3 构建 only）
 +void dm_hudmove_set_controller(int present);
 +void dm_hudmove_snapshot_status(int *state, float *frac);   // hle_hudmove.c: 快照进度（0 待/1 中/2 完成），前端浮窗轮询
 +void svc_guest_range(uint8_t **base, size_t *size);   // hle_svc.c: whole guest address-space block
@@ -2301,7 +2303,6 @@ index 3d309a1..ec44a2c 100644
 +    (void)infos; (void)capacity; return 0;
 +}
 diff --git a/dm/host/hle_hid.c b/dm/host/hle_hid.c
-index 561a3c8..4b99aa7 100644
 --- a/dm/host/hle_hid.c
 +++ b/dm/host/hle_hid.c
 @@ -1,8 +1,12 @@
@@ -2332,7 +2333,7 @@ index 561a3c8..4b99aa7 100644
  uint64_t dm_input_samples(void) { return (uint64_t)atomic_load(&g_sampling); }
  // DM_KEYS scripted input (for tests): "seconds:key[+key][~hold seconds][*count/interval seconds],...", e.g. "8:A,12:A,15:Down~0.5,16:A+B,40:A*80/2" (A every 2 s from 40 s on, 80 times). Key names A B X Y LS RS L R ZL ZR Plus Minus Left Up Right Down, left stick LLeft LUp LRight LDown;
  //   held 0.15 s by default, at most 1024 steps (counted after repeats are expanded). Goes through the controller path (dm_pad_set), ORed with keyboard / touch, neither overrides the other. Times are counted from host start.
-@@ -77,7 +88,34 @@ static uint32_t style_of(uint32_t id) { return id != connected_id() ? 0 : id ==
+@@ -77,7 +88,35 @@ static uint32_t style_of(uint32_t id) { return id != connected_id() ? 0 : id ==
  static int32_t ax(uint64_t v, int i) { return (int16_t)(v >> (16 * i)); }
  static int32_t pick(int32_t a, int32_t b) { return (a < 0 ? -a : a) >= (b < 0 ? -b : b) ? a : b; }   // whichever of the two paths is deflected more
  
@@ -2364,10 +2365,11 @@ index 561a3c8..4b99aa7 100644
 +    dm_hudmove_frame();   // HUD 移位节拍：与读手柄同帧（游戏线程；内部 5 秒节流）| same-frame tick as the controller read
 +    dm_uistate_frame();   // UI 状态采样诊断（内部 1 秒节流）| UI-state sampling probe (1 s throttle)
 +    dm_season_frame();    // 赛季轮换拍（hle_season.c：1Hz 重载 dm-season.tsv + 轮换/主题探针；D3 构建 only）| season rotation tick (1 s)
++    dm_uipointer_frame(); // UI 指针拍（hle_uipointer.c：壳触点队列消费 + console_ui_point 映射探针；kb/07 §10）| ui pointer tick
      memset(s, 0, sizeof *s);
      s->sampling = atomic_fetch_add(&g_sampling, 1) + 1;
      if (!(style_of(id) & style)) return;   // no controller of this id / style: attributes = 0
-@@ -94,7 +132,17 @@ static void fill(NpadState *s, uint32_t id, uint32_t style) {
+@@ -94,7 +133,17 @@ static void fill(NpadState *s, uint32_t id, uint32_t style) {
      if (s->rx > STICK_THRESH) b |= 1u << 22;
      if (s->ry < -STICK_THRESH) b |= 1u << 23;
      s->buttons = b;
@@ -2385,7 +2387,7 @@ index 561a3c8..4b99aa7 100644
  }
  // GetNpadStates(out, n, id): returns the number written, newest first. The host keeps no history: only 1 current state (callers handle the returned count)
  static int states(NpadState *out, int n, uint32_t id, uint32_t style) { if (n <= 0) return 0; fill(out, id, style); return 1; }
-@@ -121,21 +169,39 @@ HLE_FORCE("_ZN2nn3hid20StopLrAssignmentModeEv", "L/R 分配模式；宿主忽略
+@@ -121,21 +170,39 @@ HLE_FORCE("_ZN2nn3hid20StopLrAssignmentModeEv", "L/R 分配模式；宿主忽略
  // Controller applet (system UI): report "1 player, current controller selected" directly. ControllerSupportResultInfo = { int playerCount; uint32_t selectedId; }
  HLE_FORCE("_ZN2nn3hid21ShowControllerSupportEPNS0_27ControllerSupportResultInfoERKNS0_20ControllerSupportArgE", "手柄小程序；宿主直接报已选好",
            Result, h_hid_ShowCtrl, int32_t *info, const void *arg) { (void)arg; if (info) { info[0] = 1; info[1] = (int32_t)connected_id(); } return RES_OK; }
@@ -2434,7 +2436,7 @@ index 561a3c8..4b99aa7 100644
  // Mouse / keyboard: not connected
  HLE_FORCE("_ZN2nn3hid15InitializeMouseEv", "鼠标；宿主不提供", void, h_hid_InitMouse, void) {}
  HLE_FORCE("_ZN2nn3hid14GetMouseStatesEPNS0_10MouseStateEi", "鼠标状态：0 条", int, h_hid_MouseStates, void *out, int n) { (void)out; (void)n; return 0; }
-@@ -209,6 +275,11 @@ HLE_FORCE("_ZN2nn3hid32GetSixAxisSensorFusionParametersEPfS1_RKNS0_19SixAxisSens
+@@ -209,6 +276,11 @@ HLE_FORCE("_ZN2nn3hid32GetSixAxisSensorFusionParametersEPfS1_RKNS0_19SixAxisSens
  HLE_FORCE("_ZN2nn3hid32SetSixAxisSensorFusionParametersERKNS0_19SixAxisSensorHandleEff", "六轴融合参数；宿主忽略", void, h_hid_FusionSet, const uint32_t *h, float a, float b) { (void)h; (void)a; (void)b; }
  HLE_FORCE("_ZN2nn3hid34ResetSixAxisSensorFusionParametersERKNS0_19SixAxisSensorHandleE", "六轴融合参数；宿主忽略", void, h_hid_FusionReset, const uint32_t *h) { (void)h; }
  HLE_FORCE("_ZN2nn3hid41IsFirmwareUpdateAvailableForSixAxisSensorERKNS0_19SixAxisSensorHandleE", "六轴固件更新：无", unsigned, h_hid_SixFw, const uint32_t *h) { (void)h; return 0; }
@@ -4374,3 +4376,105 @@ index 837700c..0eec3b5 100644
      f.write(f'# BUILD_ID\t{BUILD_ID}\n')
      for off, oid, ow, why in obs: f.write(f'{off:#x}\t{oid}\t{ow}\t{why}\n')
  print(NAME, stats, 'cuts', len(cuts), 'obs', len(obs), 'patch', len(patch), 'PATCH_OFF', hex(PATCH_OFF), 'slot_refs', len(fix), 'gates', len(gates))
+diff --git a/dm/host/hle_uipointer.c b/dm/host/hle_uipointer.c
+new file mode 100644
+index 0000000..6b4c00b
+--- /dev/null
++++ b/dm/host/hle_uipointer.c
+@@ -0,0 +1,96 @@
++// UI 指针域（kb/07 §10；2026-11-10 安卓 libd3rewrite.so d3_ui_pointer_* 白盒化后自研落地）：
++//   壳把未命中控件的触点（phase 0=down 1=move 2=up 3=cancel，坐标 [0,1) 左上原点）经
++//   dm_uipointer_set 入环形队列；游戏线程拍（hle_hid.c fill()）dm_uipointer_frame 消费：
++//   调 main+0x34BBF0 把屏幕点映射成控制台 UI 点（安卓 d3_console_ui_point 同款转调），
++//   本轮只打 [uipointer] 探针日志（映射域/量纲真机校准用），不盲写游戏内存——按钮命中
++//   （d3_native_button_discover 移植）与世界域写入（d3_world_touch_event 链）在映射量纲
++//   校准后接入（kb/07 §10.5）。DM_UIPOINTER=0 关。
++// | UI pointer domain (kb/07 §10): shell feeds unclaimed touches into a ring queue; the game
++// | thread tick maps them via main+0x34BBF0 (same call the Android .so makes) and logs the
++// | mapped console-UI point for calibration. No blind game-memory writes this round.
++#include "dm.h"
++#include "hle.h"
++#include <stdatomic.h>
++#include <pthread.h>
++#include <stdlib.h>
++#include <string.h>
++
++#define UIPOINT_QN 64                    // 环形队列容量（60Hz 触点流足够）
++#define CONSOLE_UI_POINT_OFF 0x34bbf0UL  // 屏→控制台 UI 点（安卓 d3_console_ui_point 转调目标）
++
++typedef struct {
++    int phase, paired;
++    float x, y, bx, by;
++    long long ms;
++} uipoint_ev;
++
++static _Atomic int g_off;                // DM_UIPOINTER=0
++static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
++static uipoint_ev g_q[UIPOINT_QN];
++static int g_qh, g_qt;                   // 队头/队尾（满则丢最老）
++static _Atomic int g_back;               // dm_uipointer_back 注入的返回请求
++static int miss_logged;                  // 基址未找到只打一次
++
++// ---- 壳侧入口（任意线程）----
++void dm_uipointer_set(int phase, float x, float y, float bx, float by, long long ms, int paired) {
++    if (phase < 0 || phase > 3 || atomic_load(&g_off)) return;
++    uipoint_ev ev = { phase, paired, x, y, bx, by, ms };
++    pthread_mutex_lock(&g_mu);
++    g_q[g_qt] = ev;
++    g_qt = (g_qt + 1) % UIPOINT_QN;
++    if (g_qt == g_qh) g_qh = (g_qh + 1) % UIPOINT_QN;   // 满：丢最老
++    pthread_mutex_unlock(&g_mu);
++}
++
++int dm_uipointer_back(void) {
++    if (atomic_load(&g_off)) return 0;
++    atomic_store(&g_back, 1);
++    return 1;
++}
++
++// ---- 游戏线程拍 ----
++void dm_uipointer_frame(void) {
++    static int off = -1;
++    if (off < 0) {
++        const char *e = getenv("DM_UIPOINTER");
++        off = e && !strcmp(e, "0");
++        if (off) LOG("UI 指针：DM_UIPOINTER=0，触点通道关闭");
++        else LOG("UI 指针：探针模式（映射校准中；按钮命中/世界域写入待接入，kb/07 §10.5）");
++    }
++    atomic_store(&g_off, off);
++    if (off || strcmp(dm_main_build(), DM_D3_BUILD)) return;
++
++    static uint8_t *base;
++    if (!base) {
++        for (int i = 0; i < g_nmod; i++)
++            if (!strcmp(g_mod[i].name, "main") && !strcmp(g_mod[i].build_id, DM_D3_BUILD)) base = g_mod[i].base;
++        if (!base) {
++            if (!miss_logged) { miss_logged = 1; LOG("UI 指针：main 模块未就绪，等下一拍"); }
++            return;
++        }
++    }
++
++    // back 注入：安卓置 0x33e_b88 标志由 pump 消费；提交点未逆出前先记录（不瞎写）
++    if (atomic_exchange(&g_back, 0)) LOG("UI 指针：back 请求（注入点待接，kb/07 §10.5）");
++
++    // 每拍最多消费 4 个事件（60Hz 触点流 × 游戏帧率余量）
++    for (int n = 0; n < 4; n++) {
++        pthread_mutex_lock(&g_mu);
++        if (g_qh == g_qt) { pthread_mutex_unlock(&g_mu); break; }
++        uipoint_ev ev = g_q[g_qh];
++        g_qh = (g_qh + 1) % UIPOINT_QN;
++        pthread_mutex_unlock(&g_mu);
++
++        if (ev.phase == 3) { LOG("UI 指针：cancel"); continue; }
++        // 屏→控制台 UI 点：安卓 d3_console_ui_point 把 (base, w1, w2, x3) 重打包成
++        // fn(buf{w1,w2}, out) 双参调用——原样照抄。w1/w2 传归一化×1000 探针量纲，
++        // 真机对照 [uipointer] 输出落在游戏 UI 域（1280×720 语义）则确认。
++        int buf[2] = { (int)(ev.x * 1000.0f), (int)(ev.y * 1000.0f) };
++        uint64_t out[2] = { 0, 0 };
++        ((uint64_t(*)(int *, uint64_t *))(base + CONSOLE_UI_POINT_OFF))(buf, out);
++        LOG("UI 指针：phase=%d (%.3f,%.3f)%s in=(%d,%d) out=(%#llx,%#llx | %.2f,%.2f)",
++            ev.phase, (double)ev.x, (double)ev.y, ev.paired ? "+pair" : "", buf[0], buf[1],
++            (unsigned long long)out[0], (unsigned long long)out[1],
++            *(float *)out, *((float *)out + 1));
++    }
++}
