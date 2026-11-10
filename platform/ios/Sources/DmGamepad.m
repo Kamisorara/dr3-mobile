@@ -100,6 +100,10 @@ static CGPathRef piePath(CGPoint c, CGFloat r, float frac) {   // 冷却遮罩�
     DmTouchSlots _slots;      // 安卓 TouchSlots：raw 触点 → 稳定槽号（nativeTouch 契约）
     BOOL _world;
     long long _owner;          // 安卓 semanticOwner：(gen<<1)|world
+    BOOL _menuPrevValid; float _menuPrevX, _menuPrevY;   // 菜单光标：主指上一拍位置（速度=位移×增益）
+    int _aPulse;               // 交互 A 脉冲（拾取钮按下=攻击键短按，D3 主机版攻击键兼交互）
+    CATextLayer *_fpsLab; CADisplayLink *_link; int _fpsFrames; double _fpsLastT;   // M8 性能浮层（安卓 PerformanceOverlay 轻量版）
+}
     // 渲染（下标 = 布局控件下标 0..15 + SEASON_IDX）
     CGPoint _pos[17]; CGFloat _rad[17]; BOOL _built[17];
     CAShapeLayer *_fill[17], *_ro[17], *_rm[17], *_ri[17], *_tick[17], *_hi[17];
@@ -178,18 +182,56 @@ static void publish_semantic(D3TouchUI *s, const DmSemState *st, int cancelled,
         if (slot >= 0) { tslots[tn] = slot; txs[tn] = xs[i]; tys[tn] = ys[i]; tn++; }
     }
     dm_touch_set(tn, tslots, txs, tys);
+    // M1/M2（安卓 world pump 的壳侧功能等价）：
+    //   世界态 raw 触点 = 点地走路（触点相对角色锚的方向 → 虚拟左摇杆；摇杆占用时摇杆优先）；
+    //   菜单态 raw 触点拖动 = 右摇杆光标（位移×增益；游戏菜单=右摇杆驱动指针+确认）。
+    int32_t walk_x = 0, walk_y = 0, cur_x = 0, cur_y = 0;
+    if (n > 0) {
+        float vx = xs[0], vy = ys[0];
+        if (s->_world) {
+            if (!s->_route.input.sticks[0].owner) {
+                // 角色锚 = 游戏画布内 (0.5, 0.62)（D3 相机角色略低于屏中），换回视图归一域
+                float ax = (float)((f.origin.x + f.size.width * 0.50) / (double)s.bounds.size.width);
+                float ay = (float)((f.origin.y + f.size.height * 0.62) / (double)s.bounds.size.height);
+                float dx = vx - ax, dy = vy - ay;
+                float dist = sqrtf(dx * dx + dy * dy);
+                if (dist > 0.07f) {   // 7% 视图死区（防手抖）
+                    float m = dist > 0.22f ? 1.0f : dist / 0.22f;   // 22% 视图 = 满推
+                    walk_x = (int32_t)(dx / dist * m * 32767.0f);
+                    walk_y = (int32_t)(-dy / dist * m * 32767.0f);  // 上=正（hid 约定）
+                }
+            }
+        } else {
+            if (s->_menuPrevValid) {
+                float dx = vx - s->_menuPrevX, dy = vy - s->_menuPrevY;
+                float norm = sqrtf(dx * dx + dy * dy);
+                if (norm > 1e-5f) {
+                    float cap = 0.12f;   // 单拍位移上限（跳帧防护）
+                    if (norm > cap) { dx *= cap / norm; dy *= cap / norm; norm = cap; }
+                    float gain = 8.0f;   // 光标速度增益（真机可调）
+                    cur_x = (int32_t)(dx / cap * gain * 32767.0f);
+                    cur_y = (int32_t)(dy / cap * gain * 32767.0f);
+                }
+            }
+            s->_menuPrevX = vx; s->_menuPrevY = vy; s->_menuPrevValid = YES;
+        }
+    } else {
+        s->_menuPrevValid = NO;
+    }
     // ④ nativeControls（安卓语义态直发）
     uint64_t btn = 0;
     for (size_t i = 0; i < sizeof k_btn_map / sizeof k_btn_map[0]; i++)
         if (st->buttons & k_btn_map[i].mask) btn |= 1ull << k_btn_map[i].key;
-    // 闪避方向向量暂走 B_L 探测近似（安卓 nativeEnqueueEvade 未移植，kb/07 §12）
-    if (st->evadeN > 0) btn |= 1ull << B_L;
+    // 闪避 = L3 瞬时脉冲（evadeN 一次排空 → 一拍；安卓原生链走游戏内部闪避命令，
+    // 键位等价先行，真机校准后可换 kb/11 权威位）——DM_BTN_LS=bit4=硬件 0x10=l3
+    if (st->evadeN > 0) btn |= 1ull << B_LS;
     pthread_mutex_lock(&g_mu);
     g_sem_btn = btn;
     g_touch_btn = btn;
-    g_touch_lx = st->lx; g_touch_ly = st->ly;             // 上=正（安卓 centerY-y 同约定）
-    g_touch_rx = (int32_t)(s->_aimX * 32767.0f);          // 瞄准拖动 → 虚拟右摇杆（壳侧近似）
-    g_touch_ry = (int32_t)(-s->_aimY * 32767.0f);
+    g_touch_lx = st->lx ? st->lx : walk_x;                // 摇杆占用优先，否则点地走路
+    g_touch_ly = st->lx || st->ly ? st->ly : walk_y;
+    if (!s->_world) { g_touch_rx = cur_x; g_touch_ry = cur_y; }   // 菜单光标（世界态 rx/ry=瞄准，l_skills 管）
+    else { g_touch_rx = (int32_t)(s->_aimX * 32767.0f); g_touch_ry = (int32_t)(-s->_aimY * 32767.0f); }
     pthread_mutex_unlock(&g_mu);
     publish();
 }
@@ -242,7 +284,10 @@ static void l_tap(void *ctx, long long owner, int id, float x, float y,
     publish_semantic(s, snap, 0, NULL, NULL, NULL, 0, upMs);
 }
 static void l_pickup(void *ctx, long long token, int phase) {
-    (void)ctx; (void)token; (void)phase;   // token 恒 0（nativePickupState 未移植）——静默
+    (void)ctx; (void)token;
+    // M5：拾取钮 = 攻击键短按（D3 主机版攻击键兼交互/拾取；安卓原生链走 loot 查询+edge，
+    // 壳侧等价先行）。phase 0=按下沿 → 2 个 poll tick 的 A 脉冲（~100ms）。
+    if (phase == 0) { D3TouchUI *s = (__bridge D3TouchUI *)ctx; s->_aPulse = 2; }
 }
 
 // ---- 键位映射 ----
@@ -295,9 +340,30 @@ static void l_pickup(void *ctx, long long token, int phase) {
             [s modePoll];
         }];
         [[NSRunLoop mainRunLoop] addTimer:_poll forMode:NSRunLoopCommonModes];
+        // M8 性能浮层（安卓 PerformanceOverlay 轻量等价：fps + 帧时长，左上角常显）
+        _fpsLab = [CATextLayer layer];
+        _fpsLab.fontSize = 11; _fpsLab.alignmentMode = kCAAlignmentLeft;
+        _fpsLab.foregroundColor = [UIColor colorWithWhite:1 alpha:0.85].CGColor;
+        _fpsLab.contentsScale = [UIScreen mainScreen].scale ?: 2;
+        _fpsLab.frame = CGRectMake(8, 34, 160, 16);
+        [self.layer addSublayer:_fpsLab];
+        _fpsLastT = CACurrentMediaTime();
+        _link = [CADisplayLink displayLinkWithTarget:self selector:@selector(fpsFrame:)];
+        [_link addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
         NSLog(@"[dm] D3 触控面（安卓同构重写：worldControls 显隐 + Route 分配 + 未认领→菜单指针通道）");
     }
     return self;
+}
+
+- (void)fpsFrame:(CADisplayLink *)lk {   // M8：帧计数 → 0.5s 窗口 fps/帧时长
+    _fpsFrames++;
+    double now = lk.timestamp;
+    double dt = now - _fpsLastT;
+    if (dt >= 0.5) {
+        double fps = _fpsFrames / dt;
+        _fpsLab.string = [NSString stringWithFormat:@"%.0f fps  %.1f ms", fps, 1000.0 / fps];
+        _fpsFrames = 0; _fpsLastT = now;
+    }
 }
 
 // ---- 安卓 syncSemanticOwner：owner 变化 → 全释放 + 世界位切换 + rebuild（dispatch/began 时也调）----
@@ -310,10 +376,22 @@ static void l_pickup(void *ctx, long long token, int phase) {
     [self rebuild];
 }
 
-// ---- 安卓 modePoll 同款：owner 轮询 + 拾取态 ----
+// ---- 安卓 modePoll 同款：owner 轮询 + 拾取态 + 交互脉冲 ----
 - (void)modePoll {
     [self syncOwner];
-    dmroute_set_pickup(&_route, 0);   // 拾取 token 无来源（安卓 nativePickupState 下轮接）→ 拾取钮禁用
+    dmroute_set_pickup(&_route, 1);   // 拾取钮常启用（token 语义 = 安卓 loot 查询待接；按下→A 脉冲）
+    if (_aPulse == 2) {               // 拾取/交互：A 按下 tick → 释放 tick（~100ms 脉冲）
+        pthread_mutex_lock(&g_mu);
+        g_touch_btn |= 1ull << B_A;
+        pthread_mutex_unlock(&g_mu);
+        publish();
+    } else if (_aPulse == 1) {
+        pthread_mutex_lock(&g_mu);
+        g_touch_btn &= ~(1ull << B_A);
+        pthread_mutex_unlock(&g_mu);
+        publish();
+    }
+    if (_aPulse) _aPulse--;
 }
 
 // ---- 布局重建（安卓 rebuild）----
@@ -328,7 +406,7 @@ static void l_pickup(void *ctx, long long token, int phase) {
                        (int)safe.left, (int)safe.top, (int)safe.right, (int)safe.bottom,
                        _world, 0.0f, YES);
     dmroute_bind_controls(&_route, _lay.c, _lay.n);
-    dmroute_set_pickup(&_route, 0);
+    dmroute_set_pickup(&_route, 1);
     [CATransaction begin]; [CATransaction setDisableActions:YES];
     [self rebuildArt];
     [self placeJoy];
@@ -405,7 +483,7 @@ static void l_pickup(void *ctx, long long token, int phase) {
         DmSemControl *c = &_lay.c[i];
         _pos[i] = CGPointMake(c->x, c->y); _rad[i] = c->halfW; _built[i] = YES;
         _fill[i].hidden = NO;
-        [self buildVisual:i label:[D3TouchUI labelFor:c] icon:[D3TouchUI iconKeyFor:c] dim:c->kind == 4];
+        [self buildVisual:i label:[D3TouchUI labelFor:c] icon:[D3TouchUI iconKeyFor:c] dim:(c->kind == 4 && !c->enabled)];
     }
     for (int i = _lay.n; i < SEASON_IDX; i++) {   // 布局缩空（world=0）：旧 art 全隐
         _built[i] = NO;
