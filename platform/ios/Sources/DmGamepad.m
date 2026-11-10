@@ -103,7 +103,6 @@ static CGPathRef piePath(CGPoint c, CGFloat r, float frac) {   // 冷却遮罩�
     BOOL _menuPrevValid; float _menuPrevX, _menuPrevY;   // 菜单光标：主指上一拍位置（速度=位移×增益）
     int _aPulse;               // 交互 A 脉冲（拾取钮按下=攻击键短按，D3 主机版攻击键兼交互）
     CATextLayer *_fpsLab; CADisplayLink *_link; int _fpsFrames; double _fpsLastT;   // M8 性能浮层（安卓 PerformanceOverlay 轻量版）
-}
     // 渲染（下标 = 布局控件下标 0..15 + SEASON_IDX）
     CGPoint _pos[17]; CGFloat _rad[17]; BOOL _built[17];
     CAShapeLayer *_fill[17], *_ro[17], *_rm[17], *_ri[17], *_tick[17], *_hi[17];
