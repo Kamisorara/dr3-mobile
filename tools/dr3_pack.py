@@ -94,6 +94,8 @@ def main():
                         help='安装包名（缺省 = 正常构建的原包名；自签工具通常还会再改成你自己的）')
     parser.add_argument('--icon', default='', help='App 图标（正方形 jpg/png；缺省保留壳的占位图标）。游戏的原图标在 NCA 控制分区，'
                         '这里自备一张即可：做成 120px 与 152px 的松散 PNG 并改 Info.plist 指向它们（Windows 上没有 actool 重编 Assets.car）')
+    parser.add_argument('--skin', default='', help='可选触控皮肤 PNG 目录（安卓 ui/skin 同款 key 集：portal/evade/pickup/'
+                        'potion/inventory/menu/skill1..6/digit0..9/…），拷进 <App>.app/skin/；缺省 = 虚拟键矢量/文字降级')
     args = parser.parse_args()
     game = Path(args.game_dir); out = Path(args.out_ipa)
     check_env()
@@ -296,6 +298,19 @@ def main():
         say('图标已替换（%s）' % args.icon)
     else:
         say('未给 --icon：保留壳的占位图标（想要游戏图标，找一张方图加 --icon 路径 即可）')
+    if args.skin:
+        # 触控皮肤（安卓 ui/skin 同款 key 集的游戏衍生位图）：用户自备目录 → <App>.app/skin/（bundle 根，
+        # 与 CpResource folder reference 同落点；公开源码树不含，与 romfs 同纪律）
+        skin_src = Path(args.skin)
+        if not skin_src.is_dir(): die('--skin 目录不存在：%s' % skin_src)
+        dst = app / 'skin'; dst.mkdir(parents=True, exist_ok=True)
+        n = 0
+        for p in sorted(skin_src.glob('*.png')):
+            shutil.copyfile(p, dst / p.name); n += 1
+        if n == 0: die('--skin 目录里没有 PNG：%s' % skin_src)
+        say('触控皮肤 %d 张 → <App>.app/skin/' % n)
+    else:
+        say('未给 --skin：虚拟键走矢量/文字降级（想用安卓同款位图皮肤就加 --skin 目录）')
     (app / 'Info.plist').write_bytes(plistlib.dumps(plist, fmt=plistlib.FMT_BINARY))
     say('包名：%s' % args.bundle_id)
     # 核对：清单里的项都做进去了

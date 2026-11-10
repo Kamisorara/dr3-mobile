@@ -13,10 +13,15 @@
 - (instancetype)init {
     if ((self = [super init])) {
         _cache = [NSMutableDictionary new];
-        // 资源以 folder reference 打进包根 Gen/skin/（project.yml optional；没出素材就没有目录）
-        _dir = [NSBundle.mainBundle pathForResource:@"skin" ofType:nil inDirectory:@"Gen"];
+        // 资源以 folder reference 打进包根 skin/（CpResource 把 Gen/skin 落到 <App>.app/skin；
+        // project.yml optional，没出素材就没有目录）。Gen/skin 作手工装配布局的兜底。
+        NSString *root = NSBundle.mainBundle.bundlePath;
+        for (NSString *cand in @[ @"skin", @"Gen/skin" ]) {
+            NSString *p = [root stringByAppendingPathComponent:cand];
+            if ([[NSFileManager defaultManager] fileExistsAtPath:p]) { _dir = p; break; }
+        }
         if (_dir) NSLog(@"[dm] 触控皮肤目录 %@", _dir);
-        else NSLog(@"[dm] 无 Gen/skin 触控皮肤（矢量/文字降级）");
+        else NSLog(@"[dm] 无 skin 触控皮肤（矢量/文字降级）");
     }
     return self;
 }

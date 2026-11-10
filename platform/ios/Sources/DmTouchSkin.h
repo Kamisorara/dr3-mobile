@@ -1,5 +1,6 @@
-// 触控面 PNG 皮肤（安卓 ControlSkin 同款 key 集）：从 bundle Gen/skin/ 加载（optional 资源，
-// 出包时用户提供——公开源码树不含游戏衍生位图，与 Gen/romfs 同纪律）。缺失全部降级（矢量/文字）。
+// 触控面 PNG 皮肤（安卓 ControlSkin 同款 key 集）：从 bundle 根 skin/ 加载（CpResource 落点，
+// Gen/skin 兜底；optional 资源，出包时由 dr3_pack.py --skin / build_ios.py --skin 提供——
+// 公开源码树不含游戏衍生位图，与 Gen/romfs 同纪律）。缺失全部降级（矢量/文字）。
 // | Touch-skin PNG loader (Android ControlSkin keys): loads from bundle Gen/skin/,
 // | an optional user-provided resource folder; every lookup degrades gracefully.
 #import <UIKit/UIKit.h>
