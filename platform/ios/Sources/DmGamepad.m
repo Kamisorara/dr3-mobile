@@ -14,9 +14,10 @@
 #include "dm_input.h"
 #include "game_profile.h"
 #include "DmTouchControlArt.h"
+#import "SeasonPanel.h"
 
 enum { B_A = 0, B_B, B_X, B_Y, B_LS, B_RS, B_L, B_R, B_ZL, B_ZR, B_PLUS, B_MINUS, B_LEFT, B_UP, B_RIGHT, B_DOWN, B_N };
-enum { C_NONE = 0, C_STICK, C_DPAD, C_FACE, C_BTN, C_SWAP };   // which control a touch holds
+enum { C_NONE = 0, C_STICK, C_DPAD, C_FACE, C_BTN, C_SWAP, C_SEASON };   // which control a touch holds
 
 static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
 static uint64_t g_touch_btn;
@@ -39,6 +40,7 @@ static const CGFloat
     K_FACE_GAP = 50, K_FACE_R = 27,                 // diamond: key distance from the centre, key radius
     K_PILL_DX = 52, K_PILL_Y = 22, K_PILL_W = 50, K_PILL_H = 28,   // − / +: centre from the screen's midline (the middle goes to the layout button) and from the top, size
     K_SWAP_R = 15,                                  // layout button: top centre, level with − / +
+    K_SEASON_DX = 96, K_SEASON_R = 15,              // season button: right of the + pill, level with the top row
     K_STICK_X = 81, K_STICK_R = 77, K_KNOB_R = 30,  // left stick: mirrors the diamond, the ring as large as the whole diamond (key distance + key radius), the knob a little larger than a diamond key
     K_STICK_GRAB = 1.4,                             // how near the ring centre a touch-down grabs a stick (times the ring radius)
     K_FULL = 0.8,                                   // full tilt at this fraction of the ring radius (the knob still travels to the ring edge)
@@ -67,6 +69,7 @@ static __weak DmGamepad *g_view;
     UIImage *_socketArt[2], *_baseArt[2][2], *_thumbArt[2][2];
     CGFloat _artUnit, _artScale;
     CAShapeLayer *_swap; CATextLayer *_swapLabel; BOOL _swapHeld;
+    CAShapeLayer *_season; CATextLayer *_seasonLabel;
     BOOL _sticksShown;                             // a stick was held at the last refresh
     BOOL _full;                                    // the 3D layout is current
 }
@@ -117,6 +120,7 @@ static BOOL fullOnly(int b) { return b == B_LS || b == B_RS || b >= B_LEFT; }   
             if (names[b]) _label[b] = label(_key[b], names[b]);   // the D-pad arms carry no label
         }
         _swap = shape(self.layer); _swapLabel = label(_swap, @"");
+        _season = shape(self.layer); _seasonLabel = label(_season, @"赛");
         NSNumber *saved = [NSUserDefaults.standardUserDefaults objectForKey:k_layout_key];
         _full = saved ? saved.boolValue : DM_GAME_PAD_FULL;
         [self applyLayout];
@@ -163,6 +167,7 @@ static BOOL isClick(int b) { return b == B_LS || b == B_RS; }
     CGPoint c = CGPointMake(CGRectGetMidX(s) + (b == B_PLUS ? K_PILL_DX : -K_PILL_DX) * u, CGRectGetMinY(s) + K_PILL_Y * u);   // − on the left, + on the right
     return CGRectMake(c.x - w / 2, c.y - h / 2, w, h); }
 - (CGPoint)swapCenter { CGRect s = self.safe; return CGPointMake(CGRectGetMidX(s), CGRectGetMinY(s) + K_PILL_Y * self.u); }
+- (CGPoint)seasonCenter { CGRect s = self.safe; return CGPointMake(CGRectGetMidX(s) + K_SEASON_DX * self.u, CGRectGetMinY(s) + K_PILL_Y * self.u); }
 
 static CGFloat dist(CGPoint a, CGPoint b) { return hypot(a.x - b.x, a.y - b.y); }
 - (int)btnAt:(CGPoint)p {   // locked keys (tested on touch-down only, then locked)
@@ -176,6 +181,7 @@ static CGFloat dist(CGPoint a, CGPoint b) { return hypot(a.x - b.x, a.y - b.y); 
     return -1;
 }
 - (BOOL)inSwap:(CGPoint)p { return dist(p, self.swapCenter) <= K_SWAP_R * self.u * 1.6; }
+- (BOOL)inSeason:(CGPoint)p { return dist(p, self.seasonCenter) <= K_SEASON_R * self.u * 1.6; }
 - (uint64_t)faceAt:(CGPoint)p {   // keys under the finger in the diamond (between two keys both count)
     uint64_t m = 0; CGFloat r = self.faceR * 1.25;
     for (int b = B_A; b <= B_Y; b++) if (dist(p, [self facePos:b]) <= r) m |= 1ull << b;
@@ -227,6 +233,7 @@ static CGFloat dist(CGPoint a, CGPoint b) { return hypot(a.x - b.x, a.y - b.y); 
     for (UITouch *t in ts) {
         CGPoint p = [t locationInView:self]; int hit = [self btnAt:p];
         if (hit >= 0) { [_owner setObject:@(C_BTN | (uint64_t)hit << 8) forKey:t]; continue; }
+        if ([self inSeason:p]) { [_owner setObject:@(C_SEASON) forKey:t]; continue; }
         if ([self inSwap:p]) { [_owner setObject:@(C_SWAP) forKey:t]; continue; }
         // diamond, D-pad, the two sticks: take the one with the smallest distance / grab radius, if it is <= 1
         CGFloat best = 1; int kind = C_NONE, idx = 0;
@@ -249,13 +256,15 @@ static CGFloat dist(CGPoint a, CGPoint b) { return hypot(a.x - b.x, a.y - b.y); 
     [self recompute];
 }
 - (void)endTouches:(NSSet<UITouch *> *)ts tapped:(BOOL)ended {
-    BOOL swap = NO;
+    BOOL swap = NO, season = NO;
     for (UITouch *t in ts) {
         if (ended && ([_owner objectForKey:t].unsignedLongLongValue & 0xff) == C_SWAP && [self inSwap:[t locationInView:self]]) swap = YES;   // layout button: counts only when released on the button
+        if (ended && ([_owner objectForKey:t].unsignedLongLongValue & 0xff) == C_SEASON && [self inSeason:[t locationInView:self]]) season = YES;   // season panel: same release-on-button rule
         [_owner removeObjectForKey:t]; [_faceOf removeObjectForKey:t]; for (int i = 0; i < 2; i++) if (t == _stick[i]) _stick[i] = nil;
     }
     [self recompute];
     if (swap) [self setFull:!_full];
+    if (season) [SeasonPanel presentInView:self.window];
 }
 - (void)touchesEnded:(NSSet<UITouch *> *)ts withEvent:(UIEvent *)e { [self endTouches:ts tapped:YES]; }
 - (void)touchesCancelled:(NSSet<UITouch *> *)ts withEvent:(UIEvent *)e { [self endTouches:ts tapped:NO]; }
@@ -340,6 +349,7 @@ static UIImage *controlImage(CGSize size,CGFloat scale,void (^draw)(CGContextRef
     static const struct { int b; CGFloat angle; } arms[] = {{B_UP, 0}, {B_RIGHT, M_PI_2}, {B_DOWN, M_PI}, {B_LEFT, -M_PI_2}};   // the same arm in 90° steps
     for (int i = 0; i < 4; i++) setPath(_key[arms[i].b], armPath(self.dpadCenter, self.dpadR, K_ARM_W * u, K_ARM_IN * u, arms[i].angle, 6 * u));
     CGPoint sc = self.swapCenter; setPath(_swap, circlePath(sc, K_SWAP_R * u)); placeLabel(_swapLabel, sc, 12 * u);
+    CGPoint sec = self.seasonCenter; setPath(_season, circlePath(sec, K_SEASON_R * u)); placeLabel(_seasonLabel, sec, 13 * u);   // 赛季设置入口（非 Npad 键）
     for (int i = 0; i < 2; i++) {
         CGFloat radius=[self stickR:i];_ring[i].bounds=CGRectMake(0,0,2*radius,2*radius);_ring[i].position=[self stickHome:i];_ring[i].contentsScale=_artScale;
         CGFloat k = (i ? K_RKNOB_R : K_KNOB_R) * u; _knob[i].bounds = CGRectMake(0, 0, 2 * k, 2 * k);
@@ -357,6 +367,8 @@ static UIImage *controlImage(CGSize size,CGFloat scale,void (^draw)(CGContextRef
         else _key[b].fillColor = (on ? k_on : k_idle).CGColor;
         _label[b].foregroundColor = (on ? k_textOn : k_text).CGColor; }
     _swap.fillColor = (_swapHeld ? k_on : k_idle).CGColor; _swapLabel.foregroundColor = (_swapHeld ? k_textOn : k_text).CGColor;
+    _seasonLabel.contentsScale = _artScale;
+    _season.fillColor = k_idle.CGColor; _seasonLabel.foregroundColor = k_text.CGColor;
     for (int i = 0; i < 2; i++) {
         CGPoint h = [self stickHome:i], o = [self knobOffset:i];
         BOOL held=_stick[i]!=nil;

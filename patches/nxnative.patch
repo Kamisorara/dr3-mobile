@@ -1610,18 +1610,246 @@ index 31b4420..51cec58 100644
 -	clang $(CFLAGS) -I../gfx/nvn/include -I$(dir $(GAME_H)) -I$(GAME_DIR) -I$(VPX) -I../third_party/stb_vorbis -fobjc-arc -o $@ $(SRC) $(GFX) $(VPX_LIB) -framework Cocoa -framework QuartzCore -framework Metal -framework AudioToolbox -framework ImageIO -framework UniformTypeIdentifiers
 +dmhost: $(SRC) $(GFX) dm.h hle.h dm_input.h front.h touch_mac.h ../ios/Sources/dm_touch_controls.[ch] $(GFX_H) controller_effects.h lan_native.h dm_d3_graphics.h $(GAME_H) $(GAME_DIR)/dmsh_chain.h $(GAME_STAMP) $(VPX_LIB)
 +	clang $(CFLAGS) -I../gfx/nvn/include -I$(dir $(GAME_H)) -I$(GAME_DIR) -I$(VPX) -I../third_party/stb_vorbis -fobjc-arc -o $@ $(SRC) $(GFX) $(VPX_LIB) -framework Cocoa -framework GameController -framework CoreHaptics -framework QuartzCore -framework Metal -framework MetalFX -framework AudioToolbox -framework ImageIO -framework UniformTypeIdentifiers
+diff --git a/dm/host/controller_effects.h b/dm/host/controller_effects.h
+new file mode 100644
+index 0000000..9c79feb
+--- /dev/null
++++ b/dm/host/controller_effects.h
+@@ -0,0 +1,59 @@
++// Shared Mac/iOS physical-controller effect ABI. No virtual actuators or motion.
++#pragma once
++#include <stdint.h>
++#include <math.h>
++
++typedef struct { float amp_low,freq_low,amp_high,freq_high; } dm_vibration_value;
++typedef struct { float intensity,sharpness; } dm_haptic_envelope;
++enum { DM_RUMBLE_LEFT=1,DM_RUMBLE_RIGHT=2,DM_RUMBLE_COMBINED=4 };
++_Static_assert(sizeof(dm_vibration_value)==16,"Nintendo vibration value ABI");
++
++static inline float dm_effect_unit(float value) {
++    return !isfinite(value) || value<=0?0:value>1?1:value;
++}
++static inline dm_vibration_value dm_vibration_sanitize(dm_vibration_value v) {
++    v.amp_low=dm_effect_unit(v.amp_low);v.amp_high=dm_effect_unit(v.amp_high);
++    if(!isfinite(v.freq_low) || v.freq_low<=0){v.freq_low=0;v.amp_low=0;}
++    if(!isfinite(v.freq_high) || v.freq_high<=0){v.freq_high=0;v.amp_high=0;}
++    if(v.freq_low>1250)v.freq_low=1250;if(v.freq_high>1250)v.freq_high=1250;
++    return v;
++}
++static inline dm_haptic_envelope dm_vibration_envelope(dm_vibration_value input) {
++    dm_vibration_value v=dm_vibration_sanitize(input);float total=v.amp_low+v.amp_high;
++    float frequency=total>0?(v.freq_low*v.amp_low+v.freq_high*v.amp_high)/total:40;
++    float sharpness=frequency>0?log2f(frequency/40.0f)/5.0f:0;
++    return (dm_haptic_envelope){fmaxf(v.amp_low,v.amp_high),dm_effect_unit(sharpness)};
++}
++static inline int dm_rumble_device_supported(unsigned capabilities,unsigned device) {
++    return device<2 && ((capabilities&(1u<<device)) || (device==0 && (capabilities&DM_RUMBLE_COMBINED)));
++}
++static inline uint32_t dm_rumble_handle(unsigned style,uint32_t player,unsigned device) {
++    // Verified in D3 SDK 8.2 detail::GetVibrationDeviceHandles: full=3, handheld=4.
++    unsigned index=style==1?3:style==2?4:0;
++    return index && player<=0x20 && device<2 ? index|(player<<8)|(device<<16):0;
++}
++static inline int dm_rumble_decode(uint32_t handle,uint32_t player) {
++    unsigned style=handle&255,device=(handle>>16)&255;
++    return !(handle>>24) && (style==3 || style==4) && ((handle>>8)&255)==player && device<2 ? (int)device:-1;
++}
++
++#if defined(DM_CONTROLLER_EFFECTS_OPTIONAL) && !defined(DM_CONTROLLER_EFFECTS_TEST)
++#define DM_EFFECT_API __attribute__((weak_import))
++#else
++#define DM_EFFECT_API
++#endif
++#ifdef __cplusplus
++extern "C" {
++#endif
++unsigned dm_controller_rumble_capabilities(void) DM_EFFECT_API;
++unsigned dm_controller_rumble_cached_capabilities(void) DM_EFFECT_API;
++int dm_controller_rumble_permitted(void) DM_EFFECT_API;
++int dm_controller_rumble_initialize(unsigned device) DM_EFFECT_API;
++int dm_controller_rumble_send(unsigned device,const dm_vibration_value *value) DM_EFFECT_API;
++int dm_controller_rumble_applied(unsigned device,dm_vibration_value *value) DM_EFFECT_API;
++void dm_controller_effects_set_active(int active) DM_EFFECT_API;
++void dm_controller_effects_stop(void) DM_EFFECT_API;
++#ifdef __cplusplus
++}
++#endif
++#undef DM_EFFECT_API
+diff --git a/dm/host/controller_effects.m b/dm/host/controller_effects.m
+new file mode 100644
+index 0000000..b39a06b
+--- /dev/null
++++ b/dm/host/controller_effects.m
+@@ -0,0 +1,153 @@
++// Core Haptics controller output, shared by Mac and iOS. The two NVN bands are
++// translated to intensity/sharpness; this is not an exact HD-rumble waveform.
++#import <GameController/GameController.h>
++#import <CoreHaptics/CoreHaptics.h>
++#include <TargetConditionals.h>
++#include <stdatomic.h>
++#include <stdio.h>
++#include <string.h>
++#include "controller_effects.h"
++
++@interface DMRumbleChannel:NSObject
++@property(nonatomic,strong) CHHapticEngine *engine;
++@property(nonatomic,strong) id<CHHapticPatternPlayer> player;
++@property(nonatomic) BOOL started;
++@property(nonatomic) BOOL failed;
++@property(nonatomic) dm_vibration_value applied;
++@end
++@implementation DMRumbleChannel @end
++
++static dispatch_queue_t queue;
++static void *queueKey=&queueKey;
++static GCController *controller;
++static DMRumbleChannel *channels[2];
++static _Atomic unsigned capabilities;
++static _Atomic int active=1;
++static _Atomic unsigned generation;
++static unsigned physicalCapabilities;
++static unsigned failures;
++static void effect_error(const char *operation,NSError *error) {
++    if(failures++<32)fprintf(stderr,"[dm] [controller-effects] %s: %s\n",operation,error.localizedDescription.UTF8String?:"unavailable");
++}
++static void stop_channel(DMRumbleChannel *channel) {
++    if(!channel)return;
++    if(channel.started)[channel.player stopAtTime:CHHapticTimeImmediate error:nil];
++    channel.started=NO;channel.applied=(dm_vibration_value){0};
++}
++static void stop_all(void) {
++    for(unsigned i=0;i<2;i++)stop_channel(channels[i]);
++}
++static void disable_channel(unsigned side) {
++    stop_channel(channels[side]);channels[side].failed=YES;
++    unsigned remove=side?DM_RUMBLE_RIGHT:(physicalCapabilities&DM_RUMBLE_COMBINED)?DM_RUMBLE_COMBINED:DM_RUMBLE_LEFT;
++    atomic_fetch_and(&capabilities,~remove);
++}
++static void refresh(void) {
++    NSArray<GCController *> *attached=[GCController controllers];
++    if(controller && [attached containsObject:controller] && controller.haptics)return;
++    stop_all();for(unsigned i=0;i<2;i++){[channels[i].engine stopWithCompletionHandler:nil];channels[i]=nil;}
++    controller=nil;physicalCapabilities=0;atomic_store(&capabilities,0);atomic_fetch_add(&generation,1);
++    for(GCController *candidate in attached)if(candidate.extendedGamepad && candidate.haptics){controller=candidate;break;}
++    if(!controller)return;
++    NSSet<GCHapticsLocality> *localities=controller.haptics.supportedLocalities;
++    unsigned bits=0;
++    for(unsigned side=0;side<2;side++) {
++        GCHapticsLocality locality=side?GCHapticsLocalityRightHandle:GCHapticsLocalityLeftHandle;
++        if(![localities containsObject:locality])continue;
++        CHHapticEngine *engine=[controller.haptics createEngineWithLocality:locality];
++        if(!engine)continue;
++        DMRumbleChannel *channel=[DMRumbleChannel new];channel.engine=engine;channels[side]=channel;bits|=1u<<side;
++    }
++    if(!bits) {
++        CHHapticEngine *engine=[controller.haptics createEngineWithLocality:GCHapticsLocalityDefault];
++        if(engine){channels[0]=[DMRumbleChannel new];channels[0].engine=engine;bits=DM_RUMBLE_COMBINED;}
++    }
++    for(unsigned side=0;side<2;side++)if(channels[side]) {
++        __weak DMRumbleChannel *weak=channels[side];
++        channels[side].engine.stoppedHandler=^(CHHapticEngineStoppedReason reason){
++            (void)reason;dispatch_async(queue,^{DMRumbleChannel *c=weak;stop_channel(c);c.player=nil;});
++        };
++        channels[side].engine.resetHandler=^{dispatch_async(queue,^{DMRumbleChannel *c=weak;stop_channel(c);c.player=nil;});};
++    }
++    physicalCapabilities=bits;atomic_store(&capabilities,bits);
++    fprintf(stderr,"[dm] [controller-effects] physical controller haptics capabilities=%u (bands approximated, motion unavailable)\n",bits);
++}
++static void initialized(void) {
++    static dispatch_once_t once;dispatch_once(&once,^{
++        dispatch_queue_attr_t attributes=dispatch_queue_attr_make_with_autorelease_frequency(DISPATCH_QUEUE_SERIAL,DISPATCH_AUTORELEASE_FREQUENCY_WORK_ITEM);
++        queue=dispatch_queue_create("enginefuture.controller-effects",attributes);
++        dispatch_queue_set_specific(queue,queueKey,queueKey,NULL);
++        NSNotificationCenter *notifications=NSNotificationCenter.defaultCenter;
++        for(NSString *name in @[GCControllerDidConnectNotification,GCControllerDidDisconnectNotification])
++            [notifications addObserverForName:name object:nil queue:nil usingBlock:^(NSNotification *n){(void)n;dispatch_async(queue,^{refresh();});}];
++#if TARGET_OS_IPHONE
++        NSArray *off=@[@"UIApplicationWillResignActiveNotification",@"UIApplicationDidEnterBackgroundNotification"];
++        NSArray *on=@[@"UIApplicationDidBecomeActiveNotification"];
++#else
++        NSArray *off=@[@"NSApplicationDidResignActiveNotification",@"NSWindowDidResignKeyNotification"];
++        NSArray *on=@[@"NSApplicationDidBecomeActiveNotification",@"NSWindowDidBecomeKeyNotification"];
++#endif
++        for(NSString *name in off)[notifications addObserverForName:name object:nil queue:nil usingBlock:^(NSNotification *n){(void)n;dm_controller_effects_set_active(0);}];
++        for(NSString *name in on)[notifications addObserverForName:name object:nil queue:nil usingBlock:^(NSNotification *n){(void)n;dm_controller_effects_set_active(1);}];
++    });
++}
++static void synchronous(dispatch_block_t block) {
++    initialized();if(dispatch_get_specific(queueKey))block();else dispatch_sync(queue,block);
++}
++static int start_channel(unsigned side) {
++    DMRumbleChannel *channel=side<2?channels[side]:nil;
++    if(!channel || channel.failed || !atomic_load(&active))return 0;
++    if(channel.started)return 1;
++    NSError *error=nil;
++    if(![channel.engine startAndReturnError:&error]){effect_error("engine start",error);disable_channel(side);return 0;}
++    return 1;
++}
++unsigned dm_controller_rumble_capabilities(void) {
++    synchronous(^{refresh();});return atomic_load(&capabilities);
++}
++unsigned dm_controller_rumble_cached_capabilities(void) { return atomic_load(&capabilities); }
++int dm_controller_rumble_permitted(void) {
++    return atomic_load(&active) && dm_controller_rumble_capabilities()!=0;
++}
++int dm_controller_rumble_initialize(unsigned device) {
++    __block int result=0;synchronous(^{refresh();if(dm_rumble_device_supported(atomic_load(&capabilities),device))result=start_channel(device);});return result;
++}
++int dm_controller_rumble_send(unsigned device,const dm_vibration_value *input) {
++    if(!input || !dm_rumble_device_supported(atomic_load(&capabilities),device) || !atomic_load(&active))return 0;
++    dm_vibration_value value;memcpy(&value,input,sizeof value);value=dm_vibration_sanitize(value);
++    unsigned epoch=atomic_load(&generation);
++    dispatch_async(queue,^{
++        if(!atomic_load(&active) || epoch!=atomic_load(&generation))return;
++        DMRumbleChannel *channel=channels[device];dm_haptic_envelope envelope=dm_vibration_envelope(value);
++        if(!channel)return;
++        if(envelope.intensity==0){stop_channel(channel);return;}
++        dm_vibration_value previous=channel.applied;
++        if(channel.started && !memcmp(&previous,&value,sizeof value))return;
++        if(!start_channel(device))return;
++        NSError *error=nil;
++        if(!channel.player) {
++            CHHapticEvent *event=[[CHHapticEvent alloc] initWithEventType:CHHapticEventTypeHapticContinuous parameters:@[
++                [[CHHapticEventParameter alloc] initWithParameterID:CHHapticEventParameterIDHapticIntensity value:1],
++                [[CHHapticEventParameter alloc] initWithParameterID:CHHapticEventParameterIDHapticSharpness value:0]] relativeTime:0 duration:GCHapticDurationInfinite];
++            CHHapticPattern *pattern=[[CHHapticPattern alloc] initWithEvents:@[event] parameters:@[] error:&error];
++            channel.player=pattern?[channel.engine createPlayerWithPattern:pattern error:&error]:nil;
++        }
++        if(!channel.player){effect_error("create player",error);disable_channel(device);return;}
++        NSArray *parameters=@[
++            [[CHHapticDynamicParameter alloc] initWithParameterID:CHHapticDynamicParameterIDHapticIntensityControl value:envelope.intensity relativeTime:0],
++            [[CHHapticDynamicParameter alloc] initWithParameterID:CHHapticDynamicParameterIDHapticSharpnessControl value:envelope.sharpness relativeTime:0]];
++        if(![channel.player sendParameters:parameters atTime:CHHapticTimeImmediate error:&error] ||
++           (!channel.started && ![channel.player startAtTime:CHHapticTimeImmediate error:&error])) {
++            effect_error("apply haptic envelope",error);disable_channel(device);return;
++        }
++        channel.started=YES;channel.applied=value;
++    });return 1;
++}
++int dm_controller_rumble_applied(unsigned device,dm_vibration_value *value) {
++    if(!value)return 0;memset(value,0,sizeof *value);__block int result=0;
++    synchronous(^{refresh();if(device<2 && channels[device].started){*value=channels[device].applied;result=1;}});return result;
++}
++void dm_controller_effects_set_active(int enabled) {
++    initialized();atomic_fetch_add(&generation,1);atomic_store(&active,enabled!=0);dispatch_async(queue,^{if(!enabled)stop_all();else{for(unsigned i=0;i<2;i++)channels[i].failed=NO;atomic_store(&capabilities,physicalCapabilities);refresh();}});
++}
++void dm_controller_effects_stop(void) {initialized();atomic_fetch_add(&generation,1);synchronous(^{stop_all();});}
 diff --git a/dm/host/dm.h b/dm/host/dm.h
-index fda33ac..b8e3445 100644
+index fda33ac..fdc8f00 100644
 --- a/dm/host/dm.h
 +++ b/dm/host/dm.h
-@@ -46,6 +46,7 @@ extern module_t g_mod[MAX_MOD];
+@@ -46,7 +46,11 @@ extern module_t g_mod[MAX_MOD];
  extern int g_nmod;
  // main's build ID (empty if none). DM_D2R_BUILD = the D2R build that the code inherited from d2r-mobile belongs to: code with fixed D2R addresses or that edits D2R saves runs only on it
  #define DM_D2R_BUILD "db0507f36b84200ac05f75d76ed5026f"
 +#define DM_D3_BUILD "2607a74f5df7754cc0357b5df7e49693"   // Diablo III 2.7.7: parameter slots (KRES*/KASPECT) feed the camera directly
  static inline const char *dm_main_build(void) { for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) return g_mod[i].build_id; return ""; }
++// 赛季轮换（hle_season.c）：svc 0x90 英雄赛季门处理器（patch_nso D3 块发射于 0x4b1b0 入口）+ 每控制器读 1Hz 拍（hle_hid.c fill）
++int dm_season_svc(int num, uint64_t *regs);
++void dm_season_frame(void);
  // Four thread-local slots: K18 = the Switch's x18, KTLS = tpidr_el0, KTLR = tpidrro_el0 (ThreadLocalRegion), KGATE = host gate entry; the actual key numbers are written into the key page by the loader
  extern pthread_key_t g_key18, g_keytls, g_keytlr, g_keygate;
+ extern pthread_key_t g_keyres[2], g_keyaspect, g_keyaspectui;
 diff --git a/dm/host/dm_d3_graphics.h b/dm/host/dm_d3_graphics.h
 new file mode 100644
 index 0000000..c6da2da
@@ -1787,6 +2015,140 @@ index c7559ca..1cbe064 100644
          // Guest thread: 64 MiB stack (the Switch main thread stack is specified by npdm; the host gives plenty)
          static guest_arg ga; ga.fn = guest;
          pthread_attr_t a; pthread_attr_init(&a); pthread_attr_setstacksize(&a, 64u << 20);
+diff --git a/dm/host/gamepad_mac.m b/dm/host/gamepad_mac.m
+new file mode 100644
+index 0000000..e6f7ab9
+--- /dev/null
++++ b/dm/host/gamepad_mac.m
+@@ -0,0 +1,128 @@
++// Adapted from Blade II Mobile gamepad_generic.m (MIT); see third_party/LICENSE.blade2.
++// Nintendo position mapping, separate physical input, hot plug and focus management.
++#import <GameController/GameController.h>
++#include <TargetConditionals.h>
++#include <math.h>
++#include <string.h>
++#include "dm.h"
++#include "dm_input.h"
++
++enum { NSLOT = 8 };
++static struct { const void *who; uint64_t b; int32_t ax[4]; } g_s[NSLOT];
++static int g_active = 1;
++static int g_count;                            // number of attached extended gamepads
++static void (*g_on_present)(int present);
++static int g_face_letter = -1; static float g_dead = -1;
++
++static int slot_of(const void *who, int make) {
++    int fr = -1;
++    for (int i = 0; i < NSLOT; i++) { if (g_s[i].who == who) return i; if (fr < 0 && !g_s[i].who) fr = i; }
++    if (make && fr >= 0) { memset(&g_s[fr], 0, sizeof g_s[fr]); g_s[fr].who = who; return fr; }
++    return -1;
++}
++// Optional bounded publication trace. Uses the same clock as the guest HID receipt.
++static void trace(uint64_t buttons, const int32_t axes[4]) {
++    static FILE *file; static int initialized, count;
++    static uint64_t last_buttons, last_flush;
++    if (!initialized) {
++        initialized = 1; const char *path = getenv("DM_PAD_EVENT_LOG");
++        if (path && *path) { file = fopen(path, "w"); if (!file) LOG("Cannot open gamepad event log: %s", path); }
++    }
++    if (!file || count >= 65536) return;
++    uint64_t time = now_ns();
++    fprintf(file, "{\"time_ns\":%llu,\"buttons\":%llu,\"axes\":[%d,%d,%d,%d],\"active\":%d,\"controllers\":%d,\"read_samples\":%llu}\n",
++        (unsigned long long)time, (unsigned long long)buttons, axes[0], axes[1], axes[2], axes[3],
++        g_active, g_count, (unsigned long long)dm_input_samples());
++    if (++count == 65536) fprintf(file, "{\"limit_reached\":65536}\n");
++    if (buttons != last_buttons || (!axes[0] && !axes[1] && !axes[2] && !axes[3]) || !g_active || time - last_flush >= 1000000000ull || count == 65536) { fflush(file); last_flush = time; }
++    last_buttons = buttons;
++}
++// Merge all controllers and hand the result to the host
++static void apply(void) {
++    uint64_t b = 0; int32_t ax[4] = {0}; double best[2] = {0};
++    for (int i = 0; i < NSLOT; i++) {
++        if (!g_s[i].who) continue; b |= g_s[i].b;
++        for (int k = 0; k < 2; k++) { double m = hypot(g_s[i].ax[2 * k], g_s[i].ax[2 * k + 1]); if (m > best[k]) { best[k] = m; ax[2 * k] = g_s[i].ax[2 * k]; ax[2 * k + 1] = g_s[i].ax[2 * k + 1]; } }
++    }
++    dm_pad_set(b, ax[0], ax[1], ax[2], ax[3]);
++    trace(b, ax);
++}
++// Stick: radial dead zone, then rescale to full range
++static void stick(float x, float y, int32_t *ox, int32_t *oy) {
++    if (g_dead < 0) { const char *e = getenv("DM_PAD_DEADZONE"); g_dead = e ? (float)atof(e) : 0.12f; if (!isfinite(g_dead) || g_dead < 0 || g_dead > 0.9f) g_dead = 0.12f; }
++    if (!isfinite(x) || !isfinite(y)) { *ox = *oy = 0; return; }
++    float m = hypotf(x, y);
++    if (m <= g_dead) { *ox = *oy = 0; return; }
++    float k = (fminf(m, 1.0f) - g_dead) / (1.0f - g_dead) / m;   // dead-zone edge = 0, rim = 1
++    *ox = (int32_t)lroundf(x * k * DM_STICK_MAX); *oy = (int32_t)lroundf(y * k * DM_STICK_MAX);
++}
++static void publish(GCController *c, GCExtendedGamepad *g) {
++    if (g_face_letter < 0) { const char *e = getenv("DM_PAD_FACE"); g_face_letter = e && !strcmp(e, "letter"); }
++    if (!g_active) return;
++    uint64_t b = 0;
++    int bot = g.buttonA.pressed, rgt = g.buttonB.pressed, lft = g.buttonX.pressed, top = g.buttonY.pressed;
++    if (g_face_letter) { if (bot) b |= DM_BTN_A; if (rgt) b |= DM_BTN_B; if (lft) b |= DM_BTN_X; if (top) b |= DM_BTN_Y; }
++    else { if (rgt) b |= DM_BTN_A; if (bot) b |= DM_BTN_B; if (top) b |= DM_BTN_X; if (lft) b |= DM_BTN_Y; }   // Switch positions
++    if (g.leftShoulder.pressed) b |= DM_BTN_L; if (g.rightShoulder.pressed) b |= DM_BTN_R;
++    if (g.leftTrigger.pressed) b |= DM_BTN_ZL; if (g.rightTrigger.pressed) b |= DM_BTN_ZR;
++    if (g.leftThumbstickButton.pressed) b |= DM_BTN_LS; if (g.rightThumbstickButton.pressed) b |= DM_BTN_RS;
++    if (g.buttonMenu.pressed) b |= DM_BTN_PLUS; if (g.buttonOptions.pressed) b |= DM_BTN_MINUS;
++    if (g.dpad.left.pressed) b |= DM_BTN_LEFT; if (g.dpad.up.pressed) b |= DM_BTN_UP; if (g.dpad.right.pressed) b |= DM_BTN_RIGHT; if (g.dpad.down.pressed) b |= DM_BTN_DOWN;
++    int i = slot_of((__bridge const void *)c, 1); if (i < 0) return;
++    g_s[i].b = b;
++    stick(g.leftThumbstick.xAxis.value, g.leftThumbstick.yAxis.value, &g_s[i].ax[0], &g_s[i].ax[1]);
++    stick(g.rightThumbstick.xAxis.value, g.rightThumbstick.yAxis.value, &g_s[i].ax[2], &g_s[i].ax[3]);
++    apply();
++}
++static void present_changed(void) { static int was = -1; int now = g_count > 0; if (now == was) return; was = now; if (g_on_present) g_on_present(now); }
++static void attach(GCController *c) {
++    GCExtendedGamepad *g = c.extendedGamepad;
++    if (!g) { LOG("Gamepad unsupported (no extended profile): %s", c.vendorName.UTF8String ?: "?"); return; }
++    if (slot_of((__bridge const void *)c, 0) >= 0) return;   // already attached (start enumeration and the connect notification can both arrive)
++    if (slot_of((__bridge const void *)c, 1) < 0) { LOG("Gamepad slots full (%d): %s", NSLOT, c.vendorName.UTF8String ?: "?"); return; }
++    g_count++;
++    c.handlerQueue = dispatch_get_main_queue();
++    LOG("Gamepad connected: %s (%s), count=%d, face=%s, deadzone=%s", c.vendorName.UTF8String ?: "?",
++        c.productCategory.UTF8String ?: "?", g_count, getenv("DM_PAD_FACE") ?: "position", getenv("DM_PAD_DEADZONE") ?: "0.12");
++    __weak GCController *wc = c;
++    g.valueChangedHandler = ^(GCExtendedGamepad *gp, GCControllerElement *el) { (void)el; GCController *sc = wc; if (sc) publish(sc, gp); };
++    publish(c, g);
++    present_changed();
++}
++static void detach(GCController *c) {
++    int i = slot_of((__bridge const void *)c, 0); if (i < 0) return;
++    c.extendedGamepad.valueChangedHandler = nil;
++    memset(&g_s[i], 0, sizeof g_s[i]); g_count--; apply();
++    if (!g_count) dm_pad_clear();
++    LOG("Gamepad disconnected: %s, count=%d", c.vendorName.UTF8String ?: "?", g_count);
++    present_changed();
++}
++
++int dm_gamepad_count(void) { return g_count; }
++void dm_gamepad_reset(void) {
++    int any = 0;
++    for (int i = 0; i < NSLOT; i++) if (g_s[i].who) { any |= g_s[i].b != 0 || g_s[i].ax[0] || g_s[i].ax[1] || g_s[i].ax[2] || g_s[i].ax[3]; g_s[i].b = 0; memset(g_s[i].ax, 0, sizeof g_s[i].ax); }
++    dm_pad_clear();
++    const int32_t zero[4] = {0}; trace(0, zero);
++    if (any) LOG("Gamepad focus lost: cleared buttons and axes");
++}
++void dm_gamepad_start(void (*on_present)(int present)) {
++    static int started; if (started) return; started = 1;
++    g_on_present = on_present;
++    NSNotificationCenter *nc = NSNotificationCenter.defaultCenter;
++    [nc addObserverForName:GCControllerDidConnectNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) { attach(n.object); }];
++    [nc addObserverForName:GCControllerDidDisconnectNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) { detach(n.object); }];
++    NSArray<GCController *> *cs = GCController.controllers;
++    LOG("GameController started: system controllers=%lu, face=%s, deadzone=%s", (unsigned long)cs.count,
++        getenv("DM_PAD_FACE") ?: "position", getenv("DM_PAD_DEADZONE") ?: "0.12");
++    for (GCController *c in cs) attach(c);   // attaching one calls back on_present(1)
++    if (!g_count) present_changed();         // none: call back once with 0 for the current count
++}
++
++// Called on the AppKit main thread. Background callbacks cannot republish held keys.
++void dm_gamepad_set_active(int active) {
++    g_active = active;
++    if (!active) { dm_gamepad_reset(); return; }
++    for (GCController *c in GCController.controllers)
++        if (slot_of((__bridge const void *)c, 0) >= 0) publish(c, c.extendedGamepad);
++}
 diff --git a/dm/host/hle.c b/dm/host/hle.c
 index 1a63bd7..9fcffec 100644
 --- a/dm/host/hle.c
@@ -1816,6 +2178,16 @@ index 1a63bd7..9fcffec 100644
  void stubs_report(void) { LOG("stubs=%u", g_nstub); }
  
  // ---------- Host gate dispatch ----------
+diff --git a/dm/host/hle.h b/dm/host/hle.h
+index 79fda3d..c23fa4c 100644
+--- a/dm/host/hle.h
++++ b/dm/host/hle.h
+@@ -77,4 +77,4 @@ uint64_t dm_audio_render_calls(void);   // Cumulative sound card callback count
+ //   0x8c   Current act saved while in a rift (when the character is in a rift map w9 is replaced with 4 = Act V, writes x9; x8 always 0) dm_rift.c      0x6fa9d0 (branch gate: x8≠0 jumps to 0x6fa9d4, otherwise executes the original instruction and returns to 0x6fa9d4)
+ //   0x8d   Extra mercenary equipment slots (mercenary + rift level ≥10 + belt / boots / gloves / ring / amulet: w0 is replaced with 1, writes x0; x8 always 0) dm_rift.c      0x64a34c (branch gate: x8≠0 jumps to 0x64a350, otherwise executes the original instruction and returns to 0x64a350)
+ //   0x8e   Client-side check for the extra mercenary equipment slots (rift level ≥10 + the item is a belt / boots / gloves / ring / amulet: w1 is replaced with the item's own type number, writes x1; x8 always 0) dm_rift.c      0x3beb58 (branch gate: x8≠0 jumps to 0x3beb5c, otherwise executes the original instruction and returns to 0x3beb5c)
+-enum { SVC_HOST_TACT_ZLIB = 0x80, SVC_HOST_C2S_DELIVER = 0x81, SVC_HOST_C2S_SYS = 0x82, SVC_HOST_GRANNY_A = 0x83, SVC_HOST_GRANNY_B = 0x84, SVC_HOST_PRIVATE_SKILL_RENDER = 0x85, SVC_HOST_PRIVATE_SKILL_AIM = 0x86, SVC_HOST_GROUND_ASSET = 0x87, SVC_HOST_DROP_SOUND = 0x88, SVC_HOST_RIFT_EXIT = 0x89, SVC_HOST_JOIN_SPAWN = 0x8a, SVC_HOST_JOIN_CORPSE = 0x8b, SVC_HOST_SAVE_ACT = 0x8c, SVC_HOST_MERC_SLOT = 0x8d, SVC_HOST_MERC_SLOT_CL = 0x8e };   // 0x87: fetch the model path for ground items (dm_dropfilter.c drop light)   // 0x83/0x84: Granny per-block decode call sites (hle_granny.c)
++enum { SVC_HOST_TACT_ZLIB = 0x80, SVC_HOST_C2S_DELIVER = 0x81, SVC_HOST_C2S_SYS = 0x82, SVC_HOST_GRANNY_A = 0x83, SVC_HOST_GRANNY_B = 0x84, SVC_HOST_PRIVATE_SKILL_RENDER = 0x85, SVC_HOST_PRIVATE_SKILL_AIM = 0x86, SVC_HOST_GROUND_ASSET = 0x87, SVC_HOST_DROP_SOUND = 0x88, SVC_HOST_RIFT_EXIT = 0x89, SVC_HOST_JOIN_SPAWN = 0x8a, SVC_HOST_JOIN_CORPSE = 0x8b, SVC_HOST_SAVE_ACT = 0x8c, SVC_HOST_MERC_SLOT = 0x8d, SVC_HOST_MERC_SLOT_CL = 0x8e, SVC_HOST_SEASON_HERO = 0x90 };   // 0x8f 留空：A 层全量门（GameIsSeasonal 恒1）退役——世界装载早退分支=离线卡加载根因（kb/20 §3.2）   // 0x87: fetch the model path for ground items (dm_dropfilter.c drop light)   // 0x83/0x84: Granny per-block decode call sites (hle_granny.c)
 diff --git a/dm/host/hle_account.c b/dm/host/hle_account.c
 index 362a6c2..61dbe98 100644
 --- a/dm/host/hle_account.c
@@ -1849,7 +2221,7 @@ index 3d309a1..ec44a2c 100644
 +    (void)infos; (void)capacity; return 0;
 +}
 diff --git a/dm/host/hle_hid.c b/dm/host/hle_hid.c
-index 561a3c8..e126dcf 100644
+index 561a3c8..bc443a4 100644
 --- a/dm/host/hle_hid.c
 +++ b/dm/host/hle_hid.c
 @@ -1,8 +1,12 @@
@@ -1880,7 +2252,7 @@ index 561a3c8..e126dcf 100644
  uint64_t dm_input_samples(void) { return (uint64_t)atomic_load(&g_sampling); }
  // DM_KEYS scripted input (for tests): "seconds:key[+key][~hold seconds][*count/interval seconds],...", e.g. "8:A,12:A,15:Down~0.5,16:A+B,40:A*80/2" (A every 2 s from 40 s on, 80 times). Key names A B X Y LS RS L R ZL ZR Plus Minus Left Up Right Down, left stick LLeft LUp LRight LDown;
  //   held 0.15 s by default, at most 1024 steps (counted after repeats are expanded). Goes through the controller path (dm_pad_set), ORed with keyboard / touch, neither overrides the other. Times are counted from host start.
-@@ -77,7 +88,31 @@ static uint32_t style_of(uint32_t id) { return id != connected_id() ? 0 : id ==
+@@ -77,7 +88,32 @@ static uint32_t style_of(uint32_t id) { return id != connected_id() ? 0 : id ==
  static int32_t ax(uint64_t v, int i) { return (int16_t)(v >> (16 * i)); }
  static int32_t pick(int32_t a, int32_t b) { return (a < 0 ? -a : a) >= (b < 0 ? -b : b) ? a : b; }   // whichever of the two paths is deflected more
  
@@ -1909,10 +2281,11 @@ index 561a3c8..e126dcf 100644
 +}
  static void fill(NpadState *s, uint32_t id, uint32_t style) {
 +    uint64_t start = now_ns();
++    dm_season_frame();                     // 赛季轮换拍（内部 1Hz 节流；hle_season.c）
      memset(s, 0, sizeof *s);
      s->sampling = atomic_fetch_add(&g_sampling, 1) + 1;
      if (!(style_of(id) & style)) return;   // no controller of this id / style: attributes = 0
-@@ -95,6 +130,7 @@ static void fill(NpadState *s, uint32_t id, uint32_t style) {
+@@ -95,6 +131,7 @@ static void fill(NpadState *s, uint32_t id, uint32_t style) {
      if (s->ry < -STICK_THRESH) b |= 1u << 23;
      s->buttons = b;
      s->attributes = ATTR_CONNECTED | (id == NPAD_HANDHELD ? ATTR_WIRED | ATTR_LEFT_CONN | ATTR_LEFT_WIRED | ATTR_RIGHT_CONN | ATTR_RIGHT_WIRED : ATTR_LEFT_CONN | ATTR_RIGHT_CONN);
@@ -1920,7 +2293,7 @@ index 561a3c8..e126dcf 100644
  }
  // GetNpadStates(out, n, id): returns the number written, newest first. The host keeps no history: only 1 current state (callers handle the returned count)
  static int states(NpadState *out, int n, uint32_t id, uint32_t style) { if (n <= 0) return 0; fill(out, id, style); return 1; }
-@@ -121,21 +157,39 @@ HLE_FORCE("_ZN2nn3hid20StopLrAssignmentModeEv", "L/R 分配模式；宿主忽略
+@@ -121,21 +158,39 @@ HLE_FORCE("_ZN2nn3hid20StopLrAssignmentModeEv", "L/R 分配模式；宿主忽略
  // Controller applet (system UI): report "1 player, current controller selected" directly. ControllerSupportResultInfo = { int playerCount; uint32_t selectedId; }
  HLE_FORCE("_ZN2nn3hid21ShowControllerSupportEPNS0_27ControllerSupportResultInfoERKNS0_20ControllerSupportArgE", "手柄小程序；宿主直接报已选好",
            Result, h_hid_ShowCtrl, int32_t *info, const void *arg) { (void)arg; if (info) { info[0] = 1; info[1] = (int32_t)connected_id(); } return RES_OK; }
@@ -1969,7 +2342,7 @@ index 561a3c8..e126dcf 100644
  // Mouse / keyboard: not connected
  HLE_FORCE("_ZN2nn3hid15InitializeMouseEv", "鼠标；宿主不提供", void, h_hid_InitMouse, void) {}
  HLE_FORCE("_ZN2nn3hid14GetMouseStatesEPNS0_10MouseStateEi", "鼠标状态：0 条", int, h_hid_MouseStates, void *out, int n) { (void)out; (void)n; return 0; }
-@@ -209,6 +263,11 @@ HLE_FORCE("_ZN2nn3hid32GetSixAxisSensorFusionParametersEPfS1_RKNS0_19SixAxisSens
+@@ -209,6 +264,11 @@ HLE_FORCE("_ZN2nn3hid32GetSixAxisSensorFusionParametersEPfS1_RKNS0_19SixAxisSens
  HLE_FORCE("_ZN2nn3hid32SetSixAxisSensorFusionParametersERKNS0_19SixAxisSensorHandleEff", "六轴融合参数；宿主忽略", void, h_hid_FusionSet, const uint32_t *h, float a, float b) { (void)h; (void)a; (void)b; }
  HLE_FORCE("_ZN2nn3hid34ResetSixAxisSensorFusionParametersERKNS0_19SixAxisSensorHandleE", "六轴融合参数；宿主忽略", void, h_hid_FusionReset, const uint32_t *h) { (void)h; }
  HLE_FORCE("_ZN2nn3hid41IsFirmwareUpdateAvailableForSixAxisSensorERKNS0_19SixAxisSensorHandleE", "六轴固件更新：无", unsigned, h_hid_SixFw, const uint32_t *h) { (void)h; return 0; }
@@ -2880,6 +3253,184 @@ index 367779a..9eccbc0 100644
  HLE_FORCE("nnsocketGAIStrError", "解析错误文字", const char *, h_c_sk_GaiStr, int e) { (void)e; return "network unavailable"; }
 +
 +#endif
+diff --git a/dm/host/hle_season.c b/dm/host/hle_season.c
+new file mode 100644
+index 0000000..fbbfc2b
+--- /dev/null
++++ b/dm/host/hle_season.c
+@@ -0,0 +1,172 @@
++// 赛季轮换 v1（kb/20 §6 定稿实现；gameplay 分支 2026-11-11）：
++//   目标（用户定案）：每月 1 号新赛季，2026-11 = S1。
++//   离线防进不去 = patch_nso.py D3 块的世界装载直补丁（0x492f6c bl GameIsSeasonal → mov w0,#0，恒走普通装载；
++//   kb/20 §3.2 指令级根因：世界装载 0x492990 的 enum==6||GameIsSeasonal → 早退分支跳过装载主路径）。
++//   配置 = $DM_SAVE/dm-season.tsv（壳设置页 SeasonPanel 写；宿主 1Hz stat 重载，改动即生效、不用重启）：
++//     enabled\t0|1        总开关：开=进局英雄幂等盖赛季位+主题探针；关=停新盖（已盖英雄照常进局，自洽见门语义）
++//     mode\tfixed|rotate  固定赛季号 / 月更轮换（缺省 rotate）
++//     season\t<N>         fixed 模式的固定赛季号（缺省 1）
++//     origin\tYYYY-MM-DD  rotate 起点（当日= S1；缺省 2026-11-01）
++//   赛季号：rotate = 今天相对 origin 的整月差 + 1（日不计——每月 1 号换季），clamp ≥1；fixed = 配置值。
++//   主题映射：theme = ((S-1) mod 21) + 1 → P74_ItemPassive_SeasonTheme_%03u（kb/16：21 个官方主题）。
++//   svc 0x90（SVC_HOST_SEASON_HERO，patch_nso.py D3 块发射于角色↔档案校验 0x4b1b0 入口）：
++//     英雄旗标 hero+0x12C bit1（记录按 0x520360 查，kb/17 §1.3；返回 1=通过 = 0x4b298 路径语义）：
++//       enabled → 幂等盖位；
++//       位已置（本轮盖的或存档带的）→ 放行（自洽：总开关关掉后已盖英雄照常进局，不会反锁）；
++//       否则 → x8=0 走原校验（非赛季英雄 + 关 = vanilla 行为）。
++//   D 层探针（只读）：生效赛季变化时 0x748450(0x1d, name) 解析主题 SNO 号；施放待 PowerCreateBuff
++//   脚本帧 ABI 接入（kb/17 §6.4，宿主直调不可行）。
++//   边界：不写角色 Digest season_created（kb/17 §3.4 未解）；档案对象 X+0x34 不碰（门已放行，无需第二半）。
++// | Season rotation v1 (kb/20 §6). Monthly rotation: a new season on the 1st of every month, 2026-11 = S1.
++// | Config $DM_SAVE/dm-season.tsv (written by the shell's SeasonPanel, reloaded by the host at 1 Hz).
++// | svc 0x90 gates the hero↔profile season check entry: enabled stamps hero+0x12C bit1; heroes that already
++// | carry the bit always pass (self-consistent when toggled off); otherwise the original validation runs.
++#include "dm.h"
++#include "hle.h"
++#include <stdatomic.h>
++#include <pthread.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/stat.h>
++#include <time.h>
++
++#define THEME_COUNT 21                      // P74_ItemPassive_SeasonTheme_001..021（kb/16 §7b）
++#define THEME_NAME_OFF 0x748450UL           // 名字→id 解析器（kb/18 §3；0x1d = 名字域参数）
++#define HERO_LOOKUP_OFF 0x520360UL          // 英雄号→记录（kb/17 §1.3）
++#define HERO_FLAG_OFF 0x12cUL               // 记录 +0x12C：bit1=赛季、bit0=专家（kb/17 §1.3 读侧）
++#define ORIGIN_DEFAULT "2026-11-01"         // 用户定案：2026-11 = S1
++
++int dm_guest_heap_readable(uint64_t a, size_t n);   // hle_svc.c：客体堆区间判读（英雄记录=堆对象，读前护栏）
++
++static _Atomic int g_enabled;               // 总开关快照（重载线程写，门线程读）
++static _Atomic int g_season;                // 当前生效赛季号
++static struct { int mode_rotate, base; int oy, om; } cfg;
++static long cfg_mtime = -1;
++static int cfg_loaded, cfg_missing_logged;
++
++// ---- 配置 ----
++static void config_load(void) {
++    const char *sv = getenv("DM_SAVE");
++    char path[1024];
++    if (!sv || (size_t)snprintf(path, sizeof path, "%s/dm-season.tsv", sv) >= sizeof path) return;
++    int enabled = 1, rotate = 1, season = 1, oy = 2026, om = 11;   // 缺省：月更轮换，2026-11 = S1
++    FILE *f = fopen(path, "r");
++    if (!f) {
++        if (!cfg_missing_logged) { cfg_missing_logged = 1; LOG("赛季轮换：还没有 %s（缺省开：月更，%s = S1）", path, ORIGIN_DEFAULT); }
++    } else {
++        char line[256];
++        while (fgets(line, sizeof line, f)) {
++            char key[32], val[64];
++            if (sscanf(line, "%31s\t%63s", key, val) != 2 || key[0] == '#') continue;
++            if (!strcmp(key, "enabled")) enabled = !strcmp(val, "1") || !strcmp(val, "on");
++            else if (!strcmp(key, "mode")) rotate = !strcmp(val, "rotate");
++            else if (!strcmp(key, "season")) season = atoi(val);
++            else if (!strcmp(key, "origin")) {
++                int y, m, d;
++                if (sscanf(val, "%d-%d-%d", &y, &m, &d) == 3 && y > 0 && m >= 1 && m <= 12) { oy = y; om = m; }
++            }
++        }
++        fclose(f);
++        if (season < 1) season = 1;
++        LOG("赛季轮换：enabled=%d mode=%s season=%d origin=%04d-%02d（%s）", enabled, rotate ? "rotate" : "fixed", season, oy, om, path);
++        struct stat st;
++        cfg_mtime = stat(path, &st) ? -1 : (long)st.st_mtime;
++    }
++    cfg.mode_rotate = rotate;
++    cfg.base = season;
++    cfg.oy = oy; cfg.om = om;
++    atomic_store(&g_enabled, enabled);
++    atomic_store(&g_season, 1);             // 生效号由 frame 拍按日历写入
++    cfg_loaded = 1;
++}
++
++static void config_reload_if_changed(void) {
++    const char *sv = getenv("DM_SAVE");
++    char path[1024];
++    if (!sv || (size_t)snprintf(path, sizeof path, "%s/dm-season.tsv", sv) >= sizeof path) return;
++    struct stat st;
++    long m = stat(path, &st) ? -1 : (long)st.st_mtime;
++    if (m != cfg_mtime) config_load();
++}
++
++// ---- 轮换日历：月更（每月 1 号换季）；今天 < origin 时 clamp 到 S1 ----
++static int season_effective(void) {
++    if (!cfg.mode_rotate) return cfg.base;
++    time_t now = time(NULL);
++    struct tm t;
++    if (!localtime_r(&now, &t)) return cfg.base;
++    int diff = (t.tm_year + 1900 - cfg.oy) * 12 + (t.tm_mon + 1 - cfg.om);   // 整月差，日不计
++    if (diff < 0) diff = 0;
++    return diff + 1;
++}
++
++// ---- 英雄门处理器（hle_svc.c svc_dispatch → host_stubs.c svc_host_call；调用号 hle.h SVC_HOST_SEASON_HERO）----
++// 门块在 0x4b1b0 入口：x0 = 英雄号（0x4b1c8 mov w19,w0 实证）；宿主置 regs[8]=1 走放行捷径（mov w0,#1; ret），
++// regs[8]=0 走原首字。同线程语义（门在客体线程上同步执行）：直调客体函数安全。
++int dm_season_svc(int num, uint64_t *regs) {
++    if (num != SVC_HOST_SEASON_HERO) return 0;
++    static pthread_once_t once = PTHREAD_ONCE_INIT;
++    pthread_once(&once, config_load);       // 门可能先于第一次 fill() 触发：首次同步装配置
++    static uint8_t *base;
++    if (!base) {
++        for (int i = 0; i < g_nmod; i++)
++            if (!strcmp(g_mod[i].name, "main") && !strcmp(g_mod[i].build_id, DM_D3_BUILD)) base = g_mod[i].base;
++        if (!base) { regs[8] = 0; return 1; }   // 不是 D3 构建：门块不该存在，兜底走原校验
++    }
++    uint32_t hero_id = (uint32_t)regs[0];
++    uint64_t hero = ((uint64_t(*)(uint32_t))(base + HERO_LOOKUP_OFF))(hero_id);
++    if (!hero || !dm_guest_heap_readable(hero + HERO_FLAG_OFF, 4)) { regs[8] = 0; return 1; }   // 查不到记录：原校验
++    uint32_t *f = (uint32_t *)(hero + HERO_FLAG_OFF);
++    if (atomic_load(&g_enabled) && !(*f & 2)) {
++        uint32_t old = *f;
++        *f = old | 2;
++        LOG("赛季轮换：hero #%u +0x12C 置赛季位（原值 %#x）", hero_id, old);
++    }
++    if (*f & 2) {                           // 赛季英雄（含历史存档带位的）：放行
++        regs[0] = 1;
++        regs[8] = 1;
++    } else {
++        regs[8] = 0;                        // 非赛季英雄：原校验（vanilla）
++    }
++    return 1;
++}
++
++// ---- D 层主题 SNO 探针（只读；生效赛季变化时打一条）----
++static void season_theme_probe(int season) {
++    static uint8_t *base;
++    if (!base) {
++        for (int i = 0; i < g_nmod; i++)
++            if (!strcmp(g_mod[i].name, "main") && !strcmp(g_mod[i].build_id, DM_D3_BUILD)) base = g_mod[i].base;
++        if (!base) return;
++    }
++    int theme = (season - 1) % THEME_COUNT + 1;
++    char name[64];
++    snprintf(name, sizeof name, "P74_ItemPassive_SeasonTheme_%03u", theme);
++    int sno = ((int(*)(uint32_t, const char *))(base + THEME_NAME_OFF))(0x1d, name);
++    LOG("赛季主题探针：S%d → %s → SNO %d（施放待 PowerCreateBuff 帧接入，kb/17 §6.4）", season, name, sno);
++}
++
++// 客体线程每个控制器读进来一次（hle_hid.c fill()），内部 1 秒节流。
++void dm_season_frame(void) {
++    static int off = -1;
++    if (off < 0) {
++        const char *e = getenv("DM_SEASON_FRAME");
++        off = e && !strcmp(e, "0");
++    }
++    if (off || strcmp(dm_main_build(), DM_D3_BUILD)) return;   // 门偏移只认 D3 构建
++    if (!cfg_loaded) { static pthread_once_t once = PTHREAD_ONCE_INIT; pthread_once(&once, config_load); }
++    static uint64_t next_ms;
++    uint64_t now = (uint64_t)time(NULL) * 1000;
++    if (now < next_ms) return;
++    next_ms = now + 1000;
++    config_reload_if_changed();
++    int cur = season_effective();
++    static int last = -1;
++    if (cur != last) {
++        atomic_store(&g_season, cur);
++        LOG("赛季轮换：生效赛季 S%d（%s）", cur, cfg.mode_rotate ? "月更轮换" : "固定");
++        if (atomic_load(&g_enabled)) season_theme_probe(cur);
++        last = cur;
++    }
++}
 diff --git a/dm/host/hle_svc.c b/dm/host/hle_svc.c
 index 7683095..89ba099 100644
 --- a/dm/host/hle_svc.c
@@ -2931,6 +3482,134 @@ index 96d2674..579e8ae 100644
  void hle_signal_system_event(void *ev) {   // An unbound one is bound on the spot as manual-clear (can only happen on a guest thread)
      pthread_mutex_lock(&g_se_lock); uint32_t wh = se_find(ev); pthread_mutex_unlock(&g_se_lock);
      if (!wh) { hle_bind_system_event(ev, 0); pthread_mutex_lock(&g_se_lock); wh = se_find(ev); pthread_mutex_unlock(&g_se_lock); }
+diff --git a/dm/host/host_stubs.c b/dm/host/host_stubs.c
+index ef7f336..1112303 100644
+--- a/dm/host/host_stubs.c
++++ b/dm/host/host_stubs.c
+@@ -1,6 +1,7 @@
+ // Hook points left behind by the game-specific modules split out of d2r-mobile (diagnostic tick gates, TACT/Granny, UI screen, touch UI interaction, ...):
+ // the generic host still calls them, and they get empty implementations here. When a feature is redone for this game, replace the matching stub with the real thing.
+ #include "dm.h"
++#include "hle.h"
+ #include "front.h"
+ 
+ void crash_sample_self(void) {}
+@@ -24,4 +25,10 @@ uint64_t dm_game_res(int docked) { return front_game_res(docked); }
+ int dm_screen_real(int *w, int *h) { *w = *h = 0; return 0; }
+ void dm_ui_rect(int *x, int *y, int *w, int *h) { *x = *y = *w = *h = 0; }
+ // svc #0x80.. host gates: only D2R's rewrite rules create them; they should not appear in this game's build output
+-uint64_t svc_host_call(int num, uint64_t *regs) { (void)regs; die("svc_host_call：本作没有宿主门 svc #%#x", num); }
++uint64_t svc_host_call(int num, uint64_t *regs) {
++    if (num == SVC_HOST_SEASON_HERO) {   // 赛季英雄门（hle_season.c）：按 dm-season.tsv 应答
++        if (dm_season_svc(num, regs)) return regs[0];
++        die("赛季英雄门处理器未接住 svc #%#x", num);
++    }
++    die("svc_host_call：本作没有宿主门 svc #%#x", num);
++}
+diff --git a/dm/host/lan_discovery_apple.m b/dm/host/lan_discovery_apple.m
+new file mode 100644
+index 0000000..fb3a375
+--- /dev/null
++++ b/dm/host/lan_discovery_apple.m
+@@ -0,0 +1,98 @@
++/* Bonjour is the public local-network discovery path on macOS and iOS.
++ * NSBonjourServices must contain _dr3lan._udp. No multicast entitlement is used.
++ */
++#import <Foundation/Foundation.h>
++#include <arpa/inet.h>
++#include "lan_native.h"
++
++@interface DR3LanDiscovery : NSObject <NSNetServiceBrowserDelegate,NSNetServiceDelegate>
++@property(nonatomic,strong) NSThread *thread;
++@property(nonatomic,strong) NSNetServiceBrowser *browser;
++@property(nonatomic,strong) NSNetService *published;
++@property(nonatomic,strong) NSMutableArray<NSNetService *> *resolving;
++@end
++@implementation DR3LanDiscovery
++- (instancetype)init {
++    if((self=[super init])) {
++        _resolving=[NSMutableArray array];
++        _thread=[[NSThread alloc] initWithTarget:self selector:@selector(run) object:nil];
++        _thread.name=@"DR3 LAN Bonjour";
++        [_thread start];
++    }
++    return self;
++}
++- (void)run {
++    @autoreleasepool {
++        NSRunLoop *loop=[NSRunLoop currentRunLoop];
++        [loop addPort:[NSMachPort port] forMode:NSDefaultRunLoopMode];
++        for(;;) { @autoreleasepool { [loop runMode:NSDefaultRunLoopMode beforeDate:[NSDate distantFuture]]; } }
++    }
++}
++- (void)start:(NSNumber *)port {
++    (void)port;
++    [self stop:nil];
++    self.browser=[[NSNetServiceBrowser alloc] init];
++    self.browser.delegate=self;
++    [self.browser searchForServicesOfType:@"_dr3lan._udp." inDomain:@"local."];
++}
++- (void)stop:(id)unused {
++    (void)unused;
++    self.browser.delegate=nil;[self.browser stop];self.browser=nil;
++    self.published.delegate=nil;[self.published stop];self.published=nil;
++    for(NSNetService *service in self.resolving) { service.delegate=nil;[service stop]; }
++    [self.resolving removeAllObjects];
++}
++- (void)publish:(NSDictionary *)request {
++    self.published.delegate=nil;[self.published stop];self.published=nil;
++    if(![request[@"on"] boolValue])return;
++    self.published=[[NSNetService alloc] initWithDomain:@"local." type:@"_dr3lan._udp." name:request[@"name"] port:[request[@"port"] intValue]];
++    self.published.delegate=self;
++    uint32_t ip=0,mask=0;dm_lan_ipv4(&ip,&mask);ip=htonl(ip);
++    [self.published setTXTRecordData:[NSNetService dataFromTXTRecordDictionary:@{@"v":[@"1" dataUsingEncoding:NSUTF8StringEncoding],@"game":[@"01001B300B9BE000" dataUsingEncoding:NSUTF8StringEncoding],@"ip4":[NSData dataWithBytes:&ip length:4]}]];
++    [self.published publish];
++}
++- (void)netServiceBrowserWillSearch:(NSNetServiceBrowser *)browser {
++    (void)browser;dm_lan_discovery_status(1,"Bonjour browse started; local-network authorization may still be pending");
++}
++- (void)netServiceBrowser:(NSNetServiceBrowser *)browser didNotSearch:(NSDictionary<NSString *,NSNumber *> *)errors {
++    (void)browser;dm_lan_discovery_status(-1,"Bonjour search failed or local-network permission denied");
++    NSLog(@"[lan] Bonjour browse error %@",errors);
++}
++- (void)netServiceBrowser:(NSNetServiceBrowser *)browser didFindService:(NSNetService *)service moreComing:(BOOL)more {
++    (void)browser;(void)more;
++    if(self.resolving.count>=32)return;
++    NSLog(@"[lan] Bonjour found %@",service.name);
++    service.delegate=self;[self.resolving addObject:service];[service resolveWithTimeout:3];
++}
++- (void)netServiceBrowser:(NSNetServiceBrowser *)browser didRemoveService:(NSNetService *)service moreComing:(BOOL)more {
++    (void)browser;(void)more;
++    for(NSNetService *found in [self.resolving copy])if([found.name isEqualToString:service.name]&&[found.domain isEqualToString:service.domain]){found.delegate=nil;[found stop];[self.resolving removeObject:found];}
++}
++- (void)netServiceDidResolveAddress:(NSNetService *)service {
++    /* Multihomed Apple hosts may resolve only another interface's address.
++     * This is an untrusted local candidate, not room authorization. The C core
++     * checks that it belongs to a local subnet, then authenticates JOIN. */
++    NSDictionary *txt=[NSNetService dictionaryFromTXTRecordData:service.TXTRecordData];
++    NSData *primary=txt[@"ip4"];
++    if(primary.length==4&&service.port>0&&service.port<=65535){uint32_t ip;memcpy(&ip,primary.bytes,4);dm_lan_discovered(ip,htons((uint16_t)service.port));}
++    for(NSData *data in service.addresses)if(data.length>=sizeof(struct sockaddr_in)) {
++        const struct sockaddr_in *address=data.bytes;
++        if(address->sin_family==AF_INET){fprintf(stderr,"[lan] Bonjour resolved ipv4=%08x port=%u\n",ntohl(address->sin_addr.s_addr),ntohs(address->sin_port));dm_lan_discovered(address->sin_addr.s_addr,address->sin_port);}
++    }
++}
++- (void)netService:(NSNetService *)service didNotResolve:(NSDictionary<NSString *,NSNumber *> *)errors {
++    (void)errors;service.delegate=nil;[service stop];[self.resolving removeObject:service];
++}
++- (void)netServiceDidPublish:(NSNetService *)service {
++    if(service==self.published)dm_lan_discovery_status(1,"Bonjour room published");
++}
++- (void)netService:(NSNetService *)service didNotPublish:(NSDictionary<NSString *,NSNumber *> *)errors {
++    (void)service;dm_lan_discovery_status(-1,"Bonjour room publication failed; check local-network permission");
++    NSLog(@"[lan] Bonjour publish error %@",errors);
++}
++@end
++static DR3LanDiscovery *bridge(void) { static DR3LanDiscovery *instance;static dispatch_once_t once;dispatch_once(&once,^{instance=[[DR3LanDiscovery alloc] init];});return instance; }
++int dm_lan_discovery_available(void){return 1;}
++void dm_lan_discovery_start(uint16_t port){DR3LanDiscovery*b=bridge();[b performSelector:@selector(start:) onThread:b.thread withObject:@(port) waitUntilDone:NO];}
++void dm_lan_discovery_publish(int on,uint16_t port,const char *name){DR3LanDiscovery*b=bridge();NSDictionary*r=@{@"on":@(on),@"port":@(port),@"name":name?[NSString stringWithUTF8String:name]:@""};[b performSelector:@selector(publish:) onThread:b.thread withObject:r waitUntilDone:NO];}
++void dm_lan_discovery_stop(void){DR3LanDiscovery*b=bridge();[b performSelector:@selector(stop:) onThread:b.thread withObject:nil waitUntilDone:NO];}
 diff --git a/dm/host/lan_native.h b/dm/host/lan_native.h
 new file mode 100644
 index 0000000..00d42c8
@@ -3103,7 +3782,7 @@ index 4d22880..0be9257 100644
          // Derivation: pillar inner edge x = screen height * limit / 2, so for every delta added to the limit the inner edge moves outward by screen height * delta / 2 on each side. Measured on Mac 1952x900, the soft edge is <= 30 pixels wide
          // (with limit = screen aspect ratio, columns 0–20 at the right edge fade from black to bright, and it disappears once the limit is pushed to 2.4) => need delta >= 2 * 30 / 900 ~ 0.067; 0.15 is taken (about 67 pixels outward per side), leaving more than double the margin.
 diff --git a/dm/tools/patch_nso.py b/dm/tools/patch_nso.py
-index 837700c..e7019d8 100644
+index 837700c..b3e5b4c 100644
 --- a/dm/tools/patch_nso.py
 +++ b/dm/tools/patch_nso.py
 @@ -680,7 +680,12 @@ for a in sorted(kinds):
@@ -3138,7 +3817,7 @@ index 837700c..e7019d8 100644
  params = PARAMS.get(BUILD_ID, [])
  for oa, wa, ob_, wb, r, key, why in params:
      for o, w0 in ((oa, wa), (ob_, wb)):
-@@ -847,6 +861,20 @@ for oa, wa, ob_, wb, r, key, why in params:
+@@ -847,6 +861,60 @@ for oa, wa, ob_, wb, r, key, why in params:
      tmp = 16 if r != 16 else 17
      emit(STUR(tmp, 31, -16)); emit(MRS_TPIDRRO(r)); emit_slot_addr(r, tmp, key); emit(LDRX(r, r)); emit(LDUR(tmp, 31, -16)); emit(B(here(), oa + 4))
      struct.pack_into('<I', IMG, oa, B(oa, start)); struct.pack_into('<I', IMG, ob_, NOP); stat('param')
@@ -3156,10 +3835,50 @@ index 837700c..e7019d8 100644
 +        struct.pack_into('<I', IMG, o, new)
 +        # cuts.tsv 的两列 hex 是字节序列（structck bytes.fromhex 后与映像原样比对），不是字值
 +        cuts.append((o, struct.pack('<I', old).hex(), struct.pack('<I', new).hex(), why, '仅宿主')); stat('d3_param_cut')
++
++# D3 赛季 v1（kb/20 §6 定稿；hle_season.c 宿主处理器；2026-11-11 gameplay 分支）：
++#   ① 世界装载防死锁直补丁（kb/20 §3.2 指令级根因）：0x492990 世界装载函数里 0x492f6c bl GameIsSeasonal(0x4c8df0)——
++#      enum==6||GameIsSeasonal → 早退分支（0x4933a8）跳过装载主路径（0x48cba0）= 离线"赛季会话"卡加载根因。
++#      改 mov w0,#0 = 恒走普通装载。vanilla 离线 GameIsSeasonal 本就为 0，此补丁只影响赛季会话进局；开=放行语义不变。
++#   ② 角色↔档案赛季校验入口（0x4b1b0）→ svc 0x90 分支门（hle.h SVC_HOST_SEASON_HERO，宿主 hle_season.c）：
++#      自包含分支门模板（x8 信号；无 SEASON_PASS 依赖）：开=w0,#1 直接 ret（=0x4b298 通过路径语义），关=原首字续跑。
++#      宿主语义：enabled 幂等盖 hero+0x12C bit1（0x520360 查记录）；位已置→放行（总开关关闭后已盖英雄不反锁）；否则原校验。
++if BUILD_ID == '2607a74f5df7754cc0357b5df7e49693' and PRIVATE_GATES:
++    # ①
++    wo = 0x492f6c
++    wold = struct.unpack_from('<I', IMG, wo)[0]
++    assert wold == 0x9400D7A1, f'世界装载门原字不符 {wo:#x}：{wold:08x}'   # bl 0x4c8df0
++    assert wo not in kinds and not any(seg[0].address <= wo < seg[-1].address + 4 for seg in windows), f'世界装载门与改写点冲突 {wo:#x}'
++    struct.pack_into('<I', IMG, wo, 0x52800000)   # mov w0, #0
++    cuts.append((wo, struct.pack('<I', wold).hex(), struct.pack('<I', 0x52800000).hex(),
++                 '赛季 v1 世界装载防死锁：0x492990 内 bl GameIsSeasonal → mov w0,#0（恒走普通装载；离线赛季会话防早退卡加载；kb/20 §3.2）', '仅宿主'))
++    stat('d3_season_worldload')
++    # ②
++    def season_hero_gate(off, word, num, why):
++        assert off in set(starts), f'赛季门 {off:#x} 不是函数入口'
++        assert off < TEXT_END and off not in kinds and not any(seg[0].address <= off < seg[-1].address + 4 for seg in windows), f'赛季门与改写点冲突 {off:#x}'
++        start = here()
++        emit(0xA9BF7FE8)                       # stp x8, xzr, [sp,#-16]!（x8 = 门信号寄存器）
++        emit(STP_PRE(29, 30, 31, -16))         # stp x29, x30, [sp,#-16]!
++        emit_gate_call(); emit(BLR(30))        # KGATE 槽 → dm_gate → gate_dispatch 按 ret 查表 → svc_host_call(0x90)
++        ret = here()
++        emit(LDP_POST(29, 30, 31, 16))         # ldp x29, x30, [sp], #16（共享尾）
++        emit(0x34000088)                       # cbz w8, +16：x8=0 → 跳 4 条到 close；x8=1 顺落 open
++        emit(0x52800020)                       # open: mov w0, #1（0x4b298 通过路径语义）
++        emit(LDP_POST(8, 31, 31, 16))          # 恢复 x8，栈平衡
++        emit(0xD65F03C0)                       # ret —— 放行返回调用者
++        emit(LDP_POST(8, 31, 31, 16))          # close: 恢复 x8
++        emit(word)                             # 原首字 sub sp,sp,#0x50 续跑
++        emit(B(here(), off + 4))
++        gates.append((ret, 'svc', num, off))
++        put_branch(off, start); stat('d3_season_herocheck')
++        cuts.append((off, struct.pack('<I', word).hex(), struct.pack('<I', B(off, start)).hex(), why, '仅宿主'))
++    season_hero_gate(0x4b1b0, 0xd10143ff, 0x90,
++        '赛季 v1：角色↔档案赛季校验入口 → svc 0x90：宿主按 dm-season.tsv 应答（enabled 幂等盖 hero+0x12C bit1；位已置放行；否则原校验；hle_season.c）')
  
  # The three existing native rule trampolines all use only the dead temporary w8 that is overwritten afterwards, and do not change the w0/stat return, sp or NZCV.
  # 6c6290 is after the original mode3 gate; the Blaze / reference count and data invalidation 6c62dc branches before it and the state update after it are untouched.
-@@ -893,38 +921,38 @@ if FAR:   # patch area before the base: file = text + ro + data (padded to 16K)
+@@ -893,38 +961,38 @@ if FAR:   # patch area before the base: file = text + ro + data (padded to 16K)
  else:
      open(P('patched.bin'), 'wb').write(IMG + bytearray(PATCH_OFF - len(IMG)) + patch)
  import hashlib
