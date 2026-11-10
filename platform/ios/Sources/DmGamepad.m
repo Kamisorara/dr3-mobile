@@ -114,6 +114,8 @@ static CGPathRef piePath(CGPoint c, CGFloat r, float frac) {   // 冷却遮罩�
     }
 }
 
+- (CGFloat)u { return MIN(self.bounds.size.height / 430.0, 1.3); }   // 顶排/字号单位（真机已验证量级）
+
 - (void)applySkillAtlas:(const unsigned char *)rgba w:(int)w h:(int)h {
     CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
     CGContextRef ctx = CGBitmapContextCreate((void *)rgba, w, h, 8, w * 4, cs, kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big);
@@ -124,7 +126,7 @@ static CGPathRef piePath(CGPoint c, CGFloat r, float frac) {   // 冷却遮罩�
     if (!img) return;
     [CATransaction begin]; [CATransaction setDisableActions:YES];
     for (int i = 0; i < 6; i++) {   // row0 前 6 格 = 技能 1-6（128px/格——网格假设未实证，图集管线仍暂停中）
-        int b = [DmGamepad slotKey:i];   // 槽 i 的键（0:Y 1:B 2:A 3:X 4:ZL 5:ZR）
+        int b = [D3TouchUI slotKey:i];   // 槽 i 的键（0:Y 1:B 2:A 3:X 4:ZL 5:ZR）
         if (b < 0 || b >= DMKJ_N || !_built[b] || !_fill[b]) continue;
         CGImageRef tile = CGImageCreateWithImageInRect(img, CGRectMake(i * 128, 0, 128, 128));
         if (!tile) continue;
@@ -208,7 +210,7 @@ static CGPathRef piePath(CGPoint c, CGFloat r, float frac) {   // 冷却遮罩�
             if (k < 0 || k >= DMKJ_N) continue;
             _pos[k] = CGPointMake(x, y); _rad[k] = ct->r * _canvas.scale;
             _built[k] = YES;
-            [self buildVisual:k label:[DmGamepad label:ct] icon:[DmGamepad iconKey:ct]];
+            [self buildVisual:k label:[D3TouchUI label:ct] icon:[D3TouchUI iconKey:ct]];
         }
         // 摇杆静息位（设计 (left+190, groupTop+620) r123——x 视图左锚、y 右组顶锚，安卓 SCV:1109）
         double jx = v.left + 190 * _canvas.scale, jy = _canvas.groupY + 620 * _canvas.scale;
@@ -293,7 +295,7 @@ static CGPathRef piePath(CGPoint c, CGFloat r, float frac) {   // 冷却遮罩�
 }
 
 - (void)drawPie:(int)slot {
-    int b = [DmGamepad slotKey:slot];
+    int b = [D3TouchUI slotKey:slot];
     if (b < 0 || b >= DMKJ_N || !_built[b] || !_fill[b]) return;
     if (!_pie[slot]) {
         _pie[slot] = [CAShapeLayer layer];
@@ -395,7 +397,7 @@ static CGPathRef piePath(CGPoint c, CGFloat r, float frac) {   // 冷却遮罩�
         if ((x >> 8) == TAG_KEY) btn |= 1ull << (x & 0xff);
     }
     for (int slot = 0; slot < 6; slot++)   // 技能手势 = 绑定键保持按下（按住即瞄/连发）
-        if (_gest[slot].touch) btn |= 1ull << [DmGamepad slotKey:slot];
+        if (_gest[slot].touch) btn |= 1ull << [D3TouchUI slotKey:slot];
     int32_t ax = 0, ay = 0, brx = 0, bry = 0;
     if (_joy) {
         CGFloat R = _canvasOk ? 123 * _canvas.scale : 62 * self.u, dz = R * 0.12;
