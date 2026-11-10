@@ -133,7 +133,12 @@ def main():
     print('+', ' '.join(command), flush=True)
     with log.open('w') as f:
         rc = subprocess.run(command, cwd=ios, env=settings, stdout=f, stderr=subprocess.STDOUT).returncode
-    if rc: die(f'xcodebuild exited {rc}; see {log}')
+    if rc:
+        tail = log.read_text(errors='replace').splitlines()
+        print(f'[shell] xcodebuild exited {rc}; last {min(80, len(tail))} lines of {log}:', flush=True)
+        for ln in tail[-80:]:
+            print('  ' + ln, flush=True)
+        die(f'xcodebuild exited {rc}; full log: {log}')
 
     app = next(p for p in (WORK / 'build/ios-shell/Build/Products').rglob(f'{APP_NAME}.app'))
     app_dir = out / 'app'
