@@ -28,7 +28,7 @@ static long daysFromCivil(int y, int m, int d) {
     UILabel *_daysLab;
     UIDatePicker *_origin;
     UILabel *_effLab;
-    UIView *_rotateRows;      // 轮换两行（周期/起始日）随模式显隐
+    UIStackView *_rotateRows;   // 轮换两行（周期/起始日）随模式显隐
     BOOL _loading;            // 回填期间不写文件
 }
 + (NSString *)configPath {
