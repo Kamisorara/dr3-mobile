@@ -18,7 +18,11 @@
 #include "game_profile.h"
 #import "DmTouchLayout.h"
 #import "DmTouchSkin.h"
+#import "DmUiPointer.h"
 #import "SeasonPanel.h"
+
+extern CGRect dm_ios_game_frame(void);   // front_ios.m：游戏内容区（黑边/安全区已扣）
+static DmUip g_uip;                      // UI 指针触点状态机（安卓 UiPointer C 移植）
 
 static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
 static uint64_t g_touch_btn;
@@ -34,7 +38,7 @@ static void publish(void) {
 }
 
 // 触点归属 tag：('K'|'J'|'S'|'P')<<8 | 参数（'S' 低字节 = 技能槽）
-enum { TAG_KEY = 'K', TAG_JOY = 'J', TAG_SKILL = 'S', TAG_PANEL = 'P' };
+enum { TAG_KEY = 'K', TAG_JOY = 'J', TAG_SKILL = 'S', TAG_PANEL = 'P', TAG_UI = 'U' };   // U = 游戏菜单触点（kb/07 §10）
 
 // 壳内键号：0..15 = Npad 位序（= DmTouchLayout 的 DMKJ_*），16+ 伪键
 enum { B_A = 0, B_B, B_X, B_Y, B_LS, B_RS, B_L, B_R, B_ZL, B_ZR, B_PLUS, B_MINUS,
@@ -346,8 +350,9 @@ static CGPathRef piePath(CGPoint c, CGFloat r, float frac) {   // 冷却遮罩�
                 continue;
             }
         }
-        // 其余区域：忽略（透传光标/点地下轮——屏→世界反投影未解，调查记录 §5.4.2）
+        [_owner setObject:@((uint64_t)TAG_UI << 8) forKey:t];   // 未命中控件 = 游戏菜单触点（kb/07 §10 UI 指针域）
     }
+    [self uiPublishAll:NO];
     [self recompute];
 }
 - (void)touchesMoved:(NSSet<UITouch *> *)ts withEvent:(UIEvent *)e {
@@ -365,7 +370,28 @@ static CGPathRef piePath(CGPoint c, CGFloat r, float frac) {   // 冷却遮罩�
             }
         }
     }
+    [self uiPublishAll:NO];
     [self recompute];
+}
+// UI 指针发布：扫 _owner 里的 TAG_UI 触点集 → DmUiPointer 状态机 → dm_uipointer_set 入宿主队列。
+// 坐标基准 = dm_ios_game_frame（游戏内容区，黑边/安全区已扣；空则回退 self.bounds）。
+- (void)uiPublishAll:(BOOL)cancelled {
+    int ids[16]; float xs[16], ys[16]; int n = 0;
+    CGRect f = dm_ios_game_frame();
+    if (f.size.width <= 0 || f.size.height <= 0) f = self.bounds;
+    for (UITouch *t in _owner) {
+        NSNumber *tag = [_owner objectForKey:t];
+        if (!tag || (tag.unsignedLongLongValue >> 8) != TAG_UI || n >= 16) continue;
+        CGPoint p = [t locationInView:self];
+        ids[n] = (int)(uintptr_t)t;
+        xs[n] = (float)((p.x - f.origin.x) / f.size.width);
+        ys[n] = (float)((p.y - f.origin.y) / f.size.height);
+        n++;
+    }
+    long long ms = (long long)(CFAbsoluteTimeGetCurrent() * 1000.0), oms = 0;
+    DmUipEvent ev;
+    if (dm_uip_publish(&g_uip, ids, xs, ys, n, cancelled, ms, &oms, &ev))
+        dm_uipointer_set(ev.phase, ev.x, ev.y, ev.bx, ev.by, oms, ev.paired);
 }
 - (void)endTouches:(NSSet<UITouch *> *)ts {
     for (UITouch *t in ts) {
@@ -380,12 +406,17 @@ static CGPathRef piePath(CGPoint c, CGFloat r, float frac) {   // 冷却遮罩�
                 _gest[slot].touch = NULL, _gest[slot].dragged = NO;
         }
     }
+    [self uiPublishAll:NO];
     [self recompute];
 }
 - (void)touchesEnded:(NSSet<UITouch *> *)ts withEvent:(UIEvent *)e { [self endTouches:ts]; }
-- (void)touchesCancelled:(NSSet<UITouch *> *)ts withEvent:(UIEvent *)e { [self endTouches:ts]; }
+- (void)touchesCancelled:(NSSet<UITouch *> *)ts withEvent:(UIEvent *)e {
+    [self endTouches:ts];
+    [self uiPublishAll:YES];   // 系统取消：UI 指针发相位 3（安卓 ACTION_CANCEL 同款）
+}
 - (void)resetTouches {
     [_owner removeAllObjects]; _joy = nil;
+    dm_uip_init(&g_uip);
     for (int i = 0; i < 6; i++) { _gest[i].touch = NULL; _gest[i].dragged = NO; }
     [self recompute];
 }
