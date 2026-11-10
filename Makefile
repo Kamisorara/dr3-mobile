@@ -37,8 +37,17 @@ test:
 	clang -std=c11 -O1 -Wall -Wextra -Werror tests/test_sixaxis_math.c -lm -o work/test-sixaxis-math
 	./work/test-sixaxis-math
 
-	clang -std=c11 -O1 -Wall -Wextra -Werror -Iplatform/ios/Sources tests/test_touch_layout.c platform/ios/Sources/DmTouchLayout.c -lm -o work/test-touch-layout
-	./work/test-touch-layout
+	clang -std=c11 -O1 -Wall -Wextra -Werror -Iplatform/ios/Sources tests/test_semantic_layout.c platform/ios/Sources/DmSemanticLayout.c -lm -o work/test-semantic-layout
+	./work/test-semantic-layout
+
+	clang -std=c11 -O1 -Wall -Wextra -Werror -Iplatform/ios/Sources tests/test_semantic_input.c platform/ios/Sources/DmSemanticInput.c -lm -o work/test-semantic-input
+	./work/test-semantic-input
+
+	clang -std=c11 -O1 -Wall -Wextra -Werror -Iplatform/ios/Sources tests/test_skill_aim.c platform/ios/Sources/DmSkillAim.c -lm -o work/test-skill-aim
+	./work/test-skill-aim
+
+	clang -std=c11 -O1 -Wall -Wextra -Werror -Iplatform/ios/Sources tests/test_semantic_route.c platform/ios/Sources/DmSemanticRoute.c platform/ios/Sources/DmSemanticInput.c platform/ios/Sources/DmSemanticLayout.c platform/ios/Sources/DmSkillAim.c -lm -o work/test-semantic-route
+	./work/test-semantic-route
 
 	clang -std=c11 -O1 -Wall -Wextra -Werror -Iplatform/ios/Sources tests/test_ui_pointer.c platform/ios/Sources/DmUiPointer.c -o work/test-ui-pointer
 	./work/test-ui-pointer

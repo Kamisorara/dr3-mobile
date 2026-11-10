@@ -4378,10 +4378,10 @@ index 837700c..0eec3b5 100644
  print(NAME, stats, 'cuts', len(cuts), 'obs', len(obs), 'patch', len(patch), 'PATCH_OFF', hex(PATCH_OFF), 'slot_refs', len(fix), 'gates', len(gates))
 diff --git a/dm/host/hle_uipointer.c b/dm/host/hle_uipointer.c
 new file mode 100644
-index 0000000..6b4c00b
+index 0000000..85bf28d
 --- /dev/null
 +++ b/dm/host/hle_uipointer.c
-@@ -0,0 +1,96 @@
+@@ -0,0 +1,140 @@
 +// UI 指针域（kb/07 §10；2026-11-10 安卓 libd3rewrite.so d3_ui_pointer_* 白盒化后自研落地）：
 +//   壳把未命中控件的触点（phase 0=down 1=move 2=up 3=cancel，坐标 [0,1) 左上原点）经
 +//   dm_uipointer_set 入环形队列；游戏线程拍（hle_hid.c fill()）dm_uipointer_frame 消费：
@@ -4432,6 +4432,38 @@ index 0000000..6b4c00b
 +    return 1;
 +}
 +
++// ---- UI 模式（安卓 worldControls 同款谓词；2026-11-10 触控重构轮，pump 0xf2970-0xf2b5c 段逐条移植）----
++// world = 读 [base+0x17E5298] 得世界态结构（非空/非钩子值）→ +0x108 忙标志必须 0 → 读 [base+0x185ebd0]
++// 槽值 → 调 main+0x3278C0（world ready，安卓 pump 每帧同款调用）→ main+0x327B50 取光标对象 →
++// 读 u16@[cursor+0x18] 取 bit2（=世界控制态）→ 非视频/过场（两 scope 未移植，见 kb/07 §12 边界）。
++// 代语义 = 安卓 d3_touch_owner_world：变化时 gen+=2，壳读 dm_ui_owner()=(gen<<1)|world，换代即全释放。
++static _Atomic long long g_owner;        // (gen<<1)|world，壳 100ms 轮询读（安卓 modePoll 100ms 同款）
++static long long g_gen = 2;              // 初值 2：壳首次轮询必触发一次挂代（syncOwner 全释放）
++
++long long dm_ui_owner(void) { return atomic_load(&g_owner); }
++
++static int uimode_world(uint8_t *base) {
++    uint64_t ws = 0;
++    if (!dm_guest_readable((uint64_t)(base + 0x17E5298UL), 8)) return 0;
++    memcpy(&ws, base + 0x17E5298UL, 8);
++    if (!ws || ws == (uint64_t)-0x108 || (ws & ~7ull) == (uint64_t)-0x110) return 0;
++    uint64_t busy = 1;
++    if (!dm_guest_readable(ws + 0x108, 8)) return 0;
++    memcpy(&busy, (const void *)(uintptr_t)(ws + 0x108), 8);
++    if (busy) return 0;
++    uint64_t slot = 0;
++    if (!dm_guest_readable((uint64_t)(base + 0x185ebd0UL), 8)) return 0;
++    memcpy(&slot, base + 0x185ebd0UL, 8);
++    int ok = ((int(*)(uint64_t *))(base + 0x3278C0UL))(&slot);          // world ready 查询
++    if (!ok) return 0;
++    uint64_t cur = ((uint64_t(*)(uint64_t *))(base + 0x327B50UL))(&slot); // 光标对象 getter
++    if (!cur || cur == (uint64_t)-0x18 || (cur & ~7ull) == (uint64_t)-0x1a) return 0;
++    uint16_t bits = 0;
++    if (!dm_guest_readable(cur + 0x18, 2)) return 0;
++    memcpy(&bits, (const void *)(uintptr_t)(cur + 0x18), 2);
++    return (bits & 4) != 0;                                            // bit2 = 世界控制态（安卓同位）
++}
++
 +// ---- 游戏线程拍 ----
 +void dm_uipointer_frame(void) {
 +    static int off = -1;
@@ -4450,8 +4482,20 @@ index 0000000..6b4c00b
 +            if (!strcmp(g_mod[i].name, "main") && !strcmp(g_mod[i].build_id, DM_D3_BUILD)) base = g_mod[i].base;
 +        if (!base) {
 +            if (!miss_logged) { miss_logged = 1; LOG("UI 指针：main 模块未就绪，等下一拍"); }
++            atomic_store(&g_owner, g_gen);
 +            return;
 +        }
++    }
++
++    // UI 模式谓词每帧算（安卓 pump 同频）；变化 = 换代（gen+=2，安卓 d3_touch_owner_world 同式）
++    {
++        int world = uimode_world(base);
++        long long prev = atomic_load(&g_owner);
++        if (((prev & 1) != (long long)world) || prev == 0) {
++            g_gen += 2;
++            LOG("UI 指针：世界控制态 → %d（gen=%lld）", world, (long long)g_gen);
++        }
++        atomic_store(&g_owner, ((long long)g_gen << 1) | (long long)world);
 +    }
 +
 +    // back 注入：安卓置 0x33e_b88 标志由 pump 消费；提交点未逆出前先记录（不瞎写）
@@ -4478,3 +4522,4 @@ index 0000000..6b4c00b
 +            *(float *)out, *((float *)out + 1));
 +    }
 +}
+
