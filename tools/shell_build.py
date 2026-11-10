@@ -84,7 +84,7 @@ def main():
     precheck(); copy_native()
     ios = ROOT / 'platform/ios'; gen = ios / 'Gen'
     if gen.exists(): shutil.rmtree(gen)
-    for name in ('dm', 'msl', 'romfs', 'aoc'): (gen / name).mkdir(parents=True)
+    for name in ('dm', 'msl', 'romfs', 'aoc', 'skin'): (gen / name).mkdir(parents=True)
 
     print('[shell] generating build inputs', flush=True)
     settings = env() | dict(GAME=TITLE, DM_BUNDLE_ID=args.bundle_id, DM_TEAM_ID='', DM_IOS_CPU=args.cpu)
