@@ -1,24 +1,24 @@
-// D3 触控操作面 —— 完全重写（2026-11-09，替代壳自带虚拟手柄框架）。
-// 旧框架的 2D/3D 布局、布局切换器、泪滴/pill 键、菜单态状态机、D-pad/右摇杆全部移除。
-// 设计（暗黑不朽式）：
-//   左半屏动态摇杆：落指处生成底环，抬手消失——不预画固定环，不再与血球抢左下角；
-//   右下固定技能簇：大攻击键(A) + 5 技能弧(X/Y/ZR/L/B) + 药水(R)——键位对照游戏主机默认
-//   （HUD 提示：药=R、技能含 ZR）；冷却扇形遮罩由 hle skills_frame 10Hz 推送；
-//   顶右系统键排：包(+)、单(−)、城(ZL)、赛(赛季设置面板)。
-// 输入 = dm_input_set 真键：A=确认、B=取消、摇杆=导航，游戏菜单天然可用（无需菜单态切换）。
-// 显隐 = 进游戏门控 dm_ingame（HUD 根槽，hle_uistate 1Hz）∧ 无物理手柄 ∧ 前台激活。
-// | D3-specific touch overlay — full rewrite. DI-style: dynamic left joystick born under the
-// | thumb; fixed right cluster (attack + skill arc + potion); top-right system pills.
-// | Real HID keys only; visibility gated by dm_ingame / physical pad / front activity.
+// D3 触控操作面 —— 安卓 SemanticControlsView 整体移植（2026-11-10 触控轮，kb/17 §6 规格书）。
+// 布局 = DmTouchLayout（安卓 1851×849 设计画布右组：攻击 A r94 + 弧 5 键 r220/键54 + 药水/回城/闪避/拾取 r48）
+//        + 顶排（包+/单−/赛，视图锚定，真机已验证位置）+ 动态摇杆（左 40% 下半区，底座随落点、静息归设计位）。
+// 键位 = 实证表（kb/07 §7 真机 HUD + 安卓 SkillFeedback.target()）：技能槽0:Y 1:B 2:A 3:X 4:ZL 5:ZR、
+//        药水=R1、回城=DPad 右、闪避=探测性 L（真机验证；游戏若无此绑定则无害）。
+// 渲染 = 安卓 ControlArt 矢量嵌槽（4 层描边环 + 45° 刻度线 + 按下环 + 摇杆 thumb）+ DmTouchSkin PNG
+//        （Gen/skin optional；缺失降级文字标签）。冷却饼 = hle_uistate 10Hz frac（-90° 顺时针、#C9000000）。
+// 交互 = 技能键（含攻击）全走瞄准手势（安卓 Route 语义）：按下即绑定键 DOWN（按住即瞄/连发），
+//        拖超 slop → 虚拟右摇杆 = 拖动向量（游戏原生右摇杆=世界光标，PowerCursorSetToRightStick 0x9143e0），
+//        松手 = 键 UP + 右摇杆清零；一槽一手势、多指并发。拾取钮灰显（token 待下轮 native 派发）。
+// | Touch overlay — port of the Android SemanticControlsView: design-canvas right group,
+// | verified key bindings, vector sockets + optional PNG skin, drag-aim gestures
+// | (binding key held + virtual right stick = drag vector), pie cooldowns.
 #import <UIKit/UIKit.h>
 #include <pthread.h>
+#include <math.h>
 #include "dm_input.h"
 #include "game_profile.h"
+#import "DmTouchLayout.h"
+#import "DmTouchSkin.h"
 #import "SeasonPanel.h"
-
-enum { B_A = 0, B_B, B_X, B_Y, B_LS, B_RS, B_L, B_R, B_ZL, B_ZR, B_PLUS, B_MINUS, B_SEASON, B_N };
-// 本界面只发这些键：A 攻击 / X Y ZR L B 技能弧 / R 药水 / ZL 城 / + 包 / − 单（= NpadButton 位序）；
-// B_SEASON 不是 Npad 键：点按开赛季设置面板（SeasonPanel，壳侧自绘，kb/18 A 路线）
 
 static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
 static uint64_t g_touch_btn;
@@ -33,25 +33,23 @@ static void publish(void) {
     pthread_mutex_unlock(&g_mu);
 }
 
-// ---- 几何常量（单位 u = H/430；右半簇自右下角、系统排自右上角量） ----
-static const CGFloat
-    K_JOY_ZONE_X = 0.45,     // 摇杆区：屏幕左 45%
-    K_JOY_ZONE_Y = 0.16,     //    且 y > 16% 高（避开顶部小地图/任务栏）
-    K_JOY_R = 62, K_JOY_KNOB = 26, K_JOY_DEAD = 0.12, K_JOY_FULL = 0.72,
-    K_ATK_DX = 92, K_ATK_DY = 128, K_ATK_R = 46,     // 攻击键心距右下角
-    K_ARC_R = 88, K_ARC_R_KEY = 27,                  // 技能弧半径/弧键半径
-    K_POT_DX = 36, K_POT_DY = 42, K_POT_R = 25,      // 药水键（攻击键右下）
-    K_SYS_DY = 150, K_SYS_DX0 = 40, K_SYS_STEP = 48, K_SYS_R = 19;   // 系统排（小地图下方）
-static const CGFloat K_ARC_DEG[5] = {108, 136, 164, 192, 220};
-static const int    K_ARC_KEY[5] = {B_X, B_Y, B_ZR, B_L, B_B};
-static const int    K_CD_KEY[6]  = {B_A, B_X, B_Y, B_ZR, B_L, B_B};   // 冷却槽序 = dm_gamepad_skill 的 slot 序
+// 触点归属 tag：('K'|'J'|'S'|'P')<<8 | 参数（'S' 低字节 = 技能槽）
+enum { TAG_KEY = 'K', TAG_JOY = 'J', TAG_SKILL = 'S', TAG_PANEL = 'P' };
+
+// 壳内键号：0..15 = Npad 位序（= DmTouchLayout 的 DMKJ_*），16+ 伪键
+enum { B_A = 0, B_B, B_X, B_Y, B_LS, B_RS, B_L, B_R, B_ZL, B_ZR, B_PLUS, B_MINUS,
+       B_LEFT, B_UP, B_RIGHT, B_DOWN, B_SEASON, B_PICKUP, B_N };
+#define DMKJ_N B_N
+
+// 触控 slop：iOS 无系统值可读，取 UIPanGestureRecognizer 默认量级（安卓用系统 touchSlop）
+static const CGFloat K_SLOP = 12.0;
 
 @interface D3TouchUI : UIView
 @end
 static __weak D3TouchUI *g_view;
-static BOOL g_phys;   // 物理手柄在场（dm_gamepad_set_active/焦点清理由 PhysicalGamepad.m 的物理后端负责）
+static BOOL g_phys;
 
-static UIColor *k_idle, *k_on, *k_line, *k_text;
+static UIColor *k_idle, *k_on, *k_line, *k_text, *k_ring, *k_pie;
 static inline CAShapeLayer *mkShape(CALayer *parent) {
     CAShapeLayer *l = [CAShapeLayer layer];
     l.fillColor = k_idle.CGColor; l.strokeColor = k_line.CGColor; l.lineWidth = 1.5;
@@ -65,7 +63,7 @@ static inline CATextLayer *mkLabel(CALayer *parent, NSString *s) {
     [parent addSublayer:t]; return t;
 }
 static inline CGPathRef circleAt(CGPoint c, CGFloat r) { return CGPathCreateWithEllipseInRect(CGRectMake(c.x - r, c.y - r, 2 * r, 2 * r), NULL); }
-static CGPathRef piePath(CGPoint c, CGFloat r, float frac) {   // 冷却遮罩：正上起顺时针扫剩余比例
+static CGPathRef piePath(CGPoint c, CGFloat r, float frac) {   // 冷却遮罩：正上起顺时针扫剩余比例（安卓同款几何）
     if (frac <= 0) return NULL;
     if (frac > 1) frac = 1;
     CGMutablePathRef p = CGPathCreateMutable();
@@ -75,15 +73,47 @@ static CGPathRef piePath(CGPoint c, CGFloat r, float frac) {   // 冷却遮罩�
 }
 
 @implementation D3TouchUI {
-    NSMapTable<UITouch *, NSNumber *> *_owner;   // touch → 'K'<<8|键位 或 'J'（摇杆）
-    UITouch *_joy; CGPoint _joyBase, _joyNow;    // 摇杆触摸与底环圆心/当前指位
-    CAShapeLayer *_key[B_N], *_pie[6];
-    CATextLayer *_lab[B_N];
-    CALayer *_icon[B_N];                         // 技能图标（图集推送后贴上；圆形裁切）
+    NSMapTable<UITouch *, NSNumber *> *_owner;
+    // 技能瞄准手势（安卓 Gesture：一槽一手势；键在 DOWN 即按下——按住即瞄/连发）
+    struct { UITouch *touch; CGPoint origin, now; BOOL dragged; } _gest[6];
+    // 摇杆
+    UITouch *_joy; CGPoint _joyBase, _joyNow;
+    // 几何
+    DmTlCanvas _canvas; BOOL _canvasOk;
+    DmTlControl _ctl[10]; int _nctl;
+    CGPoint _pos[DMKJ_N]; CGFloat _rad[DMKJ_N]; BOOL _built[DMKJ_N];
+    CGPoint _joyIdle;
+    // 图层（每键：底填充/外环/白环/内环/刻度/按下环/图标/文字）
+    CAShapeLayer *_fill[DMKJ_N], *_ro[DMKJ_N], *_rm[DMKJ_N], *_ri[DMKJ_N], *_tick[DMKJ_N], *_hi[DMKJ_N];
+    CATextLayer *_lab[DMKJ_N];
+    CALayer *_icon[DMKJ_N];
+    CAShapeLayer *_pie[6];
     CAShapeLayer *_joyRing, *_joyKnob;
     float _cdFrac[6];
-    uint64_t _held;                              // 当前按住的键位图（亮态）
+    uint64_t _held;   // 普通键位图（技能手势键不经此，publish 时并）
 }
+
+// ---- 键位映射 ----
++ (int)slotKey:(int)slot { return DM_SKILL_SLOT_KEY(slot); }   // 槽 → 键号（0:Y 1:B 2:A 3:X 4:ZL 5:ZR）
+
+// 布局模型键 → 皮肤图标 key（安卓 ControlSkin.iconKey + 技能通用图）
++ (NSString *)iconKey:(DmTlControl *)c {
+    if (c->slot >= 0) return [NSString stringWithFormat:@"skill%d", c->slot + 1];   // 通用图（动态映射下轮接）
+    switch (c->button) {
+        case B_R: return @"potion"; case B_RIGHT: return @"portal";
+        case B_L: return @"evade";  case B_PICKUP: return @"pickup";
+        case B_PLUS: return @"inventory"; case B_MINUS: return @"menu";
+        default: return nil;
+    }
+}
++ (NSString *)label:(DmTlControl *)c {
+    if (c->slot >= 0) return c->slot == 2 ? @"攻" : [NSString stringWithFormat:@"%d", c->slot + 1];
+    switch (c->button) {
+        case B_R: return @"药"; case B_RIGHT: return @"城"; case B_L: return @"闪";
+        case B_PICKUP: return @"拾"; default: return nil;
+    }
+}
+
 - (void)applySkillAtlas:(const unsigned char *)rgba w:(int)w h:(int)h {
     CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
     CGContextRef ctx = CGBitmapContextCreate((void *)rgba, w, h, 8, w * 4, cs, kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big);
@@ -93,48 +123,29 @@ static CGPathRef piePath(CGPoint c, CGFloat r, float frac) {   // 冷却遮罩�
     CFRelease(ctx);
     if (!img) return;
     [CATransaction begin]; [CATransaction setDisableActions:YES];
-    for (int i = 0; i < 6; i++) {   // row0 前 6 格 = 技能 1-6（128px/格，texdump 离线实证的网格）
-        int b = K_CD_KEY[i];
-        if (!_key[b]) continue;
+    for (int i = 0; i < 6; i++) {   // row0 前 6 格 = 技能 1-6（128px/格——网格假设未实证，图集管线仍暂停中）
+        int b = [DmGamepad slotKey:i];   // 槽 i 的键（0:Y 1:B 2:A 3:X 4:ZL 5:ZR）
+        if (b < 0 || b >= DMKJ_N || !_built[b] || !_fill[b]) continue;
         CGImageRef tile = CGImageCreateWithImageInRect(img, CGRectMake(i * 128, 0, 128, 128));
         if (!tile) continue;
         if (!_icon[b]) {
             _icon[b] = [CALayer layer];
             _icon[b].contentsGravity = kCAGravityResizeAspect;
             _icon[b].masksToBounds = YES;
-            [_key[b] insertSublayer:_icon[b] above:_pie[i]];   // 图标盖冷却扇形
+            [_fill[b].superlayer insertSublayer:_icon[b] above:_fill[b]];
         }
-        CGPoint c = [self keyCenter:b]; CGFloat r = [self keyR:b];
-        _icon[b].frame = CGRectMake(c.x - r * 0.86, c.y - r * 0.86, r * 1.72, r * 1.72);
-        _icon[b].cornerRadius = r * 0.86;   // 圆形裁切（暗黑不朽观感）
+        CGPoint c = _pos[b]; CGFloat r = _rad[b];
+        _icon[b].frame = CGRectMake(c.x - r * 0.82, c.y - r * 0.82, r * 1.64, r * 1.64);
+        _icon[b].cornerRadius = r * 0.82;   // 圆形裁切（暗黑不朽观感）
         _icon[b].contents = (__bridge id)tile;
         _icon[b].contentsScale = self.window.screen.scale ?: 2;
         CGImageRelease(tile);
-        if (_lab[b]) _lab[b].hidden = YES;   // 有图标就不显示槽序数字
+        if (_lab[b]) _lab[b].hidden = YES;
     }
     [CATransaction commit];
     CGImageRelease(img);
 }
-- (CGFloat)u { return MIN(self.bounds.size.height / 430.0, 1.3); }
-- (CGPoint)keyCenter:(int)b {
-    CGRect r = self.bounds; CGFloat u = self.u;
-    CGPoint atk = CGPointMake(r.size.width - K_ATK_DX * u, r.size.height - K_ATK_DY * u);
-    if (b == B_A) return atk;
-    if (b == B_R) return CGPointMake(r.size.width - K_POT_DX * u, r.size.height - K_POT_DY * u);
-    if (b == B_ZL || b == B_PLUS || b == B_MINUS || b == B_SEASON) {
-        int i = b == B_PLUS ? 0 : b == B_MINUS ? 1 : b == B_ZL ? 2 : 3;   // 自右向左：包/单/城/赛
-        return CGPointMake(r.size.width - (K_SYS_DX0 + i * K_SYS_STEP) * u, K_SYS_DY * u + self.safeAreaInsets.top);
-    }
-    for (int i = 0; i < 5; i++) if (K_ARC_KEY[i] == b) {
-        CGFloat a = K_ARC_DEG[i] * M_PI / 180;
-        return CGPointMake(atk.x + K_ARC_R * u * cos(a), atk.y - K_ARC_R * u * sin(a));
-    }
-    return atk;
-}
-- (CGFloat)keyR:(int)b {
-    CGFloat u = self.u;
-    return b == B_A ? K_ATK_R * u : b == B_R ? K_POT_R * u : (b == B_ZL || b == B_PLUS || b == B_MINUS || b == B_SEASON) ? K_SYS_R * u : K_ARC_R_KEY * u;
-}
+
 - (instancetype)initWithFrame:(CGRect)f {
     if ((self = [super initWithFrame:f])) {
         self.multipleTouchEnabled = YES; self.opaque = NO; self.backgroundColor = UIColor.clearColor;
@@ -143,24 +154,9 @@ static CGPathRef piePath(CGPoint c, CGFloat r, float frac) {   // 冷却遮罩�
         dispatch_once(&once, ^{
             k_idle = [UIColor colorWithWhite:0.05 alpha:0.55]; k_on = [UIColor colorWithWhite:0.24 alpha:0.85];
             k_line = [UIColor colorWithWhite:0.62 alpha:0.5]; k_text = [UIColor colorWithWhite:0.96 alpha:1];
+            k_ring = [UIColor colorWithWhite:1 alpha:0.28];
+            k_pie  = [UIColor colorWithRed:0 green:0 blue:0 alpha:0.788];   // #C9000000
         });
-        _joyRing = mkShape(self.layer); _joyRing.fillColor = UIColor.clearColor.CGColor; _joyRing.hidden = YES;
-        _joyKnob = mkShape(self.layer); _joyKnob.hidden = YES;
-        static NSString *const names[B_N] = {@"攻", @"6", @"2", @"3", nil, nil, @"5", @"药", @"城", @"4", @"包", @"单", @"赛"};
-        // 弧键标签 = 槽序数字（图标管线接通后换贴图）：X=2 Y=3 ZR=4 L=5 B=6
-        for (int b = 0; b < B_N; b++) {
-            if (!(b == B_A || b == B_R || b == B_ZL || b == B_PLUS || b == B_MINUS || b == B_X || b == B_Y || b == B_ZR || b == B_L || b == B_B || b == B_SEASON)) continue;
-            _key[b] = mkShape(self.layer);
-            if (names[b]) _lab[b] = mkLabel(_key[b], names[b]);
-        }
-        for (int i = 0; i < 6; i++) {   // 冷却扇形：键 layer 内、标签之下
-            _pie[i] = [CAShapeLayer layer];
-            _pie[i].fillColor = [[UIColor colorWithWhite:0 alpha:0.55] CGColor];
-            _pie[i].strokeColor = nil; _pie[i].lineWidth = 0; _pie[i].hidden = YES;
-            int b = K_CD_KEY[i];
-            if (_lab[b]) [_key[b] insertSublayer:_pie[i] below:_lab[b]]; else [_key[b] addSublayer:_pie[i]];
-            _cdFrac[i] = -1;
-        }
         // 进游戏门控：游戏 HUD 根槽激活才显示（启动器/加载/过场无按键）
         self.hidden = YES;
         __weak typeof(self) wself = self;
@@ -169,142 +165,274 @@ static CGPathRef piePath(CGPoint c, CGFloat r, float frac) {   // 冷却遮罩�
             if (!s) { [t invalidate]; return; }
             [s syncVisible];
         }];
-        [self layoutOnce];
-        NSLog(@"[dm] D3 触控面就绪（动态摇杆 + 技能簇 + 系统排；进游戏后显示）");
+        NSLog(@"[dm] D3 触控面（安卓画布右组 + 实证键位 Y/B/A/X/ZL/ZR + 药R/城DPad右）：进游戏后显示");
     }
     return self;
 }
+
 - (void)syncVisible {   // 显隐 = 游戏态 ∧ 无物理手柄
     BOOL show = dm_ingame() && !g_phys;
     if (!show && !self.hidden) { [self resetTouches]; self.hidden = YES; }
     else if (show && self.hidden) self.hidden = NO;
 }
-- (void)layoutOnce { [self setNeedsLayout]; [self layoutIfNeeded]; }
+
+// ---- 几何 ----
 - (void)layoutSubviews {
     [super layoutSubviews];
-    CGFloat u = self.u;
+    CGRect b = self.bounds;
+    UIEdgeInsets safe = self.safeAreaInsets;
+    DmTlView v = { safe.left, safe.top, safe.right, safe.bottom, b.size.width, b.size.height, 1 };
+    DmTlCanvas c; _canvasOk = dm_tl_canvas(&v, &_canvas);
     [CATransaction begin]; [CATransaction setDisableActions:YES];
-    for (int b = 0; b < B_N; b++) {
-        if (!_key[b]) continue;
-        CGPoint c = [self keyCenter:b]; CGFloat r = [self keyR:b];
-        CGPathRef p = circleAt(c, r); _key[b].path = p; _key[b].shadowPath = p; CGPathRelease(p);
-        if (_lab[b]) {
-            CGFloat fs = b == B_A ? 22 * u : (b == B_R || b == B_ZL || b == B_PLUS || b == B_MINUS || b == B_SEASON) ? 14 * u : 16 * u;
-            _lab[b].fontSize = fs;   // 只设 fontSize：CATextLayer 默认系统字体（font 属性要 CTFontRef 桥接，CI 教训）
-            _lab[b].frame = CGRectMake(c.x - fs * 1.6, c.y - fs * 0.75, fs * 3.2, fs * 1.5);
+    // 顶排（现行已验证几何）：r=19，自右向左 包/单/赛，y=150
+    {
+        CGFloat u = self.u;
+        static const int topKeys[3] = {B_PLUS, B_MINUS, B_SEASON};
+        static NSString *const topNames[3] = {@"包", @"单", @"赛"};
+        static NSString *const topIcons[3] = {@"inventory", @"menu", nil};
+        for (int i = 0; i < 3; i++) {
+            int k = topKeys[i];
+            _pos[k] = CGPointMake(b.size.width - (40 + i * 48) * u, 150 * u + safe.top);
+            _rad[k] = 19 * u;
+            _built[k] = YES;
+            [self buildVisual:k label:topNames[i] icon:topIcons[i]];
         }
-        _key[b].contentsScale = self.window.screen.scale ?: self.contentScaleFactor;
-        if (_lab[b]) _lab[b].contentsScale = _key[b].contentsScale;
     }
-    for (int i = 0; i < 5; i++) {   // 弧键槽序数字（2-6）
-        int b = K_ARC_KEY[i];
-        if (_lab[b]) _lab[b].string = [NSString stringWithFormat:@"%d", i + 2];
+    // 右组（安卓设计画布）
+    if (_canvasOk) {
+        _nctl = dm_tl_default_controls(_ctl, 10);
+        for (int i = 0; i < _nctl; i++) {
+            DmTlControl *ct = &_ctl[i];
+            double x, y; dm_tl_point(&_canvas, ct->x, ct->y, ct->inGroup, &x, &y);
+            int k = ct->button;
+            if (k < 0 || k >= DMKJ_N) continue;
+            _pos[k] = CGPointMake(x, y); _rad[k] = ct->r * _canvas.scale;
+            _built[k] = YES;
+            [self buildVisual:k label:[DmGamepad label:ct] icon:[DmGamepad iconKey:ct]];
+        }
+        // 摇杆静息位（设计 (left+190, groupTop+620) r123——x 视图左锚、y 右组顶锚，安卓 SCV:1109）
+        double jx = v.left + 190 * _canvas.scale, jy = _canvas.groupY + 620 * _canvas.scale;
+        _joyIdle = CGPointMake(jx, jy);
+        CGFloat jr = 123 * _canvas.scale;
+        if (!_joyRing) {
+            _joyRing = mkShape(self.layer); _joyRing.fillColor = UIColor.clearColor.CGColor; _joyRing.hidden = YES;
+            _joyKnob = mkShape(self.layer); _joyKnob.hidden = YES;
+        }
+        CGPathRef rp = circleAt(CGPointMake(jr, jr), jr); _joyRing.path = rp; CGPathRelease(rp);
+        _joyRing.bounds = CGRectMake(0, 0, 2 * jr, 2 * jr);
+        CGFloat kr = 26 * _canvas.scale;
+        CGPathRef kp = circleAt(CGPointMake(kr, kr), kr); _joyKnob.path = kp; _joyKnob.shadowPath = kp; CGPathRelease(kp);
+        _joyKnob.bounds = CGRectMake(0, 0, 2 * kr, 2 * kr);
+        [self placeJoy];
     }
-    CGFloat jr = K_JOY_R * u, kr = K_JOY_KNOB * u;
-    CGPathRef rp = circleAt(CGPointMake(jr, jr), jr); _joyRing.path = rp; CGPathRelease(rp);
-    _joyRing.bounds = CGRectMake(0, 0, 2 * jr, 2 * jr);
-    CGPathRef kp = circleAt(CGPointMake(kr, kr), kr); _joyKnob.path = kp; _joyKnob.shadowPath = kp; CGPathRelease(kp);
-    _joyKnob.bounds = CGRectMake(0, 0, 2 * kr, 2 * kr);
-    [self placeJoy];
     for (int i = 0; i < 6; i++) [self drawPie:i];
     [CATransaction commit];
 }
-- (void)placeJoy {   // 底环定位到落指点；旋钮按当前指位夹在环内
-    CGFloat u = self.u, R = K_JOY_R * u;
-    if (!_joy) { _joyRing.hidden = YES; _joyKnob.hidden = YES; return; }
-    _joyRing.hidden = NO; _joyKnob.hidden = NO;
-    _joyRing.position = _joyBase;
-    CGFloat dx = _joyNow.x - _joyBase.x, dy = _joyNow.y - _joyBase.y, d = hypot(dx, dy);
-    if (d > R) { dx *= R / d; dy *= R / d; }
-    _joyKnob.position = CGPointMake(_joyBase.x + dx, _joyBase.y + dy);
+
+// 每键视觉：底填充 + 外环 + 白环 + 内环 + 45° 刻度线 + 按下环 + 图标/文字（安卓 ControlArt.socket 移植）
+- (void)buildVisual:(int)k label:(NSString *)text icon:(NSString *)iconKey {
+    CGPoint c = _pos[k]; CGFloat r = _rad[k];
+    if (!_fill[k]) {
+        _fill[k] = mkShape(self.layer);
+        _ro[k] = mkShape(self.layer); _ro[k].fillColor = nil;
+        _rm[k] = mkShape(self.layer); _rm[k].fillColor = nil; _rm[k].strokeColor = k_ring.CGColor;
+        _ri[k] = mkShape(self.layer); _ri[k].fillColor = nil;
+        _tick[k] = mkShape(self.layer); _tick[k].fillColor = nil; _tick[k].strokeColor = k_ring.CGColor;
+        _hi[k] = mkShape(self.layer); _hi[k].fillColor = nil; _hi[k].hidden = YES;
+        _hi[k].strokeColor = [UIColor colorWithWhite:1 alpha:0.55].CGColor;
+    }
+    CGPathRef p = circleAt(c, r); _fill[k].path = p; _fill[k].shadowPath = p; CGPathRelease(p);
+    CGFloat scale = self.window.screen.scale ?: 2;
+    _ro[k].lineWidth = fmax(1, 0.016 * r); _rm[k].lineWidth = fmax(1, 0.03 * r);
+    _ri[k].lineWidth = fmax(1, 0.012 * r); _hi[k].lineWidth = fmax(1, 0.025 * r);
+    CGPathRef po = circleAt(c, r * 0.982); _ro[k].path = po; CGPathRelease(po);
+    CGPathRef pm = circleAt(c, r * 0.956); _rm[k].path = pm; CGPathRelease(pm);
+    CGPathRef pi_ = circleAt(c, r * 0.929); _ri[k].path = pi_; CGPathRelease(pi_);
+    CGPathRef ph = circleAt(c, r * 0.925); _hi[k].path = ph; CGPathRelease(ph);
+    CGMutablePathRef tp = CGPathCreateMutable();
+    for (int q = 0; q < 4; q++) {   // 45°/135°/225°/315° 刻度线（r0.944→0.97）
+        CGFloat a = (q * 0.5 + 0.25) * (CGFloat)M_PI;
+        CGPathMoveToPoint(tp, NULL, c.x + r * 0.944 * cos(a), c.y + r * 0.944 * sin(a));
+        CGPathAddLineToPoint(tp, NULL, c.x + r * 0.97 * cos(a), c.y + r * 0.97 * sin(a));
+    }
+    _tick[k].path = tp; _tick[k].lineWidth = fmax(1, 0.008 * r); CGPathRelease(tp);
+    _fill[k].contentsScale = _ro[k].contentsScale = _rm[k].contentsScale = _ri[k].contentsScale = scale;
+    _tick[k].contentsScale = _hi[k].contentsScale = scale;
+    if (k == B_PICKUP) _fill[k].opacity = 0.45f;   // 灰显：token 无来源（下轮 native 派发）
+    UIImage *img = iconKey ? [DmTouchSkin.shared image:iconKey] : nil;
+    if (img) {
+        if (!_icon[k]) { _icon[k] = [CALayer layer]; _icon[k].contentsGravity = kCAGravityResizeAspect; _icon[k].masksToBounds = YES; [_fill[k].superlayer insertSublayer:_icon[k] above:_fill[k]]; }
+        _icon[k].frame = CGRectMake(c.x - r * 0.82, c.y - r * 0.82, r * 1.64, r * 1.64);
+        _icon[k].cornerRadius = r * 0.82;
+        _icon[k].contents = (__bridge id)img.CGImage;
+        _icon[k].contentsScale = scale;
+        _icon[k].hidden = NO;
+        if (_lab[k]) _lab[k].hidden = YES;
+    } else {
+        if (_icon[k]) _icon[k].hidden = YES;
+        if (text && !_lab[k]) _lab[k] = mkLabel(_fill[k], text);
+        if (_lab[k]) {
+            CGFloat fs = k == B_A ? 22 * self.u : 14 * self.u;
+            _lab[k].fontSize = fs;   // 只设 fontSize（CATextLayer.font 要 CTFontRef 桥接，CI 教训）
+            _lab[k].frame = CGRectMake(c.x - fs * 1.6, c.y - fs * 0.75, fs * 3.2, fs * 1.5);
+            _lab[k].contentsScale = scale;
+            _lab[k].hidden = NO;
+        }
+    }
 }
+
+- (void)placeJoy {   // 底座恒显（安卓语义）：静息归设计位，落指跟随；旋钮夹在环内
+    if (!_joyRing || !_canvasOk) return;
+    CGPoint base = _joy ? _joyBase : _joyIdle;
+    _joyRing.hidden = NO; _joyKnob.hidden = NO;
+    _joyRing.position = base;
+    CGFloat R = 123 * _canvas.scale;
+    CGFloat dx = _joy ? _joyNow.x - base.x : 0, dy = _joy ? _joyNow.y - base.y : 0, d = hypot(dx, dy);
+    if (d > R) { dx *= R / d; dy *= R / d; }
+    _joyKnob.position = CGPointMake(base.x + dx, base.y + dy);
+}
+
 - (void)drawPie:(int)slot {
-    int b = K_CD_KEY[slot];
-    if (!_key[b]) return;
+    int b = [DmGamepad slotKey:slot];
+    if (b < 0 || b >= DMKJ_N || !_built[b] || !_fill[b]) return;
+    if (!_pie[slot]) {
+        _pie[slot] = [CAShapeLayer layer];
+        _pie[slot].fillColor = k_pie.CGColor; _pie[slot].strokeColor = nil; _pie[slot].lineWidth = 0; _pie[slot].hidden = YES;
+        [_fill[b].superlayer insertSublayer:_pie[slot] above:_fill[b]];
+    }
     float frac = _cdFrac[slot];
     _pie[slot].hidden = frac <= 0;
-    CGPathRef p = piePath([self keyCenter:b], [self keyR:b] * 0.96, frac);
+    CGPathRef p = piePath(_pos[b], _rad[b] * 0.86, frac);   // 安卓：r=0.86×halfW，#C9000000
     _pie[slot].path = p;
     if (p) CGPathRelease(p);
 }
-- (int)keyAt:(CGPoint)p {   // 命中测试：最近键且在半径 1.15 倍内（技能簇 + 药水 + 系统排 + 赛季钮）
-    static const int keys[] = {B_A, B_X, B_Y, B_ZR, B_L, B_B, B_R, B_ZL, B_PLUS, B_MINUS, B_SEASON};
+
+// ---- 命中 ----
+- (int)keyAt:(CGPoint)p {   // 最近键 1.15 倍容差：顶排 + 右组；拾取钮灰显不响应
     int best = -1; CGFloat bestd = 1e9;
-    for (int i = 0; i < (int)(sizeof keys / sizeof *keys); i++) {
-        int b = keys[i];
-        CGFloat d = hypot(p.x - [self keyCenter:b].x, p.y - [self keyCenter:b].y);
-        if (d < bestd) { bestd = d; best = b; }
+    for (int k = 0; k < DMKJ_N; k++) {
+        if (!_built[k] || k == B_PICKUP) continue;
+        CGFloat d = hypot(p.x - _pos[k].x, p.y - _pos[k].y);
+        if (d < bestd) { bestd = d; best = k; }
     }
-    return (best >= 0 && bestd <= [self keyR:best] * 1.15) ? best : -1;
+    return (best >= 0 && bestd <= _rad[best] * 1.15) ? best : -1;
 }
+
 - (void)touchesBegan:(NSSet<UITouch *> *)ts withEvent:(UIEvent *)e {
-    CGRect r = self.bounds;
     for (UITouch *t in ts) {
         CGPoint p = [t locationInView:self];
         int k = [self keyAt:p];
-        if (k == B_SEASON) {   // 赛季面板：点按即开，不进游戏键位图（recompute 只认 'K' 标）
-            [_owner setObject:@((uint64_t)'S' << 8) forKey:t];
-            [SeasonPanel presentInView:self];
+        if (k == B_SEASON) { [_owner setObject:@((uint64_t)TAG_PANEL << 8) forKey:t]; [SeasonPanel presentInView:self]; continue; }
+        if (k >= 0 && k != B_PICKUP) {
+            int slot = -1;
+            for (int i = 0; i < _nctl; i++) if (_ctl[i].button == k && _ctl[i].slot >= 0) { slot = _ctl[i].slot; break; }
+            if (slot >= 0 && !_gest[slot].touch) {   // 技能键（含攻击）= 瞄准手势：一槽一手势
+                _gest[slot].touch = t; _gest[slot].origin = p; _gest[slot].now = p; _gest[slot].dragged = NO;
+                [_owner setObject:@(((uint64_t)TAG_SKILL << 8) | (uint64_t)slot) forKey:t];
+                continue;
+            }
+            if (slot >= 0) continue;   // 同槽已有手势：忽略第二个手指（安卓 begin 语义）
+            [_owner setObject:@(((uint64_t)TAG_KEY << 8) | (uint64_t)k) forKey:t];
             continue;
         }
-        if (k >= 0) { [_owner setObject:@((uint64_t)'K' << 8 | (uint64_t)k) forKey:t]; continue; }
-        if (!_joy && p.x < r.size.width * K_JOY_ZONE_X && p.y > r.size.height * K_JOY_ZONE_Y) {
-            _joy = t; _joyBase = p; _joyNow = p;
-            [_owner setObject:@((uint64_t)'J' << 8) forKey:t];
-            continue;
+        if (!_joy) {
+            DmTlView v = { self.safeAreaInsets.left, self.safeAreaInsets.top, self.safeAreaInsets.right,
+                           self.safeAreaInsets.bottom, self.bounds.size.width, self.bounds.size.height, 1 };
+            if (dm_tl_stick_zone(&v, p.x, p.y)) {
+                _joy = t; _joyBase = p; _joyNow = p;
+                [_owner setObject:@((uint64_t)TAG_JOY << 8) forKey:t];
+                continue;
+            }
         }
-        // 其余区域：忽略（D3 不读触屏透传；hle_touch 合成保留给未来 UI 直调）
+        // 其余区域：忽略（透传光标/点地下轮——屏→世界反投影未解，调查记录 §5.4.2）
     }
     [self recompute];
 }
 - (void)touchesMoved:(NSSet<UITouch *> *)ts withEvent:(UIEvent *)e {
-    for (UITouch *t in ts) if (t == _joy) _joyNow = [t locationInView:self];
+    for (UITouch *t in ts) {
+        NSNumber *tag = [_owner objectForKey:t];
+        if (!tag) continue;
+        uint64_t x = tag.unsignedLongLongValue;
+        CGPoint p = [t locationInView:self];
+        if ((x >> 8) == TAG_JOY && t == _joy) _joyNow = p;
+        else if ((x >> 8) == TAG_SKILL) {
+            int slot = (int)(x & 0xff);
+            if (slot >= 0 && slot < 6 && _gest[slot].touch == t) {
+                _gest[slot].now = p;
+                if (hypot(p.x - _gest[slot].origin.x, p.y - _gest[slot].origin.y) > K_SLOP) _gest[slot].dragged = YES;
+            }
+        }
+    }
     [self recompute];
 }
 - (void)endTouches:(NSSet<UITouch *> *)ts {
     for (UITouch *t in ts) {
+        NSNumber *tag = [_owner objectForKey:t];
         [_owner removeObjectForKey:t];
-        if (t == _joy) _joy = nil;
+        if (!tag) continue;
+        uint64_t x = tag.unsignedLongLongValue;
+        if ((x >> 8) == TAG_JOY && t == _joy) _joy = nil;
+        else if ((x >> 8) == TAG_SKILL) {
+            int slot = (int)(x & 0xff);
+            if (slot >= 0 && slot < 6 && _gest[slot].touch == t)
+                _gest[slot].touch = NULL, _gest[slot].dragged = NO;
+        }
     }
     [self recompute];
 }
 - (void)touchesEnded:(NSSet<UITouch *> *)ts withEvent:(UIEvent *)e { [self endTouches:ts]; }
 - (void)touchesCancelled:(NSSet<UITouch *> *)ts withEvent:(UIEvent *)e { [self endTouches:ts]; }
-- (void)resetTouches { [_owner removeAllObjects]; _joy = nil; [self recompute]; }
+- (void)resetTouches {
+    [_owner removeAllObjects]; _joy = nil;
+    for (int i = 0; i < 6; i++) { _gest[i].touch = NULL; _gest[i].dragged = NO; }
+    [self recompute];
+}
+
 - (void)recompute {
     uint64_t btn = 0;
-    for (UITouch *t in _owner) {   // NSMapTable 快速枚举 = 键（旧代码验证过的模式）
+    for (UITouch *t in _owner) {
         uint64_t x = [_owner objectForKey:t].unsignedLongLongValue;
-        if ((x >> 8) == 'K') btn |= 1ull << (x & 0xff);
+        if ((x >> 8) == TAG_KEY) btn |= 1ull << (x & 0xff);
     }
-    int32_t ax = 0, ay = 0;
+    for (int slot = 0; slot < 6; slot++)   // 技能手势 = 绑定键保持按下（按住即瞄/连发）
+        if (_gest[slot].touch) btn |= 1ull << [DmGamepad slotKey:slot];
+    int32_t ax = 0, ay = 0, brx = 0, bry = 0;
     if (_joy) {
-        CGFloat u = self.u, R = K_JOY_R * u, dz = R * K_JOY_DEAD;
+        CGFloat R = _canvasOk ? 123 * _canvas.scale : 62 * self.u, dz = R * 0.12;
         CGFloat dx = _joyNow.x - _joyBase.x, dy = _joyNow.y - _joyBase.y, d = hypot(dx, dy);
         if (d > dz) {
-            CGFloat m = fmin((d - dz) / (R * K_JOY_FULL - dz), 1) / d;
+            CGFloat m = fmin((d - dz) / (R * 0.72 - dz), 1) / d;
             ax = (int32_t)lrint(dx * m * 32767); ay = (int32_t)lrint(-dy * m * 32767);   // 上=正（host 约定）
         }
+    }
+    for (int slot = 0; slot < 6; slot++) {   // 拖动瞄准：第一拖动手势的方向 → 虚拟右摇杆（游戏原生右摇杆=世界光标）
+        if (!_gest[slot].dragged) continue;
+        CGFloat dx = _gest[slot].now.x - _gest[slot].origin.x, dy = _gest[slot].now.y - _gest[slot].origin.y;
+        CGFloat d = hypot(dx, dy);
+        if (d > K_SLOP) { brx = (int32_t)lrint(dx / d * 32767); bry = (int32_t)lrint(-dy / d * 32767); }
+        break;
     }
     BOOL ch = btn != _held;
     _held = btn;
     pthread_mutex_lock(&g_mu);
-    g_touch_btn = btn; g_touch_lx = ax; g_touch_ly = ay; g_touch_rx = 0; g_touch_ry = 0;
+    g_touch_btn = btn; g_touch_lx = ax; g_touch_ly = ay; g_touch_rx = brx; g_touch_ry = bry;
     pthread_mutex_unlock(&g_mu);
     publish();
     [self placeJoy];
     if (ch) [self refreshHeld];
 }
-- (void)refreshHeld {   // 按下态填充
+- (void)refreshHeld {   // 按下态：底填充换亮色 + 按下环
     [CATransaction begin]; [CATransaction setDisableActions:YES];
-    for (int b = 0; b < B_N; b++) if (_key[b]) {
-        BOOL on = (_held >> b) & 1;
-        _key[b].fillColor = (on ? k_on : k_idle).CGColor;
+    for (int k = 0; k < DMKJ_N; k++) {
+        if (!_built[k] || !_fill[k]) continue;
+        BOOL on = (_held >> k) & 1;
+        _fill[k].fillColor = (on ? k_on : k_idle).CGColor;
+        _hi[k].hidden = !on;
     }
     [CATransaction commit];
 }
 
-// hle 层每帧推 D3 技能冷却（slot 0=攻击 1-5=弧键序；frac∈[0,1] 剩余比例，<0 无冷却）。
+// hle 层每帧推 D3 技能冷却（slot = 游戏槽序 0..5；frac∈[0,1] 剩余比例，<0 无冷却）。
 // 定义在 @implementation 内：可访问私有 ivar（@end 外访问会报 private，CI 实证）。
 void dm_gamepad_skill(int slot, float frac) {
     D3TouchUI *v = g_view;
@@ -315,8 +443,7 @@ void dm_gamepad_skill(int slot, float frac) {
     else dispatch_async(dispatch_get_main_queue(), ^{ [v drawPie:slot]; });
 }
 
-// nvn_mtl 推技能图标图集（游戏运行时去排布解码的 1024×512 RGBA，非主线程）。
-// 异步主线程贴键；buffer 调用方随即 free → 这里复制后移交 block 释放。
+// nvn_mtl 推技能图标图集（图集管线仍暂停中；接口保留，槽→键映射已换实证表）。
 void dm_gamepad_skill_atlas(const unsigned char *rgba, int w, int h) {
     D3TouchUI *v = g_view;
     if (!v || w != 1024 || h != 512 || !rgba) return;

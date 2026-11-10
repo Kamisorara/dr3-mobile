@@ -37,6 +37,9 @@ test:
 	clang -std=c11 -O1 -Wall -Wextra -Werror tests/test_sixaxis_math.c -lm -o work/test-sixaxis-math
 	./work/test-sixaxis-math
 
+	clang -std=c11 -O1 -Wall -Wextra -Werror -Iplatform/ios/Sources tests/test_touch_layout.c platform/ios/Sources/DmTouchLayout.c -lm -o work/test-touch-layout
+	./work/test-touch-layout
+
 	clang -O1 -Wall -fobjc-arc tests/test_controller_effects_probe.m native/controller_effects.m -framework Foundation -framework GameController -framework CoreHaptics -o work/test-controller-effects-probe
 	./work/test-controller-effects-probe
 

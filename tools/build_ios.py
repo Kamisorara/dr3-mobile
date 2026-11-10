@@ -22,6 +22,7 @@ def main():
     parser.add_argument('--device',default='')
     parser.add_argument('--cpu',default='apple-a18',choices=['apple-a17','apple-a18'],help='Native CPU target; use apple-a17 for iPhone 15 Pro')
     parser.add_argument('--embed-assets',action='store_true',help='Include the private local RomFS and Chinese DLC in this app')
+    parser.add_argument('--skin',default='',help='Optional touch-skin PNG directory (Android ui/skin key set) copied to Gen/skin')
     args=parser.parse_args()
     if args.sign and not args.team_id:parser.error('--sign requires an explicit --team-id')
     check_modules();copy_native();verified=json.loads((WORK/'verification.json').read_text())
@@ -77,6 +78,13 @@ def main():
             subprocess.run(['cp','-cR',str(source),str(gen/name)],check=True)
     else:
         for name in ('romfs','aoc'):(gen/name).mkdir()
+    if args.skin:
+        # 触控皮肤（安卓 ui/skin 同款 key 集的游戏衍生位图）：用户自备目录 → Gen/skin（optional 资源，
+        # 公开源码树不含——与 romfs 同纪律）；缺省不建目录，壳侧 DmTouchSkin 全量降级矢量/文字
+        skin_src=Path(args.skin)
+        if not skin_src.is_dir():sys.exit(f'[x] --skin 目录不存在：{skin_src}')
+        shutil.copytree(skin_src,gen/'skin',dirs_exist_ok=True)
+        print(f'[i] 触控皮肤 {len(list((gen/"skin").glob("*.png")))} 张 ← {skin_src}')
     subprocess.run(['xcodegen','generate','--spec',str(ios/'project.yml')],cwd=ios,env=settings,check=True)
     source_identity={str(p.relative_to(ROOT)):sha(p) for p in sorted((ios/'Sources').rglob('*')) if p.is_file()}
     compiled_inputs={str(p.resolve().relative_to(ROOT)):sha(p) for p in list((gen/'src').iterdir())+list((gen/'main').iterdir()) if p.is_file()}

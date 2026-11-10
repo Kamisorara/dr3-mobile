@@ -29,6 +29,10 @@ targets:
         optional: true
         type: folder
         buildPhase: resources
+      - path: Gen/skin
+        optional: true
+        type: folder
+        buildPhase: resources
       - path: Gen/aoc
         optional: true
         type: folder
