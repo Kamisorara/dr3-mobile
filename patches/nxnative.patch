@@ -2179,7 +2179,7 @@ index 1a63bd7..9fcffec 100644
  
  // ---------- Host gate dispatch ----------
 diff --git a/dm/host/hle.h b/dm/host/hle.h
-index 79fda3d..c23fa4c 100644
+index 79fda3d..ae1e1ea 100644
 --- a/dm/host/hle.h
 +++ b/dm/host/hle.h
 @@ -77,4 +77,4 @@ uint64_t dm_audio_render_calls(void);   // Cumulative sound card callback count
@@ -2187,7 +2187,7 @@ index 79fda3d..c23fa4c 100644
  //   0x8d   Extra mercenary equipment slots (mercenary + rift level ≥10 + belt / boots / gloves / ring / amulet: w0 is replaced with 1, writes x0; x8 always 0) dm_rift.c      0x64a34c (branch gate: x8≠0 jumps to 0x64a350, otherwise executes the original instruction and returns to 0x64a350)
  //   0x8e   Client-side check for the extra mercenary equipment slots (rift level ≥10 + the item is a belt / boots / gloves / ring / amulet: w1 is replaced with the item's own type number, writes x1; x8 always 0) dm_rift.c      0x3beb58 (branch gate: x8≠0 jumps to 0x3beb5c, otherwise executes the original instruction and returns to 0x3beb5c)
 -enum { SVC_HOST_TACT_ZLIB = 0x80, SVC_HOST_C2S_DELIVER = 0x81, SVC_HOST_C2S_SYS = 0x82, SVC_HOST_GRANNY_A = 0x83, SVC_HOST_GRANNY_B = 0x84, SVC_HOST_PRIVATE_SKILL_RENDER = 0x85, SVC_HOST_PRIVATE_SKILL_AIM = 0x86, SVC_HOST_GROUND_ASSET = 0x87, SVC_HOST_DROP_SOUND = 0x88, SVC_HOST_RIFT_EXIT = 0x89, SVC_HOST_JOIN_SPAWN = 0x8a, SVC_HOST_JOIN_CORPSE = 0x8b, SVC_HOST_SAVE_ACT = 0x8c, SVC_HOST_MERC_SLOT = 0x8d, SVC_HOST_MERC_SLOT_CL = 0x8e };   // 0x87: fetch the model path for ground items (dm_dropfilter.c drop light)   // 0x83/0x84: Granny per-block decode call sites (hle_granny.c)
-+enum { SVC_HOST_TACT_ZLIB = 0x80, SVC_HOST_C2S_DELIVER = 0x81, SVC_HOST_C2S_SYS = 0x82, SVC_HOST_GRANNY_A = 0x83, SVC_HOST_GRANNY_B = 0x84, SVC_HOST_PRIVATE_SKILL_RENDER = 0x85, SVC_HOST_PRIVATE_SKILL_AIM = 0x86, SVC_HOST_GROUND_ASSET = 0x87, SVC_HOST_DROP_SOUND = 0x88, SVC_HOST_RIFT_EXIT = 0x89, SVC_HOST_JOIN_SPAWN = 0x8a, SVC_HOST_JOIN_CORPSE = 0x8b, SVC_HOST_SAVE_ACT = 0x8c, SVC_HOST_MERC_SLOT = 0x8d, SVC_HOST_MERC_SLOT_CL = 0x8e, SVC_HOST_SEASON_HERO = 0x90 };   // 0x8f 留空：A 层全量门（GameIsSeasonal 恒1）退役——世界装载早退分支=离线卡加载根因（kb/20 §3.2）   // 0x87: fetch the model path for ground items (dm_dropfilter.c drop light)   // 0x83/0x84: Granny per-block decode call sites (hle_granny.c)
++enum { SVC_HOST_TACT_ZLIB = 0x80, SVC_HOST_C2S_DELIVER = 0x81, SVC_HOST_C2S_SYS = 0x82, SVC_HOST_GRANNY_A = 0x83, SVC_HOST_GRANNY_B = 0x84, SVC_HOST_PRIVATE_SKILL_RENDER = 0x85, SVC_HOST_PRIVATE_SKILL_AIM = 0x86, SVC_HOST_GROUND_ASSET = 0x87, SVC_HOST_DROP_SOUND = 0x88, SVC_HOST_RIFT_EXIT = 0x89, SVC_HOST_JOIN_SPAWN = 0x8a, SVC_HOST_JOIN_CORPSE = 0x8b, SVC_HOST_SAVE_ACT = 0x8c, SVC_HOST_MERC_SLOT = 0x8d, SVC_HOST_MERC_SLOT_CL = 0x8e, SVC_HOST_SEASON_ISSEASONAL = 0x8f, SVC_HOST_SEASON_HERO = 0x90 };   // 0x8f = GameIsSeasonal 条件应答门（v2：当前已验证英雄是赛季角色才答 1；世界装载位点已直补丁恒 0，无早退死锁路径；kb/20 §9.5）   // 0x87: fetch the model path for ground items (dm_dropfilter.c drop light)   // 0x83/0x84: Granny per-block decode call sites (hle_granny.c)
 diff --git a/dm/host/hle_account.c b/dm/host/hle_account.c
 index 362a6c2..61dbe98 100644
 --- a/dm/host/hle_account.c
@@ -3255,10 +3255,10 @@ index 367779a..9eccbc0 100644
 +#endif
 diff --git a/dm/host/hle_season.c b/dm/host/hle_season.c
 new file mode 100644
-index 0000000..fbbfc2b
+index 0000000..2a0e6fc
 --- /dev/null
 +++ b/dm/host/hle_season.c
-@@ -0,0 +1,172 @@
+@@ -0,0 +1,269 @@
 +// 赛季轮换 v1（kb/20 §6 定稿实现；gameplay 分支 2026-11-11）：
 +//   目标（用户定案）：每月 1 号新赛季，2026-11 = S1。
 +//   离线防进不去 = patch_nso.py D3 块的世界装载直补丁（0x492f6c bl GameIsSeasonal → mov w0,#0，恒走普通装载；
@@ -3270,6 +3270,13 @@ index 0000000..fbbfc2b
 +//     origin\tYYYY-MM-DD  rotate 起点（当日= S1；缺省 2026-11-01）
 +//   赛季号：rotate = 今天相对 origin 的整月差 + 1（日不计——每月 1 号换季），clamp ≥1；fixed = 配置值。
 +//   主题映射：theme = ((S-1) mod 21) + 1 → P74_ItemPassive_SeasonTheme_%03u（kb/16：21 个官方主题）。
++//   svc 0x8f（SVC_HOST_SEASON_ISSEASONAL，GameIsSeasonal 0x4c8df0 入口，v2 真赛季核心）：宿主条件应答——
++//         当前已验证英雄是赛季角色 → w0=1（全链 55 消费者按赛季走：掉落/任务门/UI 对拍族 0x4b430 等）；
++//         否则 x8=0 走原查询（离线 TLS 链本就 0）。世界装载位点已直补丁恒 0（防早退卡加载，kb/20 §3.2），
++//         恒 1 不再有死锁路径。菜单/无英雄态答 0。
++//   rollover（官方语义模拟）：旁路表 $DM_SAVE/dm-season-heroes.tsv（hero_id → season）——首见英雄记当期赛季；
++//         生效赛季变化时（frame 拍）表内 season < 当期的英雄清 +0x12C bit1 转非赛季（=官方赛季结束转移的离线等价）；
++//         门在进局时也做一遍（懒转换兜底）。
 +//   svc 0x90（SVC_HOST_SEASON_HERO，patch_nso.py D3 块发射于角色↔档案校验 0x4b1b0 入口）：
 +//     英雄旗标 hero+0x12C bit1（记录按 0x520360 查，kb/17 §1.3；返回 1=通过 = 0x4b298 路径语义）：
 +//       enabled → 幂等盖位；
@@ -3302,6 +3309,15 @@ index 0000000..fbbfc2b
 +
 +static _Atomic int g_enabled;               // 总开关快照（重载线程写，门线程读）
 +static _Atomic int g_season;                // 当前生效赛季号
++static _Atomic int g_cur_hero;              // 最近一次过 0x90 门的英雄号（0=无）
++static _Atomic int g_cur_hero_seasonal;     // 该英雄是否赛季角色（0x8f 应答依据）
++
++// 旁路表：hero_id → season（进局时收录；换季 rollover 依据）。卸 mod 即失忆（存档裸档无戳）——
++// 真持久赛季戳 = Digest.season_created 字段号解码（kb/17 §3.4，P5 线）。
++#define HERO_MAX 512
++static struct { uint32_t id; int season; int rolled; } g_heroes[HERO_MAX];
++static int g_nheroes;
++static pthread_mutex_t g_hero_mu = PTHREAD_MUTEX_INITIALIZER;
 +static struct { int mode_rotate, base; int oy, om; } cfg;
 +static long cfg_mtime = -1;
 +static int cfg_loaded, cfg_missing_logged;
@@ -3342,6 +3358,19 @@ index 0000000..fbbfc2b
 +    cfg_loaded = 1;
 +}
 +
++// ---- 旁路表 ----
++static int hero_find(uint32_t id) {
++    for (int i = 0; i < g_nheroes; i++) if (g_heroes[i].id == id) return i;
++    return -1;
++}
++static void hero_record(uint32_t id, int season) {
++    pthread_mutex_lock(&g_hero_mu);
++    int i = hero_find(id);
++    if (i < 0 && g_nheroes < HERO_MAX) { i = g_nheroes++; g_heroes[i].id = id; g_heroes[i].season = season; g_heroes[i].rolled = 0; }
++    if (i >= 0 && g_heroes[i].season > season) g_heroes[i].season = season;   // 保留最早赛季（v1 期英雄迁移：按当期收录后不回退）
++    pthread_mutex_unlock(&g_hero_mu);
++}
++
 +static void config_reload_if_changed(void) {
 +    const char *sv = getenv("DM_SAVE");
 +    char path[1024];
@@ -3365,30 +3394,85 @@ index 0000000..fbbfc2b
 +// ---- 英雄门处理器（hle_svc.c svc_dispatch → host_stubs.c svc_host_call；调用号 hle.h SVC_HOST_SEASON_HERO）----
 +// 门块在 0x4b1b0 入口：x0 = 英雄号（0x4b1c8 mov w19,w0 实证）；宿主置 regs[8]=1 走放行捷径（mov w0,#1; ret），
 +// regs[8]=0 走原首字。同线程语义（门在客体线程上同步执行）：直调客体函数安全。
-+int dm_season_svc(int num, uint64_t *regs) {
-+    if (num != SVC_HOST_SEASON_HERO) return 0;
-+    static pthread_once_t once = PTHREAD_ONCE_INIT;
-+    pthread_once(&once, config_load);       // 门可能先于第一次 fill() 触发：首次同步装配置
++static uint32_t hero_flag_read(uint32_t hero_id) {
 +    static uint8_t *base;
 +    if (!base) {
 +        for (int i = 0; i < g_nmod; i++)
 +            if (!strcmp(g_mod[i].name, "main") && !strcmp(g_mod[i].build_id, DM_D3_BUILD)) base = g_mod[i].base;
-+        if (!base) { regs[8] = 0; return 1; }   // 不是 D3 构建：门块不该存在，兜底走原校验
++        if (!base) return 0;
++    }
++    uint64_t hero = ((uint64_t(*)(uint32_t))(base + HERO_LOOKUP_OFF))(hero_id);
++    if (!hero || !dm_guest_heap_readable(hero + HERO_FLAG_OFF, 4)) return 0;
++    return *(uint32_t *)(hero + HERO_FLAG_OFF);
++}
++
++static void hero_flag_write(uint32_t hero_id, int set) {
++    static uint8_t *base;
++    if (!base) {
++        for (int i = 0; i < g_nmod; i++)
++            if (!strcmp(g_mod[i].name, "main") && !strcmp(g_mod[i].build_id, DM_D3_BUILD)) base = g_mod[i].base;
++        if (!base) return;
++    }
++    uint64_t hero = ((uint64_t(*)(uint32_t))(base + HERO_LOOKUP_OFF))(hero_id);
++    if (!hero || !dm_guest_heap_readable(hero + HERO_FLAG_OFF, 4)) return;
++    uint32_t *f = (uint32_t *)(hero + HERO_FLAG_OFF);
++    if (set) {
++        if (!(*f & 2)) { uint32_t old = *f; *f = old | 2; LOG("赛季轮换：hero #%u +0x12C 置赛季位（原值 %#x）", hero_id, old); }
++    } else {
++        if (*f & 2) { uint32_t old = *f; *f = old & ~2u; LOG("赛季轮换：rollover → hero #%u 清赛季位转非赛季（原值 %#x）", hero_id, old); }
++    }
++}
++
++int dm_season_svc(int num, uint64_t *regs) {
++    if (num != SVC_HOST_SEASON_HERO && num != SVC_HOST_SEASON_ISSEASONAL) return 0;
++    static pthread_once_t once = PTHREAD_ONCE_INIT;
++    pthread_once(&once, config_load);       // 门可能先于第一次 fill() 触发：首次同步装配置
++    int enabled = atomic_load(&g_enabled);
++    int season = atomic_load(&g_season);
++    if (num == SVC_HOST_SEASON_ISSEASONAL) {
++        // v2 真赛季：当前已验证英雄是赛季角色才答 1；其余原查询（离线 TLS 链=0，答 0 与原语义一致）
++        if (enabled && g_cur_hero_seasonal) { regs[0] = 1; regs[8] = 1; }
++        else regs[8] = 0;
++        return 1;
++    }
++    // SVC_HOST_SEASON_HERO（0x4b1b0 入口）：x0 = 英雄号（0x4b1c8 mov w19,w0 实证）
++    static uint8_t *base;
++    if (!base) {
++        for (int i = 0; i < g_nmod; i++)
++            if (!strcmp(g_mod[i].name, "main") && !strcmp(g_mod[i].build_id, DM_D3_BUILD)) base = g_mod[i].base;
++        if (!base) { regs[8] = 0; return 1; }
 +    }
 +    uint32_t hero_id = (uint32_t)regs[0];
 +    uint64_t hero = ((uint64_t(*)(uint32_t))(base + HERO_LOOKUP_OFF))(hero_id);
 +    if (!hero || !dm_guest_heap_readable(hero + HERO_FLAG_OFF, 4)) { regs[8] = 0; return 1; }   // 查不到记录：原校验
 +    uint32_t *f = (uint32_t *)(hero + HERO_FLAG_OFF);
-+    if (atomic_load(&g_enabled) && !(*f & 2)) {
-+        uint32_t old = *f;
-+        *f = old | 2;
-+        LOG("赛季轮换：hero #%u +0x12C 置赛季位（原值 %#x）", hero_id, old);
++    pthread_mutex_lock(&g_hero_mu);
++    int hi = hero_find(hero_id);
++    int known_season = hi >= 0 ? g_heroes[hi].season : -1;
++    int rolled = hi >= 0 ? g_heroes[hi].rolled : 0;
++    pthread_mutex_unlock(&g_hero_mu);
++    if (enabled && known_season >= 0 && known_season < season && !rolled) {
++        hero_flag_write(hero_id, 0);        // 官方 rollover：旧赛季角色进门即转非赛季（此后本门答 0 = 原校验）
++        pthread_mutex_lock(&g_hero_mu);
++        g_heroes[hi].rolled = 1;
++        pthread_mutex_unlock(&g_hero_mu);
++    } else if (enabled) {
++        hero_flag_write(hero_id, 1);        // 幂等盖位（当期/首见英雄）
 +    }
-+    if (*f & 2) {                           // 赛季英雄（含历史存档带位的）：放行
++    if (hero_flag_read(hero_id) & 2) {          // 赛季英雄（本轮盖的或存档带的）→ 放行 + 记当期
 +        regs[0] = 1;
 +        regs[8] = 1;
++        atomic_store(&g_cur_hero, (int)hero_id);
++        atomic_store(&g_cur_hero_seasonal, 1);
++        pthread_mutex_lock(&g_hero_mu);
++        int i2 = hero_find(hero_id);
++        if (i2 < 0 && g_nheroes < HERO_MAX) { i2 = g_nheroes++; g_heroes[i2].id = hero_id; g_heroes[i2].rolled = 0; }
++        if (i2 >= 0 && g_heroes[i2].season < 1) g_heroes[i2].season = season > 0 ? season : 1;   // 首见按当期收录
++        pthread_mutex_unlock(&g_hero_mu);
 +    } else {
-+        regs[8] = 0;                        // 非赛季英雄：原校验（vanilla）
++        regs[8] = 0;                            // 非赛季英雄：原校验
++        atomic_store(&g_cur_hero, (int)hero_id);
++        atomic_store(&g_cur_hero_seasonal, 0);
 +    }
 +    return 1;
 +}
@@ -3428,6 +3512,19 @@ index 0000000..fbbfc2b
 +        atomic_store(&g_season, cur);
 +        LOG("赛季轮换：生效赛季 S%d（%s）", cur, cfg.mode_rotate ? "月更轮换" : "固定");
 +        if (atomic_load(&g_enabled)) season_theme_probe(cur);
++        // 官方 rollover 模拟（kb/20 §9.5）：换季即刻把表内旧赛季英雄清位转非赛季
++        if (atomic_load(&g_enabled) && cur > 1) {
++            int converted = 0;
++            pthread_mutex_lock(&g_hero_mu);
++            for (int i = 0; i < g_nheroes; i++)
++                if (!g_heroes[i].rolled && g_heroes[i].season > 0 && g_heroes[i].season < cur) {
++                    hero_flag_write(g_heroes[i].id, 0);
++                    g_heroes[i].rolled = 1;
++                    converted++;
++                }
++            pthread_mutex_unlock(&g_hero_mu);
++            if (converted) LOG("赛季轮换：rollover → %d 个旧赛季角色转非赛季", converted);
++        }
 +        last = cur;
 +    }
 +}
@@ -3483,7 +3580,7 @@ index 96d2674..579e8ae 100644
      pthread_mutex_lock(&g_se_lock); uint32_t wh = se_find(ev); pthread_mutex_unlock(&g_se_lock);
      if (!wh) { hle_bind_system_event(ev, 0); pthread_mutex_lock(&g_se_lock); wh = se_find(ev); pthread_mutex_unlock(&g_se_lock); }
 diff --git a/dm/host/host_stubs.c b/dm/host/host_stubs.c
-index ef7f336..1112303 100644
+index ef7f336..4249ba4 100644
 --- a/dm/host/host_stubs.c
 +++ b/dm/host/host_stubs.c
 @@ -1,6 +1,7 @@
@@ -3500,9 +3597,9 @@ index ef7f336..1112303 100644
  // svc #0x80.. host gates: only D2R's rewrite rules create them; they should not appear in this game's build output
 -uint64_t svc_host_call(int num, uint64_t *regs) { (void)regs; die("svc_host_call：本作没有宿主门 svc #%#x", num); }
 +uint64_t svc_host_call(int num, uint64_t *regs) {
-+    if (num == SVC_HOST_SEASON_HERO) {   // 赛季英雄门（hle_season.c）：按 dm-season.tsv 应答
++    if (num == SVC_HOST_SEASON_HERO || num == SVC_HOST_SEASON_ISSEASONAL) {   // 赛季门（hle_season.c）
 +        if (dm_season_svc(num, regs)) return regs[0];
-+        die("赛季英雄门处理器未接住 svc #%#x", num);
++        die("赛季门处理器未接住 svc #%#x", num);
 +    }
 +    die("svc_host_call：本作没有宿主门 svc #%#x", num);
 +}
@@ -3782,7 +3879,7 @@ index 4d22880..0be9257 100644
          // Derivation: pillar inner edge x = screen height * limit / 2, so for every delta added to the limit the inner edge moves outward by screen height * delta / 2 on each side. Measured on Mac 1952x900, the soft edge is <= 30 pixels wide
          // (with limit = screen aspect ratio, columns 0–20 at the right edge fade from black to bright, and it disappears once the limit is pushed to 2.4) => need delta >= 2 * 30 / 900 ~ 0.067; 0.15 is taken (about 67 pixels outward per side), leaving more than double the margin.
 diff --git a/dm/tools/patch_nso.py b/dm/tools/patch_nso.py
-index 837700c..b3e5b4c 100644
+index 837700c..b4ade58 100644
 --- a/dm/tools/patch_nso.py
 +++ b/dm/tools/patch_nso.py
 @@ -680,7 +680,12 @@ for a in sorted(kinds):
@@ -3817,7 +3914,7 @@ index 837700c..b3e5b4c 100644
  params = PARAMS.get(BUILD_ID, [])
  for oa, wa, ob_, wb, r, key, why in params:
      for o, w0 in ((oa, wa), (ob_, wb)):
-@@ -847,6 +861,60 @@ for oa, wa, ob_, wb, r, key, why in params:
+@@ -847,6 +861,84 @@ for oa, wa, ob_, wb, r, key, why in params:
      tmp = 16 if r != 16 else 17
      emit(STUR(tmp, 31, -16)); emit(MRS_TPIDRRO(r)); emit_slot_addr(r, tmp, key); emit(LDRX(r, r)); emit(LDUR(tmp, 31, -16)); emit(B(here(), oa + 4))
      struct.pack_into('<I', IMG, oa, B(oa, start)); struct.pack_into('<I', IMG, ob_, NOP); stat('param')
@@ -3875,10 +3972,34 @@ index 837700c..b3e5b4c 100644
 +        cuts.append((off, struct.pack('<I', word).hex(), struct.pack('<I', B(off, start)).hex(), why, '仅宿主'))
 +    season_hero_gate(0x4b1b0, 0xd10143ff, 0x90,
 +        '赛季 v1：角色↔档案赛季校验入口 → svc 0x90：宿主按 dm-season.tsv 应答（enabled 幂等盖 hero+0x12C bit1；位已置放行；否则原校验；hle_season.c）')
++
++    # ③ GameIsSeasonal（0x4c8df0）入口 → svc 0x8f 通透应答门（kb/20 §9.5：宿主按"当前已验证英雄是否赛季"答 1/0；
++    #    open 路径 = 恢复 x8 + ret，直接回传宿主写的 w0，不走固定捷径）。世界装载位点已直补丁恒 0（①），
++    #    本门放 1 不再有早退卡加载路径。菜单/无英雄态宿主答 0 = 关路径原查询（离线 TLS 链本就 0）。
++    def season_query_gate(off, word, num, why):
++        assert off in set(starts), f'赛季门 {off:#x} 不是函数入口'
++        assert off < TEXT_END and off not in kinds and not any(seg[0].address <= off < seg[-1].address + 4 for seg in windows), f'赛季门与改写点冲突 {off:#x}'
++        start = here()
++        emit(0xA9BF7FE8)                       # stp x8, xzr, [sp,#-16]!
++        emit(STP_PRE(29, 30, 31, -16))         # stp x29, x30, [sp,#-16]!
++        emit_gate_call(); emit(BLR(30))        # dm_gate → svc_host_call(num)：宿主写 w0=应答值 + x8=1/0
++        ret = here()
++        emit(LDP_POST(29, 30, 31, 16))
++        emit(0x34000068)                       # cbz w8, +12：x8=0 → close（原查询）
++        emit(LDP_POST(8, 31, 31, 16))          # open: 恢复 x8（w0 已是宿主应答值）
++        emit(0xD65F03C0)                       # ret —— 直接返回宿主应答
++        emit(LDP_POST(8, 31, 31, 16))          # close: 恢复 x8
++        emit(word)                             # 原首字 stp x29,x30 续跑
++        emit(B(here(), off + 4))
++        gates.append((ret, 'svc', num, off))
++        put_branch(off, start); stat('d3_season_isseasonal')
++        cuts.append((off, struct.pack('<I', word).hex(), struct.pack('<I', B(off, start)).hex(), why, '仅宿主'))
++    season_query_gate(0x4c8df0, 0xa9bf7bfd, 0x8f,
++        '赛季 v2：GameIsSeasonal 入口 → svc 0x8f：宿主条件应答（当前已验证英雄为赛季角色=1，否则原查询；世界装载位点已直补丁封死，恒 1 无死锁路径；kb/20 §9.4/9.5）')
  
  # The three existing native rule trampolines all use only the dead temporary w8 that is overwritten afterwards, and do not change the w0/stat return, sp or NZCV.
  # 6c6290 is after the original mode3 gate; the Blaze / reference count and data invalidation 6c62dc branches before it and the state update after it are untouched.
-@@ -893,38 +961,38 @@ if FAR:   # patch area before the base: file = text + ro + data (padded to 16K)
+@@ -893,38 +985,38 @@ if FAR:   # patch area before the base: file = text + ro + data (padded to 16K)
  else:
      open(P('patched.bin'), 'wb').write(IMG + bytearray(PATCH_OFF - len(IMG)) + patch)
  import hashlib
