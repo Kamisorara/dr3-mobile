@@ -4378,7 +4378,7 @@ index 837700c..0eec3b5 100644
  print(NAME, stats, 'cuts', len(cuts), 'obs', len(obs), 'patch', len(patch), 'PATCH_OFF', hex(PATCH_OFF), 'slot_refs', len(fix), 'gates', len(gates))
 diff --git a/dm/host/hle_uipointer.c b/dm/host/hle_uipointer.c
 new file mode 100644
-index 0000000..85bf28d
+index 0000000..c1889ce
 --- /dev/null
 +++ b/dm/host/hle_uipointer.c
 @@ -0,0 +1,140 @@
@@ -4443,16 +4443,16 @@ index 0000000..85bf28d
 +long long dm_ui_owner(void) { return atomic_load(&g_owner); }
 +
 +static int uimode_world(uint8_t *base) {
++    // 模块区地址（base+off）是本进程已映射的映像，直读即可——dm_guest_readable 只覆盖
++    // 堆/别名区页位图（hle_svc.c），对模块区恒假，首版误用它导致谓词恒 0（2026-11-10 真机）。
 +    uint64_t ws = 0;
-+    if (!dm_guest_readable((uint64_t)(base + 0x17E5298UL), 8)) return 0;
 +    memcpy(&ws, base + 0x17E5298UL, 8);
 +    if (!ws || ws == (uint64_t)-0x108 || (ws & ~7ull) == (uint64_t)-0x110) return 0;
 +    uint64_t busy = 1;
-+    if (!dm_guest_readable(ws + 0x108, 8)) return 0;
++    if (!dm_guest_readable(ws + 0x108, 8)) return 0;   // 动态指针目标在游戏堆里，守卫保留
 +    memcpy(&busy, (const void *)(uintptr_t)(ws + 0x108), 8);
 +    if (busy) return 0;
 +    uint64_t slot = 0;
-+    if (!dm_guest_readable((uint64_t)(base + 0x185ebd0UL), 8)) return 0;
 +    memcpy(&slot, base + 0x185ebd0UL, 8);
 +    int ok = ((int(*)(uint64_t *))(base + 0x3278C0UL))(&slot);          // world ready 查询
 +    if (!ok) return 0;
@@ -4522,4 +4522,3 @@ index 0000000..85bf28d
 +            *(float *)out, *((float *)out + 1));
 +    }
 +}
-
