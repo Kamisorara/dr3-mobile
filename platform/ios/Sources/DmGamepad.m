@@ -24,6 +24,7 @@
 #import "DmSemanticLayout.h"
 #import "DmSemanticRoute.h"
 #import "DmTouchSkin.h"
+#import "DmTouchSlots.h"
 #import "DmUiPointer.h"
 #import "SeasonPanel.h"
 
@@ -31,6 +32,7 @@ extern CGRect dm_ios_game_frame(void);   // front_ios.m：游戏内容区（黑�
 static DmUip g_uip;                      // UI 指针触点状态机（安卓 UiPointer C 移植）
 extern void dm_uipointer_set(int phase, float x, float y, float bx, float by, long long ms, int paired);   // hle_uipointer.c
 extern long long dm_ui_owner(void);      // hle_uipointer.c：(gen<<1)|world——安卓 nativeUiOwner 同义
+extern void dm_touch_set(int n, const int *slots, const float *xs, const float *ys);   // hle_uipointer.c：安卓 .so dm_touch_set 同名同义（16 槽状态机）
 
 static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
 static uint64_t g_touch_btn;
@@ -65,7 +67,6 @@ static const struct { unsigned long long mask; int key; } k_btn_map[] = {
 @interface D3TouchUI : UIView
 @end
 static __weak D3TouchUI *g_view;
-static BOOL g_phys;
 
 static UIColor *k_idle, *k_on, *k_line, *k_text, *k_ring, *k_pie;
 static inline CAShapeLayer *mkShape(CALayer *parent) {
@@ -96,6 +97,7 @@ static CGPathRef piePath(CGPoint c, CGFloat r, float frac) {   // 冷却遮罩�
     DmSemRoute _route;
     DmSemLayout _lay;
     DmSemRouteListener _ln;   // ctx=self（listener 回调的接收者；位置初始化漏 ctx=崩溃，2026-11-10 真机实证）
+    DmTouchSlots _slots;      // 安卓 TouchSlots：raw 触点 → 稳定槽号（nativeTouch 契约）
     BOOL _world;
     long long _owner;          // 安卓 semanticOwner：(gen<<1)|world
     // 渲染（下标 = 布局控件下标 0..15 + SEASON_IDX）
@@ -135,12 +137,14 @@ static CGPathRef piePath(CGPoint c, CGFloat r, float frac) {   // 冷却遮罩�
     }
 }
 
-// ---- listener 回调（安卓 D3Activity 匿名 Listener 同位）----
-static void l_changed(void *ctx, const DmSemState *st, int cancelled,
-                      const int *ids, const float *xs, const float *ys, int n, long long ms) {
-    D3TouchUI *s = (__bridge D3TouchUI *)ctx;
-    // ① UI 指针通道：raw（未认领）集全量喂（安卓 publishSemanticInput → uiPointer.publish）。
-    //    route 给视图归一坐标，换游戏画布归一（安卓用视图域；画布域在 iPad 适配下更准——kb/07 §12 记差异）。
+// ---- 安卓 D3Activity.publishSemanticInput 同构（三通道扇出）----
+// ① uiPointer.publish（raw 集，两域都喂——安卓同款，世界/菜单分域在消费端）
+// ② cancelled → touchSlots.clear + nativeTouch(0)（dm_touch_set 空）+ nativeCancelButtons（语义清零）
+// ③ touchSlots.retain + 槽位映射 → dm_touch_set（安卓 nativeTouch(count, slots, xs, ys)，视图归一域）
+// ④ nativeControls：语义按钮/双杆 → hid 触控通道（安卓 .so 侧 d3_touch_controls_set 的宿主等价）
+static void publish_semantic(D3TouchUI *s, const DmSemState *st, int cancelled,
+                             const int *ids, const float *xs, const float *ys, int n, long long ms) {
+    // ① UI 指针通道：坐标换游戏画布归一（安卓用视图域；画布域在 iPad 适配下更准——kb/07 §12 记差异）
     CGRect f;
     pthread_mutex_lock(&g_mu);
     f = dm_ios_game_frame();
@@ -156,7 +160,25 @@ static void l_changed(void *ctx, const DmSemState *st, int cancelled,
     long long oms = 0; DmUipEvent ev;
     if (dm_uip_publish(&g_uip, uids, uxs, uys, un, cancelled, ms, &oms, &ev))
         dm_uipointer_set(ev.phase, ev.x, ev.y, ev.bx, ev.by, oms, ev.paired);
-    // ② 语义态 → hid（安卓 nativeControls(owner, buttons, lx, ly, rx, ry)）
+    // ② cancelled：槽全清 + 空触点集 + 语义清零（安卓 publishSemanticInput cancelled 分支）
+    if (cancelled) {
+        dmts_clear(&s->_slots);
+        dm_touch_set(0, NULL, NULL, NULL);
+        pthread_mutex_lock(&g_mu);
+        g_touch_btn = 0; g_touch_lx = 0; g_touch_ly = 0; g_touch_rx = 0; g_touch_ry = 0;
+        pthread_mutex_unlock(&g_mu);
+        publish();
+        return;
+    }
+    // ③ 槽位分配 → dm_touch_set（视图归一域，安卓 nativeTouch 同参）
+    dmts_retain(&s->_slots, ids, n);
+    int tslots[16]; float txs[16], tys[16]; int tn = 0;
+    for (int i = 0; i < n && tn < 16; i++) {
+        int slot = dmts_slot(&s->_slots, ids[i]);
+        if (slot >= 0) { tslots[tn] = slot; txs[tn] = xs[i]; tys[tn] = ys[i]; tn++; }
+    }
+    dm_touch_set(tn, tslots, txs, tys);
+    // ④ nativeControls（安卓语义态直发）
     uint64_t btn = 0;
     for (size_t i = 0; i < sizeof k_btn_map / sizeof k_btn_map[0]; i++)
         if (st->buttons & k_btn_map[i].mask) btn |= 1ull << k_btn_map[i].key;
@@ -170,6 +192,12 @@ static void l_changed(void *ctx, const DmSemState *st, int cancelled,
     g_touch_ry = (int32_t)(-s->_aimY * 32767.0f);
     pthread_mutex_unlock(&g_mu);
     publish();
+}
+
+// ---- listener 回调（安卓 D3Activity 匿名 Listener 同位）----
+static void l_changed(void *ctx, const DmSemState *st, int cancelled,
+                      const int *ids, const float *xs, const float *ys, int n, long long ms) {
+    publish_semantic((__bridge D3TouchUI *)ctx, st, cancelled, ids, xs, ys, n, ms);
 }
 static void l_skills(void *ctx, long long owner, const DmAimEvent *ev, int n, int w, int h, int cancelled) {
     D3TouchUI *s = (__bridge D3TouchUI *)ctx;
@@ -206,21 +234,12 @@ static void l_skills(void *ctx, long long owner, const DmAimEvent *ev, int n, in
 }
 static void l_tap(void *ctx, long long owner, int id, float x, float y,
                   long long downMs, long long upMs, const DmSemState *snap) {
-    // 安卓 D3Activity.Listener.tap：摇杆区轻点 = 合成 down/up 回放进 uiPointer 通道
+    // 安卓 D3Activity.Listener.tap：摇杆轻点 = 两段完整发布（down 时刻该指独占 raw 集 →
+    // up 时刻空集），同走 publishSemanticInput 三通道（uiPointer + 槽位 + 语义态）。
     D3TouchUI *s = (__bridge D3TouchUI *)ctx;
-    (void)owner; (void)snap;
-    CGRect f;
-    pthread_mutex_lock(&g_mu);
-    f = dm_ios_game_frame();
-    pthread_mutex_unlock(&g_mu);
-    if (f.size.width <= 0 || f.size.height <= 0) f = s.bounds;
-    float fx = (float)((x * (double)s.bounds.size.width - (double)f.origin.x) / (double)f.size.width);
-    float fy = (float)((y * (double)s.bounds.size.height - (double)f.origin.y) / (double)f.size.height);
-    long long oms = 0; DmUipEvent ev;
-    if (dm_uip_publish(&g_uip, &id, &fx, &fy, 1, 0, downMs, &oms, &ev))
-        dm_uipointer_set(ev.phase, ev.x, ev.y, ev.bx, ev.by, oms, ev.paired);
-    if (dm_uip_publish(&g_uip, NULL, NULL, NULL, 0, 0, upMs, &oms, &ev))
-        dm_uipointer_set(ev.phase, ev.x, ev.y, ev.bx, ev.by, oms, ev.paired);
+    (void)owner;
+    publish_semantic(s, snap, 0, &id, &x, &y, 1, downMs);
+    publish_semantic(s, snap, 0, NULL, NULL, NULL, 0, upMs);
 }
 static void l_pickup(void *ctx, long long token, int phase) {
     (void)ctx; (void)token; (void)phase;   // token 恒 0（nativePickupState 未移植）——静默
@@ -255,8 +274,9 @@ static void l_pickup(void *ctx, long long token, int phase) {
     if ((self = [super initWithFrame:f])) {
         self.multipleTouchEnabled = YES; self.opaque = NO; self.backgroundColor = UIColor.clearColor;
         dmroute_init(&_route);
-        _route.touchSlop = 12;                     // iOS 无系统 touchSlop；UIPan 默认量级约定（安卓 ViewConfiguration 同位）
+        _route.touchSlop = 8;                      // 安卓 ViewConfiguration 缺省 8dp（iOS 无系统值，dp≈pt）
         _route.longPressMs = 500;                  // 安卓 getLongPressTimeout 缺省
+        dmts_init(&_slots);
         _ln.ctx = (__bridge void *)self;
         _ln.changed_at = l_changed; _ln.skills = l_skills; _ln.tap = l_tap; _ln.pickup = l_pickup;
         _route.ln = &_ln;
@@ -280,15 +300,19 @@ static void l_pickup(void *ctx, long long token, int phase) {
     return self;
 }
 
+// ---- 安卓 syncSemanticOwner：owner 变化 → 全释放 + 世界位切换 + rebuild（dispatch/began 时也调）----
+- (void)syncOwner {
+    long long owner = dm_ui_owner();
+    if (owner == _owner) return;
+    _owner = owner;
+    _world = (owner & 1) != 0;
+    dmroute_sync_owner(&_route, owner >> 1, (int)self.bounds.size.width, (int)self.bounds.size.height);   // 换代全释放（安卓 syncSemanticOwner→setWorldControls）
+    [self rebuild];
+}
+
 // ---- 安卓 modePoll 同款：owner 轮询 + 拾取态 ----
 - (void)modePoll {
-    long long owner = dm_ui_owner();
-    if (owner != _owner) {
-        _owner = owner;
-        _world = (owner & 1) != 0;
-        dmroute_sync_owner(&_route, owner >> 1, (int)self.bounds.size.width, (int)self.bounds.size.height);   // 换代全释放（安卓 syncSemanticOwner）
-        [self rebuild];
-    }
+    [self syncOwner];
     dmroute_set_pickup(&_route, 0);   // 拾取 token 无来源（安卓 nativePickupState 下轮接）→ 拾取钮禁用
 }
 
@@ -296,10 +320,13 @@ static void l_pickup(void *ctx, long long token, int phase) {
 - (void)rebuild {
     CGRect b = self.bounds;
     UIEdgeInsets safe = self.safeAreaInsets;
-    // density：安卓 display density；iOS point≈dp，取 2.0 约定（kb/07 §12）
-    dm_semlayout_build(&_lay, (float)b.size.width, (float)b.size.height, 2.0f,
+    // density：安卓 display density（px/dp）；iOS 等价 = 屏幕 nativeScale（pt→px）
+    CGFloat density = self.window.screen.nativeScale;
+    if (density <= 0) density = [UIScreen mainScreen].nativeScale;
+    if (density <= 0) density = 2.0;
+    dm_semlayout_build(&_lay, (float)b.size.width, (float)b.size.height, (float)density,
                        (int)safe.left, (int)safe.top, (int)safe.right, (int)safe.bottom,
-                       _world && !g_phys, 0.0f, YES);
+                       _world, 0.0f, YES);
     dmroute_bind_controls(&_route, _lay.c, _lay.n);
     dmroute_set_pickup(&_route, 0);
     [CATransaction begin]; [CATransaction setDisableActions:YES];
@@ -307,7 +334,7 @@ static void l_pickup(void *ctx, long long token, int phase) {
     [self placeJoy];
     for (int i = 0; i < 6; i++) [self drawPie:i];
     [CATransaction commit];
-    dm_hudmove_set_controller((_world && !g_phys) ? 1 : 0);   // HUD 让位随触控面在场切换（现壳接口=binary）
+    dm_hudmove_set_controller(_world ? 1 : 0);   // HUD 让位 = worldControls（安卓 RoleControlGeometryBridge 语义的二元版；物理柄不再影响——2026-11-10 完全照搬轮）
 }
 
 - (int)ctrlIdxBySlot:(int)slot kind:(int)kind {
@@ -421,30 +448,38 @@ static void l_pickup(void *ctx, long long token, int phase) {
     if (p) CGPathRelease(p);
 }
 
-- (void)placeJoy {   // 底座恒显（安卓语义）：静息归布局位，落指跟随（安卓 beginStick center=落点）；旋钮夹在环内
+- (void)placeJoy {   // 安卓 drawControl(kind0)：底座=落点（stickVisualCoordinate 1.4R 边距夹取），
+                     // 旋钮偏移 = lx/32767×halfW×0.53、旋钮半径 = 0.4×halfW（此前 0.88/26s 系自造）
     if (!_joyRing) {
         _joyRing = mkShape(self.layer); _joyRing.fillColor = UIColor.clearColor.CGColor; _joyRing.hidden = YES;
         _joyKnob = mkShape(self.layer); _joyKnob.hidden = YES;
     }
     int j = [self ctrlIdxBySlot:-1 kind:0];
     if (j < 0) { _joyRing.hidden = YES; _joyKnob.hidden = YES; return; }
-    CGFloat R = 123 * _lay.scale;
+    CGFloat R = _rad[j];                       // = 123×scale（布局半径即视觉半径）
+    UIEdgeInsets safe = self.safeAreaInsets;
     CGPoint base = _pos[j];
-    if (_route.input.sticks[0].owner)   // 落指跟随：底座=按下点（安卓 beginStick(cx,cy)=触点）
+    if (_route.input.sticks[0].owner) {        // 落指跟随：底座=按下点，夹在安全区−1.4R 边距内（安卓 ControlArt.stickVisualCoordinate）
         base = CGPointMake(_route.input.sticks[0].cx, _route.input.sticks[0].cy);
+        CGFloat m = 1.4 * R;
+        CGFloat lo = safe.left + m, hi = self.bounds.size.width - safe.right - m;
+        if (lo <= hi) base.x = fmax(lo, fmin(hi, base.x));
+        else base.x = (self.bounds.size.width) / 2.0;
+        lo = safe.top + m; hi = self.bounds.size.height - safe.bottom - m;
+        if (lo <= hi) base.y = fmax(lo, fmin(hi, base.y));
+        else base.y = (self.bounds.size.height) / 2.0;
+    }
     _joyRing.hidden = NO; _joyKnob.hidden = NO;
     _joyRing.position = base;
     CGPathRef rp = circleAt(CGPointMake(R, R), R); _joyRing.path = rp; CGPathRelease(rp);
     _joyRing.bounds = CGRectMake(0, 0, 2 * R, 2 * R);
-    CGFloat kr = 26 * _lay.scale;
+    CGFloat kr = 0.4 * R;                      // 安卓 stickThumb r=0.4×halfW
     CGPathRef kp = circleAt(CGPointMake(kr, kr), kr); _joyKnob.path = kp; CGPathRelease(kp);
     _joyKnob.bounds = CGRectMake(0, 0, 2 * kr, 2 * kr);
     CGFloat dx = 0, dy = 0;
-    if (_route.input.sticks[0].owner) {   // 摇杆输出反推位移（够视觉用）
-        dx = (CGFloat)_route.input.sticks[0].x / 32767.0 * R * 0.88f;
-        dy = -(CGFloat)_route.input.sticks[0].y / 32767.0 * R * 0.88f;
-        CGFloat d = hypot(dx, dy);
-        if (d > R) { dx *= R / d; dy *= R / d; }
+    if (_route.input.sticks[0].owner) {        // 旋钮位移 = 状态输出 ×0.53×halfW（安卓 drawControl 同式）
+        dx = (CGFloat)_route.input.sticks[0].x / 32767.0 * R * 0.53;
+        dy = -(CGFloat)_route.input.sticks[0].y / 32767.0 * R * 0.53;
     }
     _joyKnob.position = CGPointMake(base.x + dx, base.y + dy);
 }
@@ -461,20 +496,24 @@ static void l_pickup(void *ctx, long long token, int phase) {
     [CATransaction commit];
 }
 
-- (void)resetTouches {   // 场景焦点切换/物理手柄插入（安卓 cancelTouches 同位）
+- (void)cancelTouches {   // 安卓 cancelTouches：只清状态（长按定时器/Route/UIP/槽位/瞄准近似），不 publish——调用方决定
+    [_lp invalidate];
     dmroute_cancel(&_route, NOW_MS);
     dm_uip_init(&g_uip);
+    dmts_clear(&_slots);
     for (int i = 0; i < 6; i++) _aimHeld[i] = 0;
     _aimX = 0; _aimY = 0;
     pthread_mutex_lock(&g_mu);
     g_touch_btn = 0; g_touch_lx = 0; g_touch_ly = 0; g_touch_rx = 0; g_touch_ry = 0;
     pthread_mutex_unlock(&g_mu);
-    publish();
     [self refreshArt];
 }
 
-- (void)syncVisible {   // 物理手柄插拔入口（保留旧名）：空布局 + 全释放
-    [self rebuild];
+- (void)resetTouches {   // 焦点丢失/生命周期（安卓 releaseInput）：cancelTouches + publish(true) + nativeTouch(0)
+    [self cancelTouches];
+    dm_touch_set(0, NULL, NULL, NULL);
+    publish();
+    dmroute_publish(&_route, 1, (int)self.bounds.size.width, (int)self.bounds.size.height);
 }
 
 // ---- 长按（安卓 skillLongPress Runnable 同款：按最紧急手势排定时器）----
@@ -504,6 +543,7 @@ static void l_pickup(void *ctx, long long token, int phase) {
 }
 - (void)touchesBegan:(NSSet<UITouch *> *)ts withEvent:(UIEvent *)e {
     if ([self panelOpen]) return;   // 面板打开 = 安卓 isBlocking：触控面全让
+    [self syncOwner];               // 安卓 dispatchTouchEvent：先 syncSemanticOwner 再分发
     long long ms = NOW_MS;
     for (UITouch *t in ts) {
         CGPoint p = [t locationInView:self];
@@ -529,22 +569,32 @@ static void l_pickup(void *ctx, long long token, int phase) {
 - (void)touchesEnded:(NSSet<UITouch *> *)ts withEvent:(UIEvent *)e {
     if ([self panelOpen]) return;
     long long ms = NOW_MS;
-    for (UITouch *t in ts)
+    for (UITouch *t in ts) {
+        // 安卓 UP/POINTER_UP：先终移（最终坐标进 aim/摇杆/轻点判定）再 up
+        CGPoint p = [t locationInView:self];
+        dmroute_move(&_route, (int)(uintptr_t)t, (float)p.x, (float)p.y, ms);
         dmroute_up(&_route, (int)(uintptr_t)t, ms);
+    }
     dmroute_publish(&_route, 0, (int)self.bounds.size.width, (int)self.bounds.size.height);
     [self refreshArt];
     [self scheduleLongPress];
 }
 - (void)touchesCancelled:(NSSet<UITouch *> *)ts withEvent:(UIEvent *)e {
     (void)ts; (void)e;
-    dmroute_cancel(&_route, NOW_MS);
-    dmroute_publish(&_route, 1, (int)self.bounds.size.width, (int)self.bounds.size.height);   // uiPointer 发相位 3
-    [self refreshArt];
+    [self cancelTouches];   // 安卓 CANCEL 分支：cancelTouches + publish(true)
+    dmroute_publish(&_route, 1, (int)self.bounds.size.width, (int)self.bounds.size.height);
 }
 
 - (void)layoutSubviews {
     [super layoutSubviews];
+    // 安卓 onSizeChanged：尺寸实际变化才 cancelTouches + rebuild + publish(true)（首布局同走）
+    static CGSize last = { -1, -1 };
+    CGSize sz = self.bounds.size;
+    if (sz.width == last.width && sz.height == last.height) return;
+    last = sz;
+    [self cancelTouches];
     [self rebuild];
+    dmroute_publish(&_route, 1, (int)sz.width, (int)sz.height);
 }
 
 // hle 层每帧推 D3 技能冷却（slot = 游戏槽序 0..5；frac∈[0,1] 剩余比例，<0 无冷却）。
@@ -574,10 +624,10 @@ void dm_gamepad_skill_atlas(const unsigned char *rgba, int w, int h) {
 
 // ---- 外部接口（front_ios / PhysicalGamepad 契约不变） ----
 static void physical_present(int present) {
-    g_phys = present;
-    if (present) { [g_view resetTouches]; dm_input_clear(); }
-    dm_hudmove_set_controller(present);   // HUD 移位随物理手柄插拔切换（用户确认的还原约束）
-    [g_view syncVisible];
+    // 安卓 PhysicalGamepadInput.Sink.connected：仅记录。物理柄（dm_pad_set）与触控（dm_input_set）
+    // 是两条独立通道，读取时 OR——手柄在场不再压制触控面/清触控输入（2026-11-10 完全照搬轮，
+    // 旧 g_phys 压制 = "技能按钮不见了"的直接根因之一）。
+    NSLog(@"[dm] 物理手柄 %d（触控面独立，不受影响）", present);
 }
 UIView *dm_gamepad_view(CGRect frame) {
     D3TouchUI *v = [[D3TouchUI alloc] initWithFrame:frame];

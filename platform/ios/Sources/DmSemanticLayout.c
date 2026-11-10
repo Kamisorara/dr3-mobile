@@ -34,6 +34,7 @@ void dm_semlayout_build(DmSemLayout *L, float width, float height, float density
     if (scale <= 0.0f || unit <= 0.0f || !worldControls) return;   // 安卓：controls = new Control[0]
 
     float minTap = fminf(24.0f * density, 60.0f * scale);
+    float actionTap = fminf(minTap, 49.0f * scale);   // 安卓 actionTap：右组命中下限（此前误用 minTap）
     float groupLeft = ((float)left + availW) - scale * 1851.0f;    // 右组锚右下
     float groupTop = ((float)top + availH) - scale * 849.0f;
     float topTap = fminf(minTap, scale * 50.0f);
@@ -45,10 +46,10 @@ void dm_semlayout_build(DmSemLayout *L, float width, float height, float density
     circle(L, bagX, (float)top, scale, 2, 1024ull, -1, 0.0f, 64.0f, 42.0f, topTap);          // 包
     circle(L, menuX, (float)top, scale, 2, 2048ull, -1, 0.0f, 64.0f, 42.0f, topTap);         // 单
     circle(L, (float)left, groupTop, scale, 0, 0ull, -1, 190.0f, 620.0f, 123.0f, minTap);    // 摇杆
-    circle(L, groupLeft, groupTop, scale, 2, 16384ull, -1, 1300.0f, 777.0f, 48.0f, minTap);  // 回城
-    circle(L, groupLeft, groupTop, scale, 2, 128ull, -1, 1300.0f, 645.0f, 48.0f, minTap);    // 药水
-    circle(L, groupLeft, groupTop, scale, 3, 0ull, -1, 1800.0f, 425.0f, 48.0f, minTap);      // 闪避
-    circle(L, groupLeft, groupTop, scale, 2, 1ull, 2, 1650.0f, 829.0f - 94.0f, 94.0f, minTap);// 攻击 A（slot2）
+    circle(L, groupLeft, groupTop, scale, 2, 16384ull, -1, 1300.0f, 777.0f, 48.0f, actionTap);  // 回城
+    circle(L, groupLeft, groupTop, scale, 2, 128ull, -1, 1300.0f, 645.0f, 48.0f, actionTap);    // 药水
+    circle(L, groupLeft, groupTop, scale, 3, 0ull, -1, 1800.0f, 425.0f, 48.0f, actionTap);      // 闪避
+    circle(L, groupLeft, groupTop, scale, 2, 1ull, 2, 1650.0f, 829.0f - 94.0f, 94.0f, actionTap);// 攻击 A（slot2）
     {   // 弧 5 键：slots{5,0,3,1,4} masks{512,8,4,2,256}，圆心(1650,777) 轨道 220，角 180°+32.5°i（安卓同表）
         static const int slots[5] = {5, 0, 3, 1, 4};
         static const unsigned long long masks[5] = {512, 8, 4, 2, 256};
@@ -56,11 +57,11 @@ void dm_semlayout_build(DmSemLayout *L, float width, float height, float density
             double ang = ((double)i * 32.5 + 180.0) * 3.14159265358979323846 / 180.0;
             float ax = 1650.0f + (float)(220.0 * cos(ang));
             float ay = 777.0f + (float)(220.0 * sin(ang));
-            circle(L, groupLeft, groupTop, scale, 2, masks[i], slots[i], ax, ay, 54.0f, minTap);
+            circle(L, groupLeft, groupTop, scale, 2, masks[i], slots[i], ax, ay, 54.0f, actionTap);
         }
     }
     if (includePickup)
-        circle(L, groupLeft, groupTop, scale, 4, 0ull, -1, 1685.0f, 425.0f, 48.0f, minTap);  // 拾取
+        circle(L, groupLeft, groupTop, scale, 4, 0ull, -1, 1685.0f, 425.0f, 48.0f, actionTap);  // 拾取
 
     // 安卓 profile=null 基线 resolve：右组（kind≠0 且 button≠1024/2048）x -= rightMargin*unit，
     // 再 clamp 进安全区（radius 夹在 safe 半径内）。rightMargin ∈ [0,96]×unit 由调用方 clamp。

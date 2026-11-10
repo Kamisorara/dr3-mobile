@@ -2,7 +2,7 @@ diff --git a/dm/gfx/nvn/hle_nvn.c b/dm/gfx/nvn/hle_nvn.c
 index d4c3531..de5f4f5 100644
 --- a/dm/gfx/nvn/hle_nvn.c
 +++ b/dm/gfx/nvn/hle_nvn.c
-@@ -52,6 +52,7 @@ static uint8_t g_unimpl_seen[NVN_NFUNC];
+@@ -52,6 +52,7 @@
  uint64_t nvn_unimpl_c(nvn_slot_t *slot, uint64_t x0, uint64_t x1, uint64_t x2) {
      unsigned i = (unsigned)(slot - nvn_slot);
      if (!g_unimpl_seen[i]++) LOG("【红】NVN 未实现被调用：%s (x0=%#llx x1=%#llx x2=%#llx)", nvn_names[i], x0, x1, x2);
@@ -10,7 +10,7 @@ index d4c3531..de5f4f5 100644
      return 0;
  }
  
-@@ -104,6 +105,8 @@ HLE_FORCE("nvnBootstrapLoader", "NVN 图形接口整块换成宿主空设备（
+@@ -104,6 +105,8 @@
  #define B(x) ((x) & 0xff)
  
  #include "nvn_obj.h"
@@ -19,7 +19,7 @@ index d4c3531..de5f4f5 100644
  
  // ---------- Device ----------
  NVN(nvnDeviceBuilderSetDefaults, void, NVNdeviceBuilder *b) { memset(b, 0, sizeof(dev_builder_t)); }
-@@ -156,7 +159,7 @@ NVN(nvnDeviceInstallDebugCallback, void, NVNdevice *d, const PFNNVNDEBUGCALLBACK
+@@ -156,7 +159,7 @@
  }
  NVN(nvnDeviceSetWindowOriginMode, void, NVNdevice *d, NVNwindowOriginMode m) { ((dev_t_ *)d)->origin = m; mtl_set_origin_lower_left(m == NVN_WINDOW_ORIGIN_MODE_LOWER_LEFT); LOG("[nvn] 窗口原点 %s", m ? "左上（同 D3D / Metal）" : "左下（GL）"); }
  NVN(nvnDeviceSetDepthMode, void, NVNdevice *d, NVNdepthMode m) { ((dev_t_ *)d)->depth_mode = m; LOG("[nvn] 深度模式 %s", m ? "近=0（同 D3D / Metal）" : "近=-w（GL）"); }
@@ -28,7 +28,7 @@ index d4c3531..de5f4f5 100644
  
  // ---------- Memory pools ----------
  NVN(nvnMemoryPoolBuilderSetDefaults, void, NVNmemoryPoolBuilder *b) { memset(b, 0, sizeof(pool_builder_t)); }
-@@ -205,6 +208,8 @@ NVN(nvnTextureBuilderSetSize1D, void, NVNtextureBuilder *b, int w) { TB(b)->d.wi
+@@ -205,6 +208,8 @@
  NVN(nvnTextureBuilderSetLevels, void, NVNtextureBuilder *b, int v) { TB(b)->d.levels = v; }
  NVN(nvnTextureBuilderSetFormat, void, NVNtextureBuilder *b, NVNformat f) { TB(b)->d.format = f; }
  NVN(nvnTextureBuilderSetSamples, void, NVNtextureBuilder *b, int s) { TB(b)->d.samples = s; }
@@ -37,7 +37,7 @@ index d4c3531..de5f4f5 100644
  NVN(nvnTextureBuilderSetStride, void, NVNtextureBuilder *b, ptrdiff_t s) { TB(b)->d.stride = (uint32_t)s; }
  NVN(nvnTextureBuilderSetStorage, void, NVNtextureBuilder *b, NVNmemoryPool *p, ptrdiff_t off) { TB(b)->pool = (pool_t *)p; TB(b)->off = off; }
  NVN(nvnTextureBuilderSetPackagedTextureLayout, void, NVNtextureBuilder *b, const NVNpackagedTextureLayout *l) {
-@@ -371,9 +376,16 @@ static int keys_hash(const NVNshaderData *sd, int mapped, uint8_t out[8]) {
+@@ -371,9 +376,16 @@
      return 1;
  }
  int prog_key(const prog_t *p, unsigned st, uint8_t key[8]) {
@@ -56,7 +56,7 @@ index d4c3531..de5f4f5 100644
      memcpy(key, k->key[st], 8);
      return 1;
  }
-@@ -395,21 +407,53 @@ NVN(nvnProgramSetShaders, NVNboolean, NVNprogram *p, int n, const NVNshaderData
+@@ -395,21 +407,53 @@
  }
  
  // ---------- Sync / events ----------
@@ -122,10 +122,11 @@ index d4c3531..de5f4f5 100644
  }
  NVN(nvnEventBuilderSetDefaults, void, NVNeventBuilder *b) { memset(b, 0, sizeof(ev_builder_t)); }
  NVN(nvnEventBuilderSetStorage, void, NVNeventBuilder *b, const NVNmemoryPool *p, int64_t off) { *(ev_builder_t *)b = (ev_builder_t){(const pool_t *)p, off}; }
-@@ -456,6 +500,41 @@ NVN(nvnQueueFinish, void, NVNqueue *q) { (void)q; mtl_finish(); }
+@@ -455,6 +499,41 @@
+ // ---------- Command buffer: record into the game's command memory, perform CPU-visible side effects at submit ----------
  #define CB(c) ((cmd_t *)(c))
  #define OP_RESERVE 24                             // Always keep enough room at the segment end for one JUMP / END
- 
++
 +static pthread_mutex_t g_cmd_meta_mu = PTHREAD_MUTEX_INITIALIZER;
 +static CFMutableDictionaryRef g_cmd_handles;
 +typedef struct { uintptr_t lo, hi; } cmd_region;
@@ -160,11 +161,10 @@ index d4c3531..de5f4f5 100644
 +    CFDictionarySetValue(g_cmd_handles,(const void *)(uintptr_t)h,(const void *)1);pthread_mutex_unlock(&g_cmd_meta_mu);
 +}
 +static int cmd_recording(const NVNcommandBuffer *c) { return c && ((const cmd_t *)c)->magic==MAGIC('C','M','D','B') && ((const cmd_t *)c)->recording; }
-+
+ 
  NVN(nvnCommandBufferInitialize, NVNboolean, NVNcommandBuffer *c, NVNdevice *d) {
      memset(c, 0, sizeof(cmd_t)); CB(c)->magic = MAGIC('C', 'M', 'D', 'B'); CB(c)->dev = d; return 1;
- }
-@@ -485,6 +564,7 @@ static void cmd_new_segment(cmd_t *o, uint8_t *mem, size_t n) {
+@@ -485,6 +564,7 @@
      uint8_t *start = align8(mem), *end = mem + n;
      if (o->recording && o->cur) { if (cs_on() && o->end > o->cur) { pthread_mutex_lock(&g_cs_mu); g_cs.waste += (uint64_t)(o->end - o->cur); pthread_mutex_unlock(&g_cs_mu); } put_hdr(o->cur, OP_JUMP, 16); memcpy(o->cur + 8, &start, 8);
          o->used += 16; }   // the JUMP also occupies guest memory of this recording: count it in used, so the game packing the next recording right behind by used does not overwrite it
@@ -172,7 +172,7 @@ index d4c3531..de5f4f5 100644
      o->cur = start; o->end = end;
  }
  // Host-supplied segment when the game's own command memory runs out: when the game's out-of-memory callback cannot allocate from its command memory pool, it calls AddCommandMemory with an empty pool (p = NULL, n = 0)
-@@ -559,19 +639,36 @@ static uint8_t *cmd_alloc(cmd_t *o, uint32_t size) {
+@@ -559,19 +639,36 @@
  }
  NVN(nvnCommandBufferBeginRecording, void, NVNcommandBuffer *c) {
      cmd_t *o = CB(c);
@@ -213,7 +213,7 @@ index d4c3531..de5f4f5 100644
  }
  NVN(nvnCommandBufferSignalEvent, void, NVNcommandBuffer *c, const NVNevent *e, NVNeventSignalMode m, NVNeventSignalLocation loc, int flags, uint32_t v) {
      (void)loc; (void)flags;
-@@ -652,7 +749,12 @@ NVN(nvnCommandBufferSetViewports, void, NVNcommandBuffer *c, int first, int n, c
+@@ -652,7 +749,12 @@
  NVN(nvnCommandBufferSetScissor, void, NVNcommandBuffer *c, int x, int y, int w, int h) { *REC(c, OP_SCISSOR, p_scissor) = (p_scissor){x, y, w, h}; }
  NVN(nvnCommandBufferSetDepthRange, void, NVNcommandBuffer *c, float n, float f) { *REC(c, OP_DEPTH_RANGE, p_depth_range) = (p_depth_range){n, f}; }
  NVN(nvnCommandBufferBindProgram, void, NVNcommandBuffer *c, const NVNprogram *p, int stages) {
@@ -227,20 +227,20 @@ index d4c3531..de5f4f5 100644
  }
  static void bind_state(NVNcommandBuffer *c, int kind, const void *st, size_t n) { p_bind_state *r = REC(c, OP_BIND_STATE, p_bind_state); r->kind = kind; memcpy(r->bytes, st, n); }
  NVN(nvnCommandBufferBindBlendState, void, NVNcommandBuffer *c, const NVNblendState *st) { bind_state(c, 0, st, sizeof(blend_st)); }
-@@ -743,6 +845,12 @@ NVN(nvnCommandBufferCopyTextureToTexture, void, NVNcommandBuffer *c, const NVNte
+@@ -742,6 +844,12 @@
+     const NVNtexture *d, const NVNtextureView *dv, const NVNcopyRegion *dr, int flags) {
      p_copy_t2t *o = REC_SNAP(c, OP_COPY_T2T, p_copy_t2t, 2); o->src = tex_snap(o, SNAP_OFF(p_copy_t2t), 0, s, (uint64_t)__builtin_return_address(0)); o->dst = tex_snap(o, SNAP_OFF(p_copy_t2t), 1, d, (uint64_t)__builtin_return_address(0));
      copy_view(&o->sv, &o->has_sv, sv); copy_view(&o->dv, &o->has_dv, dv); o->sr = *sr; o->dr = *dr; o->flags = flags;
- }
++}
 +// ZCULL stencil-culling criteria are a hardware early-rejection hint. Metal
 +// performs stencil tests from the recorded stencil state; no NVN ZCULL cache is
 +// used, so retaining the default conservative path preserves pixel tests.
 +NVN_NOPROTO(nvnCommandBufferSetStencilCullCriteria, void, NVNcommandBuffer *c, int func, int ref, int mask) {
 +    (void)c; (void)func; (void)ref; (void)mask;
-+}
+ }
  NVN(nvnCommandBufferSetCopyRowStride, void, NVNcommandBuffer *c, ptrdiff_t st) { p_copy_stride *o = REC(c, OP_COPY_STRIDE, p_copy_stride); o->stride = st; o->image = 0; }
  NVN(nvnCommandBufferSetCopyImageStride, void, NVNcommandBuffer *c, ptrdiff_t st) { p_copy_stride *o = REC(c, OP_COPY_STRIDE, p_copy_stride); o->stride = st; o->image = 1; }   // Link's Awakening
- NVN(nvnCommandBufferSetBlendColor, void, NVNcommandBuffer *c, const float *v) { memcpy(REC(c, OP_BLEND_COLOR, p_blend_color)->rgba, v, 16); }
-@@ -838,7 +946,10 @@ void dm_gfx_suspend(int on) {
+@@ -838,7 +946,10 @@
      if (on) { mtl_drain(); LOG("[nvn] 图形挂起：在途 GPU 工作已清空"); } else LOG("[nvn] 图形恢复");
  }
  NVN(nvnQueueSubmitCommands, void, NVNqueue *q, int n, const NVNcommandHandle *h) {
@@ -251,7 +251,7 @@ index d4c3531..de5f4f5 100644
      uint64_t t0 = now_ns(), c0 = clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID), i0, y0, s0 = thr_sys_ns(); thr_counts(&i0, &y0);
      ((queue_t *)q)->submits++;
      mtl_sub_begin();
-@@ -852,6 +963,7 @@ NVN(nvnQueueSubmitCommands, void, NVNqueue *q, int n, const NVNcommandHandle *h)
+@@ -852,6 +963,7 @@
      atomic_fetch_add(&g_cum_sub_cyc, y1 - y0); atomic_fetch_add(&g_cum_sub_sys_ns, thr_sys_ns() - s0); atomic_fetch_add(&g_cum_sub_wall_ns, dw);
      atomic_fetch_add(&g_sub_cpu_ns, dc); atomic_fetch_add(&g_cum_sub_cpu_ns, dc);
      atomic_fetch_add(&g_sub_instr, di); atomic_fetch_add(&g_cum_sub_instr, di);
@@ -259,7 +259,7 @@ index d4c3531..de5f4f5 100644
      gfx_leave();
  }
  
-@@ -863,7 +975,6 @@ static const char *const g_nops[] = {
+@@ -863,7 +975,6 @@
      "nvnCommandBufferMultiDrawElementsIndirectCount",
      "nvnCommandBufferDispatchComputeIndirect",
      "nvnCommandBufferSetDepthBounds",
@@ -267,7 +267,7 @@ index d4c3531..de5f4f5 100644
      "nvnCommandBufferSetShaderScratchMemory",
      "nvnCommandBufferPushDebugGroupDynamic",
      "nvnCommandBufferPopDebugGroup",
-@@ -1218,6 +1329,9 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
+@@ -1218,6 +1329,9 @@
              if (pproc) trow(f, "@proc_cpu_ms", (pc - pproc) / 1e6); pproc = pc;
              trow(f, "@call_ms", (t0 - g_t0_ns) / 1e6);
          }
@@ -277,7 +277,7 @@ index d4c3531..de5f4f5 100644
          trow(f, "@passes", (double)(ps - prev_pass)); trow(f, "@draws", (double)(dr - prev_draw));
          static uint64_t pl, pst, pf, pudc; uint64_t l, st, fu; mtl_bw(&l, &st, &fu);
          trow(f, "@rt_load_mb", (l - pl) / 1048576.0); trow(f, "@rt_store_mb", (st - pst) / 1048576.0); trow(f, "@pass_full_rw", (double)(fu - pf));
-@@ -1435,7 +1549,14 @@ NVN_NOPROTO(nvnProgramSetShadersExt, NVNboolean, NVNprogram *p, int n, const sha
+@@ -1435,7 +1549,14 @@
  // Singular / combined forms → plural / separate forms; state the replay layer does not have yet (conditional render, depth bounds, ...) is logged once and drawing continues (better to over-draw than to drop).
  #include "../tex/nvn_deswizzle.h"
  
@@ -293,7 +293,7 @@ index d4c3531..de5f4f5 100644
  // Combined texture handle (texture id | sampler id << 20) is recorded into the texture slot as is: the replay layer takes the texture from the low 20 bits and the sampler from the high bits (nvn_mtl.m NVN_RB_SAMPT)
  NVN(nvnCommandBufferBindTexture, void, NVNcommandBuffer *c, NVNshaderStage st, int i, NVNtextureHandle h) { uint64_t v = (uint64_t)h; bind_handles(c, OP_BIND_TEX, st, i, 1, &v); }
  // "Deferred" binding: the GPU reads the handles h points to when it executes this command, not at recording. The per-texture binding of The Legend of Zelda: Breath of the Wild's engine (main+0xec2e64) always uses it,
-@@ -1573,4 +1694,12 @@ int nvn_host_signal_sync(void *nvnsync) {
+@@ -1573,4 +1694,12 @@
      if (!o || o->magic != MAGIC('S', 'Y', 'N', 'C')) return -1;
      o->fence = 0; o->fenced = 1; return 0;
  }
@@ -528,7 +528,7 @@ diff --git a/dm/gfx/nvn/nvn_mtl.h b/dm/gfx/nvn/nvn_mtl.h
 index ac77b3c..0756c83 100644
 --- a/dm/gfx/nvn/nvn_mtl.h
 +++ b/dm/gfx/nvn/nvn_mtl.h
-@@ -33,6 +33,7 @@ void mtl_sub_event(volatile uint32_t *val, uint32_t mode, uint32_t v);   // Writ
+@@ -33,6 +33,7 @@
  void mtl_sub_counter(uint64_t addr, uint32_t type);                       // Write the counter record after completion
  uint64_t mtl_sub_commit(void);
  
@@ -549,7 +549,7 @@ index 10c5eac..6310988 100644
  #include "nvn_cover.h"
  #include "dmsh_chain.h"   // DMSH_CHAIN: the translation chain version of the B shader library expected by this source tree (in the game profile folder, -I from the Makefile)
  #include "game_profile.h"   // game profile constants (NVN driver constant segment bases, profile id)
-@@ -91,10 +93,10 @@ static uint64_t g_pq_read;
+@@ -91,10 +93,10 @@
  static id<MTLResidencySet> g_res;
  static int g_res_dirty;
  static id<MTLSharedEvent> g_ev;
@@ -562,7 +562,7 @@ index 10c5eac..6310988 100644
  static uint64_t g_arena_made;
  static int g_allocprof = -1; static uint64_t g_ap_bytes[64], g_ap_fn[8];
  #define AP_B uint64_t _ap0 = g_allocprof > 0 ? g_dev.currentAllocatedSize : 0
-@@ -436,6 +438,9 @@ static zskip_zero g_zskip_zero[4096]; static int g_zskip_n, g_zskip_count;
+@@ -436,6 +438,9 @@
  static zskip_zero g_zskip_cand[8]; static uint8_t g_zskip_cand_ok[8];
  static void zskip_clear(void);
  static int tbdr_on(void);
@@ -572,7 +572,7 @@ index 10c5eac..6310988 100644
  static id g_cb;
  static id<MTL4ComputeCommandEncoder> g_blit;
  static NSMutableArray<dispatch_block_t> *g_commit_blocks;
-@@ -468,7 +473,7 @@ static int tbdr_on(void);
+@@ -468,7 +473,7 @@
  
  static uint64_t g_sub_serial;   // Submission index (used by the parallel precompile's 'predict only once per submission')
  void mtl_sub_begin(void) {
@@ -581,7 +581,7 @@ index 10c5eac..6310988 100644
      if (tbdr_on() == 0 && g_ruler_pending) { g_ruler_truth = 0; g_ruler_pending = 0; MLOG("DM_NVN_RULER：切到被测模式"); }
      defer_drain();
      defer_reset();
-@@ -592,12 +597,59 @@ void mtl_sub_copy(uint64_t src, uint64_t dst, uint64_t n) {
+@@ -592,12 +597,59 @@
  // Inline uniform update (UpdateUniformBuffer): the data is copied into the host's own shared ring at encode time, then copied in order to the destination.
  // Previously it was read from command memory only when the GPU executed - if the game recycles command memory before the GPU runs, it reads the bytes of the next batch of commands (SMBW's fountain water wave simulation got the wrong coefficients and diverged to ±65504).
  static id<MTLBuffer> g_ubs_buf; static size_t g_ubs_off, g_ubs_size;
@@ -642,7 +642,7 @@ index 10c5eac..6310988 100644
      if (!g_ubs_buf || g_ubs_off + need > g_ubs_size) {
          if (g_ubs_buf) defer_obj_release(g_ubs_buf);   // copies already encoded still reference the old block: release after this submission completes
          g_ubs_size = MAX((size_t)1 << 20, need);
-@@ -606,7 +658,11 @@ void mtl_sub_update(const void *data, uint64_t dst, uint64_t n) {
+@@ -606,7 +658,11 @@
          res_add(g_ubs_buf); g_ubs_off = 0;
      }
      memcpy((uint8_t *)g_ubs_buf.contents + g_ubs_off, data, n);
@@ -655,7 +655,7 @@ index 10c5eac..6310988 100644
      g_ubs_off += need;
  }
  
-@@ -735,6 +791,7 @@ int mtl_gpu_span(uint64_t f, uint64_t *t0, uint64_t *t1) {
+@@ -735,6 +791,7 @@
  static void rp_flush(void);
  static const char *cctx_snap(void);   // What is in this submission (printed into the failure line on error; defined before mtl_exec)
  uint64_t mtl_sub_commit(void) {
@@ -663,7 +663,7 @@ index 10c5eac..6310988 100644
      defer_fallback();   // Deferred merged pass: at the end of the submission there are still P draws not replayed (the normal path never gets here)
      rp_flush();
      if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
-@@ -778,19 +835,30 @@ uint64_t mtl_sub_commit(void) {
+@@ -778,19 +835,30 @@
      return fence;
  }
  
@@ -702,7 +702,7 @@ index 10c5eac..6310988 100644
  }
  
  static void mtl_finish_gpu(void) {
-@@ -804,7 +872,7 @@ void mtl_drain(void) { present_drop_for_suspend(); mtl_present_flush(); mtl_init
+@@ -804,7 +872,7 @@
  
  // ================= Render replay =================
  #include "../../host/front.h"
@@ -711,7 +711,7 @@ index 10c5eac..6310988 100644
  #define RED_ONCE(k, ...) do { if (!g_red_once[k]++) MLOG("【红】" __VA_ARGS__); } while (0)
  // NVN vertex streams 0–15 → Metal vertex buffer slots: 0–13 go to 16–29 (30 is the constant fallback buffer), 14 and 15 to 14 and 15. Metal has only the 31 slots 0–30; translated shaders use only buffer(0) (the argument buffer),
  // and the host's own vertex functions read no vertex buffers. 13 Sentinels uses stream 15, and the old 16 + stream went out of range (Metal assertion: buffer index (31) must be < 31)
-@@ -1158,6 +1226,14 @@ uint64_t mtl_upload_gpu_ns_take(void) { return atomic_exchange(&g_upload_gpu_ns,
+@@ -1158,6 +1226,14 @@
  void mtl_create_stats(uint64_t *lib, uint64_t *pso) { *lib = g_bp_lib_n; *pso = g_bp_pso_n; }
  void mtl_create_ns(uint64_t *lib_ns, uint64_t *pso_ns) { *lib_ns = g_bp_lib_ns; *pso_ns = g_bp_pso_ns; }   // Cumulative time spent synchronously creating shader libraries / pipelines on the spot (the long-frame log takes the per-frame difference)
  uint64_t mtl_upload_bytes(void) { return g_bp_up_bytes; }   // Cumulative texture upload bytes
@@ -726,7 +726,7 @@ index 10c5eac..6310988 100644
  static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp) {
      MTLTextureDescriptor *d = tex_desc(t, 1);
      if (!d) return nil;
-@@ -1181,7 +1257,7 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp) {
+@@ -1181,7 +1257,7 @@
      int gdec = unp && t->d.target != 2 && bcd_fmt(t->d.format) && bcd_pso();   // BC1–5 without BC: GPU deswizzle + GPU decompression
      size_t ctotal = 0;   // Staging size of the compressed blocks (with GPU decompression the staging area holds compressed blocks)
      if (gdec) for (unsigned l = 0; l < d.mipmapLevelCount; l++) { uint32_t w = MAX(t->d.width >> l, 1u), h = MAX(t->d.height >> l, 1u); ctotal += (size_t)((w + bw - 1) / bw) * bpb * ((h + bh - 1) / bh) * layers; }
@@ -735,10 +735,12 @@ index 10c5eac..6310988 100644
      if (g_nvn_deswz_gpu && !use_gpu && !unp) RED_ONCE(40, "预排布贴图存储不在内存池里，回退 CPU");
      if (use_gpu) {
          // The GPU reads the memory pool at execution time, which is closer to a real Switch than a snapshot at CPU upload time; the dirty-page stamp is still taken before encoding, and later writes still trigger a re-upload.
-@@ -1240,6 +1316,46 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp) {
+@@ -1238,6 +1314,46 @@
+             if (nvn_deswizzle(&t->d, l, y, t->mem, (uint8_t *)stg.contents + off, pitch)) { RED_ONCE(9, "解排布失败 格式 %#x 目标 %d", t->d.format, t->d.target); break; }
+             up_blit_add(stg, off, pitch, pitch * rows, MTLSizeMake(w, h, z), mt, y, l);
              off += pitch * rows * z;
-         }
-     }
++        }
++    }
 +    // ---- DM_TEXDUMP（默认 iOS 开，=0 关）：大尺寸预排布贴图首次上传时，把去排布后的线性块落盘
 +    //      到 Documents/texdump/——UI 图标图集（.tex = NVN 排布 BC，离线直解是噪声，见 kb/19 §9）
 +    //      的像素从运行时拿；一份 .bin + 尺寸/格式名 = 离线确定性解码（Python DXT 解码即可）。
@@ -777,12 +779,10 @@ index 10c5eac..6310988 100644
 +                }
 +                free(rgba);
 +            }
-+        }
-+    }
+         }
+     }
      up_flush();
-     return mt;
- }
-@@ -1981,6 +2097,11 @@ static id<MTL4RenderCommandEncoder> rp_begin_ex_(int clear_only) {
+@@ -1981,6 +2097,11 @@
          if (stt) { g_sd[g_nsd] = (sd_att){0}; g_sd[g_nsd].ser = R.rt.depth->serial; g_sd[g_nsd].bytes = sb; g_sd[g_nsd].lv = (uint32_t)pd.stencilAttachment.level; g_sd[g_nsd].sl = (uint32_t)pd.stencilAttachment.slice; g_sd[g_nsd].idx = -1; g_sd[g_nsd].depth = 2; g_sd[g_nsd].load = pd.stencilAttachment.loadAction == MTLLoadActionLoad; g_sd[g_nsd].wrote = R.clear_s != 0; g_nsd++;
                     pd.stencilAttachment.storeAction = MTLStoreActionUnknown; }
      }
@@ -794,7 +794,7 @@ index 10c5eac..6310988 100644
      memset(R.clear_c, 0, sizeof R.clear_c); R.clear_d = R.clear_s = 0;
      {   // Pass info (same convention as the former per-draw fetch: colors take each attachment's base texture format; sample count takes the last color attachment, or depth if there is depth)
          uint64_t ser = g_pass.serial + 1; memset(&g_pass, 0, sizeof g_pass); g_pass.serial = ser;
-@@ -2057,7 +2178,7 @@ static int clear_rect_zero(int i) {
+@@ -2057,7 +2178,7 @@
  // ================= Shaders / descriptor pool / pipelines / draws =================
  static pthread_mutex_t g_rmu = PTHREAD_MUTEX_INITIALIZER;
  // ---------- Shader mapping table: Switch control section hash → PC metallib (produced by dm/gfx/tools/shader_map.py) ----------
@@ -803,7 +803,7 @@ index 10c5eac..6310988 100644
  static NSString *g_shmap_path, *g_msl_dir;
  static NSString *exe_rel(const char *rel) {
      char buf[4096]; uint32_t n = sizeof buf;
-@@ -2316,7 +2437,7 @@ static __unsafe_unretained NvProg *prog_get(const prog_t *cp) {   // Called only
+@@ -2316,7 +2437,7 @@
      NvProg *o = [NvProg new];
      for (unsigned i = 0; i < p->nstage; i++) {
          // Key = sha256(first 0x880 bytes of the control section + code area): many of Mario's shaders share a control section but differ in code (dm/gfx/tools/shader_split.py). It was computed at SetShaders (hle_nvn.c): by now the game may have freed the control section
@@ -812,7 +812,7 @@ index 10c5eac..6310988 100644
          NSString *k = [NSString stringWithFormat:@"%02x%02x%02x%02x%02x%02x%02x%02x", md[0], md[1], md[2], md[3], md[4], md[5], md[6], md[7]];
          NSString *zh = g_shmap[k];
          if (!zh) {   // Not in the package: look up the compute kernels embedded in the main body (nvn_builtin.h)
-@@ -2329,11 +2450,15 @@ static __unsafe_unretained NvProg *prog_get(const prog_t *cp) {   // Called only
+@@ -2329,11 +2450,15 @@
                  snprintf(path, sizeof path, "%s/%s.ctl", shd, k.UTF8String); if ((f = fopen(path, "wb"))) { fwrite(p->sd[i].control, 1, 0x880, f); fclose(f); }
                  snprintf(path, sizeof path, "%s/%s.code", shd, k.UTF8String);
                  if (p->sd[i].data && ncode && ncode < (1u << 24) && (f = fopen(path, "wb"))) { fwrite((const void *)(uintptr_t)p->sd[i].data, 1, ncode, f); fclose(f); } }
@@ -829,7 +829,7 @@ index 10c5eac..6310988 100644
      }
      if (p->serial) serial_put(p->serial, o);
      return o;
-@@ -2461,14 +2586,25 @@ static inline __attribute__((always_inline)) void *tex_fast(int tid) {
+@@ -2461,14 +2586,25 @@
  // The texture type the shader declares differs from the one the descriptor gives: use a compatible view. Maxwell sample instructions carry their own dimension, and a non-array instruction reading a 2D array texture reads layer 0;
  // on Metal a 2D array bound to a texture2d argument is a type mismatch with undefined reads (measured: one fixed value). Super Mario 3D World + Bowser's Fury creates its pre-lighting buffer as a one-layer 2D array
  // and the deferred lighting shader samples it as 2D: the ambient light of the whole picture became one colour, washed out white. Supports 2D array <-> 2D and 2D array -> cube / cube array; any other mismatch is reported once. Caller holds g_rmu
@@ -857,7 +857,7 @@ index 10c5eac..6310988 100644
      treg_t *r = &g_treg[tid];
      if (r->alt && r->alt_of == (__bridge void *)t && r->alt_type == (uint8_t)want) { *rid = r->alt_rid; return (__bridge id<MTLTexture>)r->alt; }
      if (r->alt) { defer_obj_unref((__bridge id)r->alt); CFRelease(r->alt); r->alt = r->alt_of = NULL; r->alt_rid = 0; }
-@@ -2569,6 +2705,7 @@ static size_t arena_alloc(size_t n, id<MTLBuffer> *buf) {
+@@ -2569,6 +2705,7 @@
  static struct {
      const prog_t *prog;
      const prog_t *bst[5];      // program bound per stage (NVN stage bits 1 vertex 2 fragment 4 geometry 8 / 16 tessellation, indices as in NvProg.sh), see bind_stages
@@ -865,7 +865,7 @@ index 10c5eac..6310988 100644
      blend_st blend[8]; color_st color; chmask_st chmask; ms_st ms; poly_st poly; ds_st ds;
      va_st attr[16]; int nattr; vs_st stream[16]; int nstream;
      NVNbufferRange vbuf[16];
-@@ -2606,12 +2743,13 @@ static void udc_note_draw(NvProg *pr) {
+@@ -2606,12 +2743,13 @@
  // Every bind used to replace S.prog as a whole, a null program meant "no program bound", and the prepass's ~140 draws per frame were all dropped: depth stayed empty, the G-buffer's depth EQUAL test passed no pixel, and scenes and characters were black.
  // When every stage comes from the same program, that program is the effective one (all of Mario's and Engage's binds are like this, so nothing changes for them); otherwise a composite is made: a host-made prog_t carrying only a serial, whose NvProg in the serial table takes each stage from its source program (a null fragment = a vertex-only pipeline)
  static const prog_t *bind_stages(const prog_t *p, int stages) {
@@ -883,20 +883,20 @@ index 10c5eac..6310988 100644
      enum { NCMP = 64 };
      static prog_t cp[NCMP]; static const prog_t *ck[NCMP][5]; static uint64_t cs[NCMP][5]; static int ncp, next;
      for (int i = 0; i < ncp; i++) {
-@@ -2626,6 +2764,12 @@ static const prog_t *bind_stages(const prog_t *p, int stages) {
+@@ -2625,6 +2763,12 @@
+     memset(&cp[i], 0, sizeof cp[i]); cp[i].magic = MAGIC('P', 'R', 'O', 'G'); cp[i].serial = nvn_new_serial(); serial_put(cp[i].serial, o);
      { static int once; if (!once++) MLOG("按阶段绑程序：首个合成程序（顶点 %s 片元 %s）", o->sh[0] ? o->sh[0]->key : "-", o->sh[1] ? o->sh[1]->key : "-"); }
      return &cp[i];
- }
++}
 +// State probes can evict the bounded composite-program cache. Recompose from
 +// the restored, owned stage snapshots rather than retaining a mutable cache slot.
 +static void state_restore(const void *saved) {
 +    memcpy(&S, saved, sizeof S);
 +    if (S.prog && S.prog != &S.bound_program[5].program) S.prog = bind_stages(NULL, 0);
-+}
+ }
  static void state_reset(void) {
      memset(&S, 0, sizeof S);
-     g_pso_dirty = g_dss_dirty = 1;
-@@ -2636,21 +2780,59 @@ static void state_reset(void) {
+@@ -2636,21 +2780,59 @@
      S.st_vmask[0] = S.st_vmask[1] = S.st_wmask[0] = S.st_wmask[1] = 0xff; S.dr[1] = 1;
  }
  
@@ -971,7 +971,7 @@ index 10c5eac..6310988 100644
  }
  static MTLVertexFormat vfmt(int f) {
      switch (f) {
-@@ -2689,7 +2871,7 @@ static nvn_hmap g_pso = {.klen = sizeof(pso_key)}, g_dss;
+@@ -2689,7 +2871,7 @@
  static nvn_hmap g_pso_fail = {.klen = sizeof(pso_key)};   // pipelines that failed to build: remembered and never retried (previously every draw recompiled it, over 10,000 times in one iPhone session)
  static MTLRenderPipelineDescriptor *pso_desc(const pso_key *k, NvShader *vs, NvShader *fs, id<MTLFunction> fsfn, int merged) {
      MTLRenderPipelineDescriptor *d = [MTLRenderPipelineDescriptor new];
@@ -980,7 +980,7 @@ index 10c5eac..6310988 100644
      // Diagnostic DM_NVN_HILITE=fragment shader key,...: these draws use a solid-color fragment instead (keys 1–6 in order magenta / green / cyan / yellow / blue / white), to see where the geometry lands
      if (fs) { static char keys[6][24]; static int nk = -1; static id<MTLLibrary> hl;
          if (nk < 0) { nk = 0; const char *e = getenv("DM_NVN_HILITE");
-@@ -2739,7 +2921,8 @@ static MTLRenderPipelineDescriptor *pso_desc(const pso_key *k, NvShader *vs, NvS
+@@ -2739,7 +2921,8 @@
              continue;
          }
          int st = k->attr[a].stream;
@@ -990,7 +990,7 @@ index 10c5eac..6310988 100644
          vd.attributes[loc].format = vf; vd.attributes[loc].offset = k->attr[a].offset; vd.attributes[loc].bufferIndex = VB_SLOT(st);
          vd.layouts[VB_SLOT(st)].stride = k->stream[st].stride ? k->stream[st].stride : 4;
          vd.layouts[VB_SLOT(st)].stepFunction = k->stream[st].stride == 0 ? MTLVertexStepFunctionConstant : k->stream[st].divisor ? MTLVertexStepFunctionPerInstance : MTLVertexStepFunctionPerVertex;
-@@ -2811,7 +2994,13 @@ static __unsafe_unretained id<MTLRenderPipelineState> pso_get_(NvProg *pr, MTLRe
+@@ -2811,7 +2994,13 @@
          ps = [g_dev newRenderPipelineStateWithDescriptor:d error:&e];
      }
      g_bp_pso_n++; g_bp_pso_ns += bp_now() - bt;
@@ -1005,7 +1005,7 @@ index 10c5eac..6310988 100644
      if (!ms_fn) { pso_skey sk; char shex[sizeof sk * 2 + 1]; pso_skey_from(&k, vs, fs, g_pso_lmap != NULL, g_pso_lmap ? &g_pso_fz : NULL, &sk); pso_skey_hex(&sk, shex);
          pso_record("R\t%s\n", shex);
          pso_user_record("R\t%s\n", shex); }
-@@ -3070,6 +3259,7 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
+@@ -3070,6 +3259,7 @@
              void *mb; uint64_t mo, gpu;
              if (!u || !u->addr || !mtl_gpu_addr(u->addr, 1, &mb, &mo, &gpu)) { RED_ONCE(16, "阶段 %d cb%d 没有绑定 uniform 缓冲", nvn_stage, reg); continue; }
              use_rec("buf", u->addr, u->size, 0, NULL);
@@ -1013,7 +1013,7 @@ index 10c5eac..6310988 100644
              if (nvn_stage == 0 && reg == 0 && g_ui_moff != 0) { uint64_t pg = ui_mat_patch(u, mb, mo); if (pg) gpu = pg; }
              if (bl) {
                  PD("B %llu st%d cb reg%d addr=%#llx size=%llu pool=%#llx+%#llx f=%g,%g,%g,%g", g_stat_pass, nvn_stage, reg, (unsigned long long)u->addr, (unsigned long long)u->size,
-@@ -3103,7 +3293,7 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
+@@ -3103,7 +3293,7 @@
                         (unsigned long)t.pixelFormat, (unsigned long)t.width, (unsigned long)t.height, (unsigned long)t.depth,
                         (unsigned long)(t.parentTexture ? t.parentRelativeLevel : 0), (unsigned long)t.mipmapLevelCount,
                         (unsigned long)(t.parentTexture ? t.parentRelativeSlice : 0), (unsigned long)t.arrayLength, (unsigned long)t.textureType, t ? (int)t.swizzle.red : 0, t ? (int)t.swizzle.green : 0, t ? (int)t.swizzle.blue : 0, t ? (int)t.swizzle.alpha : 0, (__bridge void *)(t.parentTexture ? t.parentTexture : t));
@@ -1022,7 +1022,7 @@ index 10c5eac..6310988 100644
              if (t && nvn_stage == 1 && afr_want(sh)) { uint64_t r2 = 0; id<MTLTexture> v = tex_alpha_red(tid, t, &r2); if (v) { t = v; trid = r2; } }   // see tex_alpha_red
              if (!t) { t = dummy_tex(b->dtt, b->dpf); trid = g_dummy_tex_rid[b->dtt & 7][b->dpf & 3]; }
              slots[aid] = trid;
-@@ -3201,6 +3391,7 @@ static int fz_next(fz_cursor *c, const uint8_t **out, op_hdr *oh, const void **o
+@@ -3201,6 +3391,7 @@
          if (!c->p) return 0;
          op_hdr h; memcpy(&h, c->p, sizeof h); const void *a = c->p + 8;
          switch (h.op) {
@@ -1030,7 +1030,7 @@ index 10c5eac..6310988 100644
              case OP_END:
                  if (c->ret_n) c->p = c->ret[--c->ret_n];
                  else if (c->rest_i < g_nrest) c->p = (const uint8_t *)g_rest[c->rest_i++];
-@@ -3273,6 +3464,7 @@ static int ds_scan(const uint8_t *p, ds_st *ds, int depth) {
+@@ -3273,6 +3464,7 @@
          const void *a = p + 8; g_ds_scanned++;
          if (g_hoist_n && hoist_skipped(p)) { p += h.size; continue; }   // Clear pass already executed early
          switch (h.op) {
@@ -1038,7 +1038,7 @@ index 10c5eac..6310988 100644
              case OP_END: return DS_RET;
              case OP_JUMP: { const uint8_t *t; memcpy(&t, a, 8); p = t; continue; }
              case OP_CALL: { uint64_t t; memcpy(&t, a, 8); if (depth >= 8) return DS_USED;
-@@ -3374,7 +3566,9 @@ static int first_draw_covers(int i, id<MTLTexture> t, NSUInteger level) {
+@@ -3374,7 +3566,9 @@
  static int state_op(uint32_t op, const void *a) {
      switch (op) {
          case OP_SCISSOR: R.sc = *(const p_scissor *)a; R.has_sc = 1; break;
@@ -1049,7 +1049,7 @@ index 10c5eac..6310988 100644
          case OP_BIND_STATE: {
              const p_bind_state *b = a; void *dst = NULL; size_t n = 0;
              blend_st bs;
-@@ -3459,7 +3653,7 @@ static void pso_predict_rest(void) {
+@@ -3459,7 +3653,7 @@
      (void)df; (void)sf;
      for (int i = 0; i < na; i++) pso_pend_kick(&qa[i].k, (__bridge NvShader *)qa[i].vs, (__bridge NvShader *)qa[i].fs);
      for (int i = 0; i < nb; i++) pso_pend_kick(&qb[i].k, (__bridge NvShader *)qb[i].vs, (__bridge NvShader *)qb[i].fs);
@@ -1058,7 +1058,7 @@ index 10c5eac..6310988 100644
      static int logged; if (g_pp_kicked > (uint64_t)kicked0 && logged++ < 20) MLOG("并行预编：本次提交余下 %d 次绘制，丢给后台 %d 条管线", draws, (int)g_pp_kicked - kicked0);
  }
  
-@@ -3488,7 +3682,7 @@ static void fz_probe_cov2(const p_set_rt *r2, const uint8_t *first, const int8_t
+@@ -3488,7 +3682,7 @@
          (void)ser; (void)slice;
          g_fz.cov2[j] = (uint8_t)first_draw_covers(k, tex_mtl(r2->color[k]), (NSUInteger)level);
      }
@@ -1067,7 +1067,7 @@ index 10c5eac..6310988 100644
      g_fd_dw = fdw; g_fd_di = fdi; g_fd_why = fdwhy;
      g_pso_dirty = pso_dirty; g_dss_dirty = dss_dirty;
  }
-@@ -3644,6 +3838,7 @@ static void sdx_walk(const uint8_t *p, int depth) {
+@@ -3644,6 +3838,7 @@
          if (g_sdx_nop == g_sdx_opcap) { g_sdx_opcap = g_sdx_opcap ? g_sdx_opcap * 2 : 16384; g_sdx_op = realloc(g_sdx_op, g_sdx_opcap * sizeof *g_sdx_op); }
          uint32_t seq = g_sdx_nop; g_sdx_op[g_sdx_nop++] = p;
          switch (h.op) {
@@ -1075,7 +1075,7 @@ index 10c5eac..6310988 100644
              case OP_END: return;
              case OP_JUMP: { const uint8_t *t; memcpy(&t, a, 8); p = t; continue; }
              case OP_CALL: { uint64_t t; memcpy(&t, a, 8); sdx_walk((const uint8_t *)t, depth + 1); break; }
-@@ -3665,7 +3860,7 @@ static void sdx_walk(const uint8_t *p, int depth) {
+@@ -3665,7 +3860,7 @@
              case OP_BIND_TEX: case OP_BIND_IMG: { const p_bind_handles *b = a; bh_fresh(b); int base = h.op == OP_BIND_IMG ? 128 : 0, lim = h.op == OP_BIND_IMG ? 32 : 128;
                  if (b->stage < 6 && b->first >= 0 && b->first + b->n <= lim) for (int k = 0; k < b->n; k++) g_pp_slot[b->stage][base + b->first + k] = h_ser(b->h[k]);
                  break; }
@@ -1084,7 +1084,7 @@ index 10c5eac..6310988 100644
              case OP_DRAW: case OP_DRAW_IDX: case OP_DISPATCH: {
                  if (h.op != OP_DISPATCH) seq_push(&g_drx_seq, &g_drx_n, &g_drx_cap, seq);
                  __unsafe_unretained NvProg *pr = g_pp_prog ? prog_get(g_pp_prog) : nil;
-@@ -3762,7 +3957,7 @@ static void hoist_try(void) {
+@@ -3762,7 +3957,7 @@
      for (int guard = 0; guard < 200000; guard++) {
          op_hdr h; memcpy(&h, p, sizeof h); const void *a = p + 8;
          switch (h.op) {
@@ -1093,7 +1093,7 @@ index 10c5eac..6310988 100644
              case OP_JUMP: { const uint8_t *t; memcpy(&t, a, 8); p = t; continue; }
              case OP_DRAW: case OP_DRAW_IDX: if (in_grp) return; break;
              case OP_SCISSOR: sc = *(const p_scissor *)a; has_sc = 1; break;
-@@ -3851,10 +4046,10 @@ static void fz_check_run(const fuse_t *fz) {
+@@ -3851,10 +4046,10 @@
      static typeof(S) Ssave; memcpy(&Ssave, &S, sizeof S); typeof(R) Rsave = R; const uint8_t *en0 = g_exec_next;
      g_fz_checking = 1; g_exec_next = NULL;   // Turn off all lookahead during the redraw (continuation / hoisting / merging / depth-stencil on demand): normal path
      R.rt = fz->rt2; memcpy(R.clear_c, fz->clr2, 8); memcpy(R.cc, fz->cc2, sizeof R.cc); R.clear_d = fz->cd2f; R.clear_s = fz->cs2f; R.cd = fz->cd2; R.cs = fz->cs2;
@@ -1106,7 +1106,7 @@ index 10c5eac..6310988 100644
      for (int a = 0; a < na; a++) {
          id<MTLTexture> t = att[a], c = scr[a]; NSUInteger W = t.width, H = t.height, bpp = (NSUInteger)(att_bytes(t, 0) / (W * H));
          id<MTLBuffer> b1 = [g_dev newBufferWithLength:W * H * bpp options:MTLResourceStorageModeShared], b2 = [g_dev newBufferWithLength:W * H * bpp options:MTLResourceStorageModeShared];
-@@ -3982,10 +4177,10 @@ static void defer_replay(void) {
+@@ -3982,10 +4177,10 @@
          g_defer_cur = d; if (d->reset_between) g_vis_counting = 0;
          { static int once; if (!once++) MLOG("推迟合并通道：首例 通道 %llu，组 %d 回放绘制 %d 次", g_stat_pass, gi, d->n); }   // With multiple groups, several groups may already have been created before the first replay, so it cannot be judged by g_defer_n == 1
          for (int i = 0; i < d->n; i++) { defer_snap *z = &d->snap[i]; static uint8_t lm[8]; for (int j = 0; j < 8; j++) lm[j] = d->lmap[j] == 0xff || d->lmap[j] >= 8 ? 0xff : z->pm[d->lmap[j]];
@@ -1119,7 +1119,7 @@ index 10c5eac..6310988 100644
  }
  static void defer_fallback(void) {
      if (g_defer_replaying || !defer_has_active()) return;
-@@ -3994,10 +4189,10 @@ static void defer_fallback(void) {
+@@ -3994,10 +4189,10 @@
      typeof(S) save; memcpy(&save, &S, sizeof S); p_set_rt rt = R.rt; g_defer_replaying = 1;
      for (int gi, after = 0; (gi = defer_next(0, after)) >= 0;) { defer_t *d = &g_defer_slots[gi]; after = d->born; g_defer_cur = d; R.rt = d->p_rt; R.has_rt = 1; memcpy(R.clear_c, d->clear_c, 8); memcpy(R.cc, d->cc, sizeof R.cc);
          R.clear_d = d->clear_d; R.clear_s = d->clear_s; R.cd = d->cd; R.cs = d->cs;
@@ -1132,7 +1132,7 @@ index 10c5eac..6310988 100644
  }
  static const uint8_t *defer_cont(int *ci) {   // The next segment after a list ends (within the same submit): first the caller return stack, then the remaining handles of this submit; returns NULL when there are none left
      for (;;) { int k = (*ci)++;
-@@ -4048,9 +4243,10 @@ static void defer_try(const p_draw *dw, const p_draw_idx *di) {
+@@ -4048,9 +4243,10 @@
          if (g_hoist_n && hoist_skipped(p)) { p += h.size; continue; }
          switch (h.op) {
              case OP_END: { const uint8_t *nx = defer_cont(&ci); if (!nx) { g_defer.reason = 1; goto fail; } p = nx; continue; }
@@ -1144,7 +1144,7 @@ index 10c5eac..6310988 100644
              case OP_BIND_TEX: case OP_BIND_IMG: { const p_bind_handles *b = a; bh_fresh(b); int lim = h.op == OP_BIND_IMG ? 32 : 128;
                  if (b->stage >= 0 && b->stage < 6 && b->first >= 0 && b->first + b->n <= lim) for (int k = 0; k < b->n; k++) { if (h.op == OP_BIND_IMG) img[b->stage][b->first + k] = b->h[k]; else tex[b->stage][b->first + k] = b->h[k]; } break; }
              case OP_BIND_STATE: { const p_bind_state *b = a; if (b->kind == 5) memcpy(&ds, b->bytes, sizeof ds); break; }
-@@ -4106,7 +4302,7 @@ q_found:
+@@ -4106,7 +4302,7 @@
          if (!q_body && h.op == OP_SET_RT && !q_clears) { const p_set_rt *r2 = a; if (!defer_q_superset(r2)) { g_defer.reason = 15; goto fail; } q = r2; qop = p; p += h.size; continue; }
          if (h.op == OP_CLEAR_COLOR || h.op == OP_CLEAR_DS) q_clears = 1;
          if (!q_body && (h.op == OP_END || h.op == OP_SET_RT || h.op == OP_UPDATE_UB || h.op == OP_COPY_B2B || h.op == OP_CLEAR_BUF || h.op == OP_DISPATCH)) { g_defer.reason = 9; g_defer.reason_op = h.op; goto fail; }
@@ -1153,7 +1153,7 @@ index 10c5eac..6310988 100644
          else if (h.op == OP_CLEAR_COLOR) { const p_clear_color *c = a; if (c->index >= 0 && c->index < q->n && q->color[c->index]) for (int i = 0; i < g_defer.p_rt.n; i++) if (g_defer.p_rt.color[i] && sub_eq(q, c->index, &g_defer.p_rt, i)) { g_defer.reason = 10; goto fail; } }
          p += h.size;
      }
-@@ -4213,7 +4409,7 @@ static void fuse_try(void) {
+@@ -4213,7 +4409,7 @@
              const uint8_t *q; op_hdr hq; const void *aq;
              if (!fz_next(&cur, &q, &hq, &aq)) return;
              if (q == r2op) goto planned;
@@ -1162,7 +1162,7 @@ index 10c5eac..6310988 100644
              else if (hq.op == OP_BIND_STATE) { const p_bind_state *b = aq; if (b->kind == 5) memcpy(&ds, b->bytes, sizeof ds); }
              else if (hq.op == OP_BIND_TEX || hq.op == OP_BIND_IMG) { const p_bind_handles *b = aq; bh_fresh(b); int lim = hq.op == OP_BIND_IMG ? 32 : 128;
                  if (b->stage >= 0 && b->stage < 6 && b->first >= 0 && b->first + b->n <= lim) for (int k = 0; k < b->n; k++) { if (hq.op == OP_BIND_IMG) img[b->stage][b->first + k] = b->h[k]; else tex[b->stage][b->first + k] = b->h[k]; } }
-@@ -4225,7 +4421,7 @@ planned:
+@@ -4225,7 +4421,7 @@
          const prog_t *pg2 = S.prog; static uint64_t t2[6][128], i2[6][32]; memcpy(t2, S.tex, sizeof t2); memcpy(i2, S.img, sizeof i2);
          cur = (fz_cursor){.p = g_exec_next};
          for (;;) { const uint8_t *q; op_hdr hq; const void *aq; if (!fz_next(&cur, &q, &hq, &aq)) return; if (q == p) break;
@@ -1171,7 +1171,7 @@ index 10c5eac..6310988 100644
              else if (hq.op == OP_BIND_TEX || hq.op == OP_BIND_IMG) { const p_bind_handles *b = aq; bh_fresh(b); int lim = hq.op == OP_BIND_IMG ? 32 : 128;
                  if (b->stage >= 0 && b->stage < 6 && b->first >= 0 && b->first + b->n <= lim) for (int k = 0; k < b->n; k++) { if (hq.op == OP_BIND_IMG) i2[b->stage][b->first + k] = b->h[k]; else t2[b->stage][b->first + k] = b->h[k]; } }
          }
-@@ -4513,11 +4709,11 @@ static void ghost_flush(void) {   // Before the render pass ends: translate the
+@@ -4513,11 +4709,11 @@
      float W = (float)g_pass.tw, H = (float)g_pass.th, ccx = (g_gh.r[0] + g_gh.r[2]) / 2, ccy = (g_gh.r[1] + g_gh.r[3]) / 2;
      { uint64_t v = 0; for (int i = 0; i < 4; i++) v |= (uint64_t)(uint16_t)(fminf(fmaxf(g_gh.r[i], 0), 1) * 65535 + .5f) << (16 * i); atomic_store(&g_ghost_found, v ? v : 1); }
      g_gh.busy = 1; typeof(S) save; memcpy(&save, &S, sizeof S); p_scissor sc = R.sc; int has_sc = R.has_sc;
@@ -1185,10 +1185,11 @@ index 10c5eac..6310988 100644
      for (int i = 0; i < g_gh.n; i++) free(g_gh.c[i].S_); g_gh.n = 0;
  }
  // Diagnostic DM_NVN_KEYDUMP=<fragment shader key prefix>[:<count, default 6>[:<frame interval>]]: watch only this class of draws (for real devices; no frame number to guess). The first N matching draws force PASSDUMP's per-binding lines on (K / B / d:
-@@ -4757,6 +4953,96 @@ static void fb_prepare(NvProg *pr) {
+@@ -4756,6 +4952,96 @@
+             PD("N %llu 同通道反馈采样：附件 %d ser=%llu 级 %d 层 %d 拷进快照，本次绘制改采样快照", g_stat_pass + !g_enc, k, (unsigned long long)ser, lv, sl);
          } }
      if (g_fb_n) { g_fb_seq = g_draw_seq; args_dirty_all(); g_fb_rebind = 1; }
- }
++}
 +// Reject every unknown/writable graphics resource and every allocation alias.
 +// A separately bound compute stage is not executed by a graphics draw.
 +static int uf_resource_safe(uint64_t addr,uint64_t size) {
@@ -1278,11 +1279,10 @@ index 10c5eac..6310988 100644
 +    for(int i=0;i<R.rt.n && i<8;i++)
 +        if(R.rt.color[i] && (outputs&(1u<<i)) && ((S.chmask.mask>>(i*4))&15))g_uf_attachment_writes|=1u<<i;
 +    if(R.rt.depth && ((g_pass.hd && S.ds.dw) || (g_pass.hs && S.ds.st && (S.st_wmask[0] || S.st_wmask[1]))))g_uf_attachment_writes|=1u<<8;
-+}
+ }
  static void draw(const p_draw *dw, const p_draw_idx *di) {
      if (!S.prog) { RED_ONCE(18, "绘制前没有绑定程序"); PD("Z %llu 绘制跳过：没有绑定程序", g_stat_pass + !g_enc); return; }
-     __unsafe_unretained NvProg *pr = prog_get(S.prog);
-@@ -4840,6 +5126,8 @@ static void draw(const p_draw *dw, const p_draw_idx *di) {
+@@ -4840,6 +5126,8 @@
      if (g_fz.active && g_enc && g_fz.phase == 2 && !fz_p2_draw(pr, dw, di, g_fz.lmap2, &fz_fn)) {   // Cannot be proven: end the merged render pass (the earlier pass's result is stored as usual) and reopen with the later pass's original targets
          static int once3; if (!once3++) MLOG("可读 tile 通道合并：后一个通道的绘制证不出，退回分开（首例 通道 %llu）", g_stat_pass);
          g_fz_fallback++; rp_end(); }
@@ -1291,7 +1291,7 @@ index 10c5eac..6310988 100644
      fb_prepare(pr);   // same-pass feedback sampling: copy the snapshot first (see fb_prepare)
      if (R.has_sc && !g_enc) {
          NSUInteger tw0 = 0, th0 = 0; rt_dims(&tw0, &th0);
-@@ -4940,6 +5228,7 @@ frz_plain:;
+@@ -4940,6 +5228,7 @@
          }
      }
      g_stat_draw++;
@@ -1299,7 +1299,7 @@ index 10c5eac..6310988 100644
      { static int tg; if (!tg) { tg = 1; const char *e = getenv("DM_TEST_GHOST"); float v[8];   // Test switch DM_TEST_GHOST=px,py,gx,gy,gw,gh,cx,cy (normalized; press point, grid, center of the drag-follow image): turns on the drag-follow image directly without going through the front end (for Mac host screenshot verification)
          if (e && sscanf(e, "%f,%f,%f,%f,%f,%f,%f,%f", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6], &v[7]) == 8) mtl_ui_ghost(1, v[0], v[1], &v[2], v[6], v[7]); } }
      if (dw && atomic_load(&g_ghost_on)) ghost_note(dw);
-@@ -5728,6 +6017,7 @@ void mtl_exec(const uint8_t *p) {
+@@ -5728,6 +6017,7 @@
          if (g_allocprof) { static uint64_t last; static int prev = -1; uint64_t now = g_dev.currentAllocatedSize; if (prev >= 0 && prev < 64 && now > last) g_ap_bytes[prev] += now - last; last = now; prev = h.op; }
          if (g_hoist_n && hoist_take(p)) { if (g_fz.active && p == g_fz.rt2_op) { g_fz.phase = 2; g_rt_merged = 0; PD("F %llu 合并通道进入后一个通道的绘制", g_stat_pass); } p += h.size; continue; }   // A pure-clear render pass already executed early / the start of a later pass already merged in   // Entering the later pass: the same-target continuation of the earlier pass ends here; the later pass reading the earlier pass's attachment is proven to be same-pixel by fz_p2_draw, and is no longer split by the continuation rule
          const void *a = p + 8;
@@ -1307,7 +1307,7 @@ index 10c5eac..6310988 100644
          switch (h.op) {
              case OP_END: g_exec_cur = NULL;
                  if (g_hoist_n && !g_ret_n && !g_nrest) {
-@@ -5737,7 +6027,20 @@ void mtl_exec(const uint8_t *p) {
+@@ -5737,7 +6027,20 @@
                  return;   // An end-of-pass triggered outside a list (present / CPU readback etc.) must not scan expired command memory: a null start point means store everything
              case OP_BEGIN: break;
              case OP_JUMP: { const uint8_t *t; memcpy(&t, a, 8); p = t; continue; }
@@ -1328,7 +1328,7 @@ index 10c5eac..6310988 100644
                  if (g_ret_n < 16) g_ret[g_ret_n] = p + h.size; g_ret_n++;   // Return stack for lookahead: after a sub-list ends, continue looking at the caller
                  mtl_exec((const uint8_t *)t); g_ret_n--; break; }
              case OP_SIGNAL_EVENT: { volatile uint32_t *val; uint32_t m, v; memcpy(&val, a, 8); memcpy(&m, (const uint8_t *)a + 8, 4); memcpy(&v, (const uint8_t *)a + 12, 4);
-@@ -6166,6 +6469,31 @@ static int present_encode(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<MTLTex
+@@ -6166,6 +6469,31 @@
      [en endEncoding];
      return 1;
  }
@@ -1360,7 +1360,7 @@ index 10c5eac..6310988 100644
  static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MTLTexture> dst, const int crop[4], int uv_i) {
      NSUInteger cx = 0, cy = 0, cw = src.width, ch = src.height;
      if (crop && (crop[2] || crop[3])) {
-@@ -6175,6 +6503,9 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
+@@ -6175,6 +6503,9 @@
          }
          cx = crop[0]; cy = crop[1]; cw = crop[2]; ch = crop[3];
      }
@@ -1370,7 +1370,7 @@ index 10c5eac..6310988 100644
      present_pipeline(dst.pixelFormat);
      double dw = dst.width, dh = dst.height, s = fmin(dw / cw, dh / ch);
      MTLViewport vp = {floor((dw - cw * s) / 2), floor((dh - ch * s) / 2), round(cw * s), round(ch * s), 0, 1};
-@@ -6189,11 +6520,11 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
+@@ -6189,11 +6520,11 @@
      if (!en) { MLOG("【红】M4 出图渲染编码器创建失败"); return 0; }
      [en barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageAll visibilityOptions:MTL4VisibilityOptionDevice];
      [en setArgumentTable:g_present_args atStages:MTLRenderStageFragment];
@@ -1397,7 +1397,7 @@ index fa314c4..d99e1c4 100644
  #include <string.h>
  #include "nvn.h"
  #include "nvn_tex.h"
-@@ -52,7 +53,30 @@ typedef struct { uint32_t magic; samp_par p; } samp_t;
+@@ -52,7 +53,30 @@
  // The per-stage shader keys are not kept in prog_t: the game's real NVNprogram may be smaller than the header's 0xC0 (growing prog_t corrupted the adjacent object in Mario); see prog_keys in hle_nvn.c
  typedef struct { uint32_t magic, nstage; NVNshaderData sd[6]; uint64_t serial; } prog_t;     FITS(prog_t, NVNprogram);   // serial: table key for the replay layer's resolved result
  
@@ -1429,7 +1429,7 @@ index fa314c4..d99e1c4 100644
  typedef struct { const pool_t *pool; int64_t off; } ev_builder_t;                             FITS(ev_builder_t, NVNeventBuilder);
  typedef struct { uint32_t magic; volatile uint32_t *val; } ev_t;                              FITS(ev_t, NVNevent);
  
-@@ -100,7 +124,7 @@ enum {
+@@ -100,7 +124,7 @@
      OP_BIND_PROGRAM, OP_BIND_STATE, OP_BIND_VATTR, OP_BIND_VSTREAM, OP_BIND_VBUF,
      OP_BIND_UBO, OP_BIND_SSBO, OP_BIND_TEX, OP_BIND_SAMP,
      OP_STENCIL, OP_POLY_OFFSET, OP_DRAW, OP_DRAW_IDX, OP_DISPATCH, OP_BARRIER,
@@ -1438,7 +1438,7 @@ index fa314c4..d99e1c4 100644
  };
  // Payload (immediately follows op_hdr)
  typedef struct { int32_t n; const tex_t *color[8]; view_t cview[8]; uint8_t has_cview[8]; const tex_t *depth; view_t dview; uint8_t has_dview; } p_set_rt;
-@@ -109,7 +133,10 @@ typedef struct { float depth; int32_t depth_mask, stencil, stencil_mask; } p_cle
+@@ -109,7 +133,10 @@
  typedef struct { int32_t first, n; float v[16][6]; } p_viewports;          // x, y, w, h, near, far (near and far are overridden by DEPTH_RANGE)
  typedef struct { int32_t x, y, w, h; } p_scissor;
  typedef struct { float n, f; } p_depth_range;
@@ -1583,7 +1583,7 @@ diff --git a/dm/gfx/tests/t_nvn.c b/dm/gfx/tests/t_nvn.c
 index d21874c..926334d 100644
 --- a/dm/gfx/tests/t_nvn.c
 +++ b/dm/gfx/tests/t_nvn.c
-@@ -13,6 +13,10 @@ void nvn_present_config(int hz, int display_mode);
+@@ -13,6 +13,10 @@
  #include <fcntl.h>
  #include <errno.h>
  #include <unistd.h>
@@ -1594,7 +1594,7 @@ index d21874c..926334d 100644
  uint64_t now_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000000000ull + t.tv_nsec; }
  
  static int g_fail, g_n;
-@@ -47,11 +51,17 @@ static size_t tex_size(int fmt, int w, int h, int flags, size_t *align) {
+@@ -47,11 +51,17 @@
      return P(nvnTextureBuilderGetStorageSize)(&tb);
  }
  
@@ -1613,7 +1613,7 @@ index d21874c..926334d 100644
      EXPECT("bootstrap 取 GetProcAddress 非空", 1, gpa != NULL);
      int nonnull = 0; for (unsigned i = 0; i < NVN_NFUNC; i++) nonnull += gpa(NULL, nvn_names[i]) != NULL;
      EXPECT("名字表里每个名字都取到地址（NVN_NFUNC 个）", NVN_NFUNC, nonnull);   // used to be hard-coded 523 and kept failing once the name table grew to 536
-@@ -165,7 +175,10 @@ int main(void) {
+@@ -165,7 +175,10 @@
  
      // 6. Sync / window / present
      NVNsync s1, s2; P(nvnSyncInitialize)(&s1, &dev); P(nvnSyncInitialize)(&s2, &dev);
@@ -1625,7 +1625,7 @@ index d21874c..926334d 100644
      P(nvnQueueFenceSync)(&q, &s1, NVN_SYNC_CONDITION_ALL_GPU_COMMANDS_COMPLETE, 0);
      EXPECT("围栏后等待 = 已就绪(0)", 0, P(nvnSyncWait)(&s1, 0));
      NVNtexture sc[2]; NVNtextureBuilder tb; P(nvnTextureBuilderSetDevice)(&tb, &dev); P(nvnTextureBuilderSetDefaults)(&tb);
-@@ -374,12 +387,16 @@ int main(void) {
+@@ -374,12 +387,16 @@
          mtl_present_test_stall(0); mtl_present_flush();
      }
  
@@ -1652,7 +1652,7 @@ diff --git a/dm/gfx/tools/dmsh_chain.lock b/dm/gfx/tools/dmsh_chain.lock
 index c925370..05aa879 100644
 --- a/dm/gfx/tools/dmsh_chain.lock
 +++ b/dm/gfx/tools/dmsh_chain.lock
-@@ -3,6 +3,6 @@ dmsh_xlate.dll	6dd3441c31b57475
+@@ -3,6 +3,6 @@
  Ryujinx.Graphics.Shader.dll	950b659a54a52636
  Ryujinx.Common.dll	74f785bc3a81386e
  xlate_source	23b85cb2e58b9c36
@@ -1664,7 +1664,7 @@ diff --git a/dm/host/Makefile b/dm/host/Makefile
 index 31b4420..51cec58 100644
 --- a/dm/host/Makefile
 +++ b/dm/host/Makefile
-@@ -10,7 +10,7 @@ GAME_DIR = ../games/$(GAME)
+@@ -10,7 +10,7 @@
  GAME_H = gen/$(GAME)/game_profile.h
  CFLAGS=-O1 -g -Wall -Wno-unused-function
  # Service-layer takeover hle_*.c files are included by wildcard: adding a file does not touch this line (avoids merge conflicts)
@@ -1673,7 +1673,7 @@ index 31b4420..51cec58 100644
  # NVN null device + nn::vi (dm/gfx/)
  # Sources under dm/gfx and dm/gfx/nvn are included by wildcard (tests/ and metal/ do not go into the host): adding a file does not touch this line
  GFX=$(sort $(wildcard ../gfx/*.c ../gfx/nvn/*.c ../gfx/nvn/*.m ../gfx/nvn/*.S ../gfx/tex/*.c ../gfx/tex/*.m))
-@@ -51,5 +51,5 @@ $(GAME_STAMP): FORCE
+@@ -51,5 +51,5 @@
  	@mkdir -p gen; echo $(GAME) | cmp -s - $@ || echo $(GAME) > $@
  .PHONY: FORCE
  FORCE:
@@ -1906,9 +1906,10 @@ index 0000000..b39a06b
 +}
 +void dm_controller_effects_stop(void) {initialized();atomic_fetch_add(&generation,1);synchronous(^{stop_all();});}
 diff --git a/dm/host/dm.h b/dm/host/dm.h
+index fda33ac..5f5a937 100644
 --- a/dm/host/dm.h
 +++ b/dm/host/dm.h
-@@ -46,7 +46,21 @@ extern module_t g_mod[MAX_MOD];
+@@ -46,7 +46,21 @@
  extern int g_nmod;
  // main's build ID (empty if none). DM_D2R_BUILD = the D2R build that the code inherited from d2r-mobile belongs to: code with fixed D2R addresses or that edits D2R saves runs only on it
  #define DM_D2R_BUILD "db0507f36b84200ac05f75d76ed5026f"
@@ -1974,7 +1975,7 @@ diff --git a/dm/host/dm_input.h b/dm/host/dm_input.h
 index 933c85b..6dfad7a 100644
 --- a/dm/host/dm_input.h
 +++ b/dm/host/dm_input.h
-@@ -19,7 +19,7 @@ void dm_pad_set(uint64_t buttons, int32_t lx, int32_t ly, int32_t rx, int32_t ry
+@@ -19,7 +19,7 @@
  // Optional diagnostic DM_HID_RECEIPT_LOG=<writable JSONL path>: received samples of real GetNpadState returns.
  // Fields read_start_ns/time_ns use the same host now_ns(); the front-end publish window must use the same helper, and a read interval that spans a publish must not be force-matched.
  // State changes + at most one activity witness per second, limit_reached after 1024 entries; no file is written when the environment variable is not set.
@@ -1983,7 +1984,7 @@ index 933c85b..6dfad7a 100644
  // No new line does not prove that a blank touch point was read; a valid connection / sampling activity / evidence from the original UI and command packets is required; the log has IO overhead and is not used for timing.
  
  // Private skill-aim-v1: takes only paired received samples of the right axis that GetNpad has actually returned, not values the front end has not yet had consumed.
-@@ -27,3 +27,7 @@ void dm_input_sampled_right(int32_t *rx,int32_t *ry);
+@@ -27,3 +27,7 @@
  
  // Controller state injection point: called after GetNpadState has filled in the original state and before the pseudo-key override. The Mac host touch point script (touch_mac.c, Mac only, kept out of the iOS app by the _mac convention) registers at startup; iOS does not carry that file and it stays empty
  extern void (*dm_pad_hook)(uint64_t now, uint64_t *buttons, int32_t *lx, int32_t *ly, int32_t *rx, int32_t *ry);
@@ -2003,7 +2004,7 @@ index c7559ca..1cbe064 100644
  #import <Metal/Metal.h>
  #include "dm.h"
  #include "dm_input.h"
-@@ -13,14 +14,45 @@ __attribute__((constructor)) static void ui_shift_reg(void) { mtl_set_ui_rect_fn
+@@ -13,14 +14,45 @@
  #include "front.h"
  #include "hle.h"
  #include <signal.h>
@@ -2049,7 +2050,7 @@ index c7559ca..1cbe064 100644
      unsigned w, h; const char *e = getenv("DM_GAME_RES");
      if (e && sscanf(e, "%ux%u", &w, &h) == 2) return docked ? (uint64_t)h << 32 | w : (uint64_t)(h * 4 / 5) << 32 | (w * 4 / 5 + 3) / 4 * 4;
      return docked ? 900ull << 32 | 1600 : 720ull << 32 | 1280;
-@@ -60,18 +92,27 @@ void front_run(void (*guest)(void)) {
+@@ -60,18 +92,27 @@
      @autoreleasepool {
          [NSApplication sharedApplication];
          [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
@@ -2080,7 +2081,7 @@ index c7559ca..1cbe064 100644
          [win center];
          [win makeKeyAndOrderFront:nil];
          [NSApp activateIgnoringOtherApps:YES];
-@@ -93,10 +134,10 @@ void front_run(void (*guest)(void)) {
+@@ -93,10 +134,10 @@
                                                        usingBlock:^(NSNotification *n) { (void)n; exit(0); }];
          // Lifecycle (hle.h / dm.h): focus lost → 2, focus regained → 1; minimized → 3 + audio paused + GPU suspended, restored → resume (followed by focus regained → 1)
          NSNotificationCenter *nc = NSNotificationCenter.defaultCenter;
@@ -2233,7 +2234,7 @@ diff --git a/dm/host/hle.c b/dm/host/hle.c
 index 1a63bd7..9fcffec 100644
 --- a/dm/host/hle.c
 +++ b/dm/host/hle.c
-@@ -17,6 +17,7 @@ extern uint64_t unimpl_stubs[MAX_STUB];   // 8 bytes per stub
+@@ -17,6 +17,7 @@
  uint64_t unimpl_c(unsigned idx, uint64_t *regs) {
      if (!g_stub_seen[idx]++)
          LOG("UNIMPL %s (x0=%#llx x1=%#llx x2=%#llx)", g_stub_name[idx], regs[0], regs[1], regs[2]);
@@ -2241,10 +2242,12 @@ index 1a63bd7..9fcffec 100644
      return 0;
  }
  
-@@ -42,6 +43,16 @@ uint64_t resolve_import(module_t *m, const char *name) {
+@@ -40,6 +41,16 @@
+     g_stub_name[k] = name;
+     (void)m;
      return (uint64_t)hlecount_wrap("STUB", name, (void *)&unimpl_stubs[k]);
- }
- 
++}
++
 +// Undefined ELF weak symbols are null unless a guest or host definition exists.
 +// SDK 8 nnosInitialize checks its optional exception-stack callback before calling it.
 +uint64_t resolve_weak_import(module_t *m, const char *name) {
@@ -2253,16 +2256,14 @@ index 1a63bd7..9fcffec 100644
 +    for (unsigned i = 0; i < bytes / sizeof(*entries); ++i)
 +        if (!strcmp(entries[i].name, name)) return resolve_import(m, name);
 +    return 0;
-+}
-+
- void stubs_report(void) { LOG("stubs=%u", g_nstub); }
+ }
  
- // ---------- Host gate dispatch ----------
+ void stubs_report(void) { LOG("stubs=%u", g_nstub); }
 diff --git a/dm/host/hle.h b/dm/host/hle.h
 index 79fda3d..8a7ffc3 100644
 --- a/dm/host/hle.h
 +++ b/dm/host/hle.h
-@@ -77,4 +77,6 @@ uint64_t dm_audio_render_calls(void);   // Cumulative sound card callback count
+@@ -77,4 +77,6 @@
  //   0x8c   Current act saved while in a rift (when the character is in a rift map w9 is replaced with 4 = Act V, writes x9; x8 always 0) dm_rift.c      0x6fa9d0 (branch gate: x8≠0 jumps to 0x6fa9d4, otherwise executes the original instruction and returns to 0x6fa9d4)
  //   0x8d   Extra mercenary equipment slots (mercenary + rift level ≥10 + belt / boots / gloves / ring / amulet: w0 is replaced with 1, writes x0; x8 always 0) dm_rift.c      0x64a34c (branch gate: x8≠0 jumps to 0x64a350, otherwise executes the original instruction and returns to 0x64a350)
  //   0x8e   Client-side check for the extra mercenary equipment slots (rift level ≥10 + the item is a belt / boots / gloves / ring / amulet: w1 is replaced with the item's own type number, writes x1; x8 always 0) dm_rift.c      0x3beb58 (branch gate: x8≠0 jumps to 0x3beb5c, otherwise executes the original instruction and returns to 0x3beb5c)
@@ -2274,25 +2275,25 @@ diff --git a/dm/host/hle_account.c b/dm/host/hle_account.c
 index 362a6c2..61dbe98 100644
 --- a/dm/host/hle_account.c
 +++ b/dm/host/hle_account.c
-@@ -30,6 +30,13 @@ HLE_FORCE("_ZN2nn7account12PopOpenUsersEPiPNS0_10UserHandleEi", "系统代开的
+@@ -29,6 +29,13 @@
+ HLE_FORCE("_ZN2nn7account12PopOpenUsersEPiPNS0_10UserHandleEi", "系统代开的用户：无（游戏改走预选用户）", void, h_acc_PopOpen, int *n, UserHandle *out, int max) { (void)out; (void)max; *n = 0; }
  HLE_FORCE("_ZN2nn7account22TryOpenPreselectedUserEPNS0_10UserHandleE", "启动时预选用户；恒为本地用户（返回 bool）", unsigned, h_acc_TryOpenPre, UserHandle *h) {
      h->v[0] = k_uid.v[0]; h->v[1] = k_uid.v[1]; h->v[2] = HANDLE_MAGIC; return 1;
- }
++}
 +// SDK 8 OpenPreselectedUser returns Result, unlike TryOpenPreselectedUser's bool.
 +// D3 main+0x4c51cc calls it before GetUserId. Use the same local-user handle.
 +HLE_FORCE("_ZN2nn7account19OpenPreselectedUserEPNS0_10UserHandleE", "SDK 8 preselected local user", Result, h_acc_OpenPre, UserHandle *h) {
 +    if (!h) return RES_FAIL;
 +    h_acc_TryOpenPre(h);
 +    return RES_OK;
-+}
+ }
  HLE_FORCE("_ZN2nn7account8OpenUserEPNS0_10UserHandleERKNS0_3UidE", "打开用户；句柄内直接存 Uid", Result, h_acc_OpenUser, UserHandle *h, const Uid *uid) {
      h->v[0] = uid->v[0]; h->v[1] = uid->v[1]; h->v[2] = HANDLE_MAGIC; return RES_OK;
- }
 diff --git a/dm/host/hle_audio.c b/dm/host/hle_audio.c
 index 3d309a1..ec44a2c 100644
 --- a/dm/host/hle_audio.c
 +++ b/dm/host/hle_audio.c
-@@ -296,3 +296,9 @@ void dm_audio_suspend(int on) {
+@@ -296,3 +296,9 @@
      }
      pthread_mutex_unlock(&g_aos_lock);
  }
@@ -2303,6 +2304,7 @@ index 3d309a1..ec44a2c 100644
 +    (void)infos; (void)capacity; return 0;
 +}
 diff --git a/dm/host/hle_hid.c b/dm/host/hle_hid.c
+index 561a3c8..36bd482 100644
 --- a/dm/host/hle_hid.c
 +++ b/dm/host/hle_hid.c
 @@ -1,8 +1,12 @@
@@ -2319,21 +2321,21 @@ diff --git a/dm/host/hle_hid.c b/dm/host/hle_hid.c
  #include <stdatomic.h>
  #include <unistd.h>
  #include <strings.h>
-@@ -31,6 +35,13 @@ void dm_input_set(uint64_t buttons, int32_t lx, int32_t ly, int32_t rx, int32_t
+@@ -30,6 +34,13 @@
+ }
  void dm_pad_set(uint64_t buttons, int32_t lx, int32_t ly, int32_t rx, int32_t ry) {
      uint64_t old = atomic_exchange(&g_pad_btn, buttons); atomic_fetch_or(&g_pad_latch, buttons & ~old); atomic_store(&g_pad_axes, pack(lx, ly, rx, ry));
- }
++}
 +// Focus loss must also discard unconsumed press edges.
 +void dm_pad_clear(void) {
 +    atomic_store(&g_pad_btn, 0); atomic_store(&g_pad_axes, 0); atomic_store(&g_pad_latch, 0);
 +}
 +void dm_input_clear(void) {
 +    atomic_store(&g_btn, 0); atomic_store(&g_axes, 0); atomic_store(&g_latch, 0);
-+}
+ }
  uint64_t dm_input_samples(void) { return (uint64_t)atomic_load(&g_sampling); }
  // DM_KEYS scripted input (for tests): "seconds:key[+key][~hold seconds][*count/interval seconds],...", e.g. "8:A,12:A,15:Down~0.5,16:A+B,40:A*80/2" (A every 2 s from 40 s on, 80 times). Key names A B X Y LS RS L R ZL ZR Plus Minus Left Up Right Down, left stick LLeft LUp LRight LDown;
- //   held 0.15 s by default, at most 1024 steps (counted after repeats are expanded). Goes through the controller path (dm_pad_set), ORed with keyboard / touch, neither overrides the other. Times are counted from host start.
-@@ -77,7 +88,35 @@ static uint32_t style_of(uint32_t id) { return id != connected_id() ? 0 : id ==
+@@ -77,7 +88,35 @@
  static int32_t ax(uint64_t v, int i) { return (int16_t)(v >> (16 * i)); }
  static int32_t pick(int32_t a, int32_t b) { return (a < 0 ? -a : a) >= (b < 0 ? -b : b) ? a : b; }   // whichever of the two paths is deflected more
  
@@ -2369,7 +2371,7 @@ diff --git a/dm/host/hle_hid.c b/dm/host/hle_hid.c
      memset(s, 0, sizeof *s);
      s->sampling = atomic_fetch_add(&g_sampling, 1) + 1;
      if (!(style_of(id) & style)) return;   // no controller of this id / style: attributes = 0
-@@ -94,7 +133,17 @@ static void fill(NpadState *s, uint32_t id, uint32_t style) {
+@@ -94,7 +133,17 @@
      if (s->rx > STICK_THRESH) b |= 1u << 22;
      if (s->ry < -STICK_THRESH) b |= 1u << 23;
      s->buttons = b;
@@ -2387,7 +2389,7 @@ diff --git a/dm/host/hle_hid.c b/dm/host/hle_hid.c
  }
  // GetNpadStates(out, n, id): returns the number written, newest first. The host keeps no history: only 1 current state (callers handle the returned count)
  static int states(NpadState *out, int n, uint32_t id, uint32_t style) { if (n <= 0) return 0; fill(out, id, style); return 1; }
-@@ -121,21 +170,39 @@ HLE_FORCE("_ZN2nn3hid20StopLrAssignmentModeEv", "L/R 分配模式；宿主忽略
+@@ -121,21 +170,39 @@
  // Controller applet (system UI): report "1 player, current controller selected" directly. ControllerSupportResultInfo = { int playerCount; uint32_t selectedId; }
  HLE_FORCE("_ZN2nn3hid21ShowControllerSupportEPNS0_27ControllerSupportResultInfoERKNS0_20ControllerSupportArgE", "手柄小程序；宿主直接报已选好",
            Result, h_hid_ShowCtrl, int32_t *info, const void *arg) { (void)arg; if (info) { info[0] = 1; info[1] = (int32_t)connected_id(); } return RES_OK; }
@@ -2436,7 +2438,7 @@ diff --git a/dm/host/hle_hid.c b/dm/host/hle_hid.c
  // Mouse / keyboard: not connected
  HLE_FORCE("_ZN2nn3hid15InitializeMouseEv", "鼠标；宿主不提供", void, h_hid_InitMouse, void) {}
  HLE_FORCE("_ZN2nn3hid14GetMouseStatesEPNS0_10MouseStateEi", "鼠标状态：0 条", int, h_hid_MouseStates, void *out, int n) { (void)out; (void)n; return 0; }
-@@ -209,6 +276,11 @@ HLE_FORCE("_ZN2nn3hid32GetSixAxisSensorFusionParametersEPfS1_RKNS0_19SixAxisSens
+@@ -209,6 +276,11 @@
  HLE_FORCE("_ZN2nn3hid32SetSixAxisSensorFusionParametersERKNS0_19SixAxisSensorHandleEff", "六轴融合参数；宿主忽略", void, h_hid_FusionSet, const uint32_t *h, float a, float b) { (void)h; (void)a; (void)b; }
  HLE_FORCE("_ZN2nn3hid34ResetSixAxisSensorFusionParametersERKNS0_19SixAxisSensorHandleE", "六轴融合参数；宿主忽略", void, h_hid_FusionReset, const uint32_t *h) { (void)h; }
  HLE_FORCE("_ZN2nn3hid41IsFirmwareUpdateAvailableForSixAxisSensorERKNS0_19SixAxisSensorHandleE", "六轴固件更新：无", unsigned, h_hid_SixFw, const uint32_t *h) { (void)h; return 0; }
@@ -3328,7 +3330,7 @@ diff --git a/dm/host/hle_misc.c b/dm/host/hle_misc.c
 index 5f86515..ea4cf72 100644
 --- a/dm/host/hle_misc.c
 +++ b/dm/host/hle_misc.c
-@@ -91,6 +91,9 @@ HLE_FORCE("_ZN2nn3ngc15ProfanityFilter19CheckProfanityWordsEPjjPPKcm", "敏感
+@@ -91,6 +91,9 @@
  HLE_FORCE("_ZN2nn3nsd7ResolveEPNS0_4FqdnERKS1_", "服务器名解析，联网排除；剪口", Result, h_nsd_Resolve, void *out, const void *in) { (void)out; (void)in; return RES_FAIL; }
  HLE_FORCE("_ZN2nn3nsd9ResolveExEPNS0_4FqdnERKS1_", "服务器名解析，联网排除；剪口", Result, h_nsd_ResolveEx, void *out, const void *in) { (void)out; (void)in; return RES_FAIL; }
  // bool arguments only look at the low 8 bits; returns bool
@@ -3350,7 +3352,7 @@ index 234d762..672dfa6 100644
  HLE_FORCE("_ZN2nn6socket10InitializeERKNS0_6ConfigE", "连 bsd 套接字服务；离线，不建会话（剪）", Result, h_socket_Initialize, const void *cfg) { (void)cfg; return RES_OK; }
  HLE_FORCE("_ZN2nn4nifm10InitializeEv", "连 nifm 网络管理服务；离线（剪）", Result, h_nifm_Initialize, void) { return RES_OK; }
  HLE_FORCE("_ZN2nn4nifm20SubmitNetworkRequestEv", "离线：网络请求不提交", void, h_nifm_Submit, void) {}
-@@ -11,11 +12,14 @@ HLE_FORCE("_ZN2nn4nifm18IsNetworkAvailableEv", "离线：网络恒不可用", in
+@@ -11,11 +12,14 @@
  HLE_FORCE("_ZN2nn4nifm31HandleNetworkRequestErrorResultEv", "离线：报失败，不弹系统联网界面", Result, h_nifm_HandleErr, void) { return RES_FAIL; }
  HLE_FORCE("_ZN2nn4nifm26GetCurrentPrimaryIpAddressEPNS_6socket6InAddrE", "离线：无 IP", Result, h_nifm_GetIp, uint32_t *a) { if (a) *a = 0; return RES_FAIL; }
  HLE_FORCE("_ZN2nn4nifm22GetCurrentProxySettingEPNS0_12ProxySettingE", "离线：无代理设置", Result, h_nifm_GetProxy, void *p) { (void)p; return RES_FAIL; }
@@ -3365,7 +3367,7 @@ index 234d762..672dfa6 100644
  #define SK_ENETDOWN 50                  // Horizon sockets use FreeBSD error codes
  static __thread int t_skerr = SK_ENETDOWN;
  static int sk_fail(void) { t_skerr = SK_ENETDOWN; return -1; }
-@@ -66,6 +70,8 @@ HLE_FORCE("nnsocketGetHostByNameWithOptions", "域名解析（剪）：NULL", vo
+@@ -66,6 +70,8 @@
  HLE_FORCE("nnsocketGetLastErrno", "套接字错误码由宿主记录", int, h_nsk_GetErrno, void) { return t_skerr; }
  HLE_FORCE("nnsocketSetLastErrno", "套接字错误码由宿主记录", void, h_nsk_SetErrno, int e) { t_skerr = e; }
  
@@ -3378,7 +3380,7 @@ diff --git a/dm/host/hle_offline.c b/dm/host/hle_offline.c
 index 367779a..9eccbc0 100644
 --- a/dm/host/hle_offline.c
 +++ b/dm/host/hle_offline.c
-@@ -14,6 +14,7 @@ HLE_FORCE("_ZN2nn5prepo12AddSessionIdEPNS0_10PlayReportEPKc", "遥测会话号
+@@ -14,6 +14,7 @@
  HLE_FORCE("_ZN2nn5prepo27AddInternetConnectionStatusEPNS0_10PlayReportEPKcS4_S4_", "遥测联网状态：不连服务，不加，报成功", Result, h_prepo_AddNet, void *rep, const char *a, const char *b, const char *c) { (void)rep; (void)a; (void)b; (void)c; return RES_OK; }
  HLE_FORCE("_ZN2nn5prepo28RequestImmediateTransmissionEv", "遥测立即上传；不发送，报成功", Result, h_prepo_Tx, void) { return RES_OK; }
  
@@ -3386,7 +3388,7 @@ index 367779a..9eccbc0 100644
  // ---------- ldn: local wireless. Initialization fails, state is always "none" ----------
  HLE_FORCE("_ZN2nn3ldn10InitializeEv", "本地无线（剪）：初始化失败", Result, h_ldn_Init, void) { return RES_FAIL; }
  HLE_FORCE("_ZN2nn3ldn8FinalizeEv", "本地无线（剪）", void, h_ldn_Fini, void) {}
-@@ -60,6 +61,8 @@ HLE_FORCE("_ZN2nn6socket11GetAddrInfoEPKcS2_PK8addrinfoPPS3_", "域名解析（
+@@ -60,6 +61,8 @@
  HLE_FORCE("_ZN2nn6socket12FreeAddrInfoEP8addrinfo", "与 GetAddrInfo 配对（剪）", void, h_sk_FreeAi2, void *ai) { (void)ai; }
  HLE_FORCE("_ZN2nn6socket11GAIStrErrorENS0_7AiErrnoE", "解析错误文字", const char *, h_sk_GaiStr, int e) { (void)e; return "network unavailable"; }
  
@@ -3395,7 +3397,7 @@ index 367779a..9eccbc0 100644
  // ---------- ssl: offline, creating a context fails ----------
  HLE_FORCE("_ZN2nn3ssl7Context15ImportClientPkiEPmPKcS4_jj", "SSL（剪）", Result, h_ssl_ImpCli, void *self, uint64_t *id, const char *a, const char *b, unsigned x, unsigned y) { (void)self; (void)a; (void)b; (void)x; (void)y; if (id) *id = 0; return RES_FAIL; }
  HLE_FORCE("_ZN2nn3ssl7Context15ImportServerPkiEPmPKcjNS0_17CertificateFormatE", "SSL（剪）", Result, h_ssl_ImpSrv, void *self, uint64_t *id, const char *a, unsigned n, int f) { (void)self; (void)a; (void)n; (void)f; if (id) *id = 0; return RES_FAIL; }
-@@ -68,6 +71,7 @@ HLE_FORCE("_ZN2nn3ssl14BuiltInManager22GetBuiltInCertificatesEPPNS0_26BuiltInCer
+@@ -68,6 +71,7 @@
            void **out, uint8_t *buf, unsigned bn, void *ids, unsigned n) { (void)buf; (void)bn; (void)ids; (void)n; if (out) *out = NULL; return RES_FAIL; }
  
  // ---------- nifm / nsd: offline ----------
@@ -3403,7 +3405,7 @@ index 367779a..9eccbc0 100644
  HLE_FORCE("_ZN2nn4nifm19SetLocalNetworkModeEb", "离线：本地网络模式开关忽略", void, h_nifm_LocalMode, unsigned on) { (void)on; }
  HLE_FORCE("_ZN2nn4nifm27SubmitNetworkRequestAndWaitEv", "离线：网络请求不提交（立即返回，IsNetworkAvailable 恒假）", void, h_nifm_SubmitWait, void) {}
  HLE_FORCE("_ZN2nn4nifm22GetCurrentIpConfigInfoEP7in_addrS2_S2_S2_S2_", "离线：无 IP 配置", Result, h_nifm_IpCfg, uint32_t *a, uint32_t *b, uint32_t *c, uint32_t *d, uint32_t *e) {
-@@ -78,6 +82,8 @@ HLE_FORCE("_ZN2nn4nifm22GetCurrentIpConfigInfoEPNS_6socket6InAddrES3_S3_S3_S3_",
+@@ -78,6 +82,8 @@
      uint32_t *p[5] = {a, b, c, d, e}; for (int i = 0; i < 5; i++) if (p[i]) *p[i] = 0; return RES_FAIL;
  }
  HLE_FORCE("_ZN2nn4nifm26GetCurrentPrimaryIpAddressEP7in_addr", "离线：无 IP（SDK 10 重载）", Result, h_nifm_GetIp10, uint32_t *a) { if (a) *a = 0; return RES_FAIL; }
@@ -3412,7 +3414,7 @@ index 367779a..9eccbc0 100644
  // EnvironmentIdentifier = char[8]: retail environment "lp1"
  HLE_FORCE("_ZN2nn3nsd24GetEnvironmentIdentifierEPNS0_21EnvironmentIdentifierE", "服务器环境名：零售 lp1", void, h_nsd_EnvId, char *out) { memset(out, 0, 8); memcpy(out, "lp1", 3); }
  
-@@ -106,6 +112,7 @@ HLE_FORCE("_ZN2nn3err39ShowUnacceptableApplicationVersionErrorEv", "游戏版本
+@@ -106,6 +112,7 @@
  // ---------- web: web page applet (online lobby). Unavailable ----------
  HLE_FORCE("_ZN2nn3web13ShowLobbyPageEPNS0_20LobbyPageReturnValueERKNS0_16ShowLobbyPageArgE", "联机大厅网页小程序（剪）", Result, h_web_Lobby, void *rv, const void *arg) { (void)rv; (void)arg; LOG("web::ShowLobbyPage（剪）"); return RES_FAIL; }
  
@@ -3420,7 +3422,7 @@ index 367779a..9eccbc0 100644
  // ---------- C interface (nnsocket* / nnssl*): offline as well. The arguments are all in registers and the host does not look at them ----------
  HLE_FORCE("nnsocketAccept", "离线（剪）", int, h_c_sk_Accept, void) { return -1; }
  HLE_FORCE("nnsocketListen", "离线（剪）", int, h_c_sk_Listen, void) { return -1; }
-@@ -115,3 +122,5 @@ HLE_FORCE("nnsocketShutdown", "离线（剪）", int, h_c_sk_Shutdown, void) { r
+@@ -115,3 +122,5 @@
  HLE_FORCE("nnsocketGetAddrInfo", "域名解析（剪）：EAI_FAIL", int, h_c_sk_Gai, const char *h, const char *s, const void *hint, void **res) { (void)h; (void)s; (void)hint; if (res) *res = NULL; return SK_EAI_FAIL; }
  HLE_FORCE("nnsocketFreeAddrInfo", "与 GetAddrInfo 配对（剪）", void, h_c_sk_FreeAi, void *ai) { (void)ai; }
  HLE_FORCE("nnsocketGAIStrError", "解析错误文字", const char *, h_c_sk_GaiStr, int e) { (void)e; return "network unavailable"; }
@@ -3614,7 +3616,7 @@ diff --git a/dm/host/hle_svc.c b/dm/host/hle_svc.c
 index 7683095..9129d3f 100644
 --- a/dm/host/hle_svc.c
 +++ b/dm/host/hle_svc.c
-@@ -25,6 +25,23 @@ static _Atomic uint64_t *g_alias_bits;   // alias region page bitmap (alias_page
+@@ -25,6 +25,23 @@
  static uint8_t *g_stack; static size_t g_stack_cap;
  // The address lies in the guest address block (every guest thread stack is here: the game's own heap or the stack region); the big-stack entry (hle_bigstack.c) uses it to decide whether to switch stacks
  int dm_guest_as_contains(uintptr_t a) { uintptr_t b = (uintptr_t)g_as; return g_as && a >= b && a - b < RESERVE; }
@@ -3638,18 +3640,20 @@ index 7683095..9129d3f 100644
  
  static void mem_init(void) {
      if (g_as) return;
-@@ -238,7 +255,9 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
+@@ -238,7 +255,9 @@
          regs[0] = 0; regs[1] = v; return 0;
      }
      default:
 -        if (!g_seen[num & 0xff]) { g_seen[num & 0xff] = 1; LOG("SVC %#x x0=%#llx x1=%#llx x2=%#llx (占位返回成功)", num, regs[0], regs[1], regs[2]); }
 -        regs[0] = 0; return 0;
+-    }
+-}
 +        { void dm_backtrace(uint64_t); dm_backtrace(regs[29]); }
 +        if (num == 0x1f) LOG("ConnectToNamedPort: %.12s", (const char *)regs[1]);
 +        die("【红】Unimplemented SVC %#x x0=%#llx x1=%#llx x2=%#llx", num, regs[0], regs[1], regs[2]);
 +        return 0;
-     }
- }
++    }
++}
 diff --git a/dm/host/hle_thread.c b/dm/host/hle_thread.c
 index 96d2674..579e8ae 100644
 --- a/dm/host/hle_thread.c
@@ -3663,7 +3667,7 @@ index 96d2674..579e8ae 100644
  #include <errno.h>
  #include <sched.h>
  #include <signal.h>
-@@ -788,6 +788,21 @@ void hle_bind_system_event(void *ev, int autoclear) {      // Must be called on
+@@ -788,6 +788,21 @@
      g_se[g_nse].ev = ev; g_se[g_nse++].wh = wh;
      pthread_mutex_unlock(&g_se_lock);
  }
@@ -3940,7 +3944,7 @@ diff --git a/dm/host/host_stubs.c b/dm/host/host_stubs.c
 index ef7f336..861146e 100644
 --- a/dm/host/host_stubs.c
 +++ b/dm/host/host_stubs.c
-@@ -23,5 +23,10 @@ void dm_uiscreen_res_reread(void) {}
+@@ -23,5 +23,10 @@
  uint64_t dm_game_res(int docked) { return front_game_res(docked); }
  int dm_screen_real(int *w, int *h) { *w = *h = 0; return 0; }
  void dm_ui_rect(int *x, int *y, int *w, int *h) { *x = *y = *w = *h = 0; }
@@ -4150,7 +4154,7 @@ diff --git a/dm/host/loader.c b/dm/host/loader.c
 index e237a24..2fe8d62 100644
 --- a/dm/host/loader.c
 +++ b/dm/host/loader.c
-@@ -17,6 +17,7 @@ pthread_key_t g_keyres[2], g_keyaspect, g_keyaspectui;   // g_keyaspect: aspect
+@@ -17,6 +17,7 @@
  enum { KEY_K18, KEY_KTLS, KEY_KTLR, KEY_KGATE, KEY_KRES0, KEY_KRES1, KEY_KASPECT, KEY_KASPECTUI, KEY_N };
  
  uint64_t resolve_import(module_t *m, const char *name);
@@ -4158,7 +4162,7 @@ index e237a24..2fe8d62 100644
  void gate_register(uint64_t ret_addr, const char *kind, int arg, uint64_t orig);
  
  static pthread_key_t key_value(unsigned i) {
-@@ -246,7 +247,11 @@ static void relocate(module_t *m) {
+@@ -246,7 +247,11 @@
                  if (!v) v = self;
                  if (v != self && nint++ < 8) LOG("%s: %s 绑到先装模块的定义（%s） | bound to an earlier module's definition", m->name, m->strtab + s->st_name, module_of((void *)v) ? module_of((void *)v)->name : "?");
              }
@@ -4171,7 +4175,7 @@ index e237a24..2fe8d62 100644
              if (type == R_AARCH64_JUMP_SLOT) { *where = v; cnt[2]++; }
              else { *where = v + r->r_addend; cnt[1]++; }       // ABS64 / GLOB_DAT
          }
-@@ -307,6 +312,9 @@ void loader_hash_log(void) {
+@@ -307,6 +312,9 @@
  // and they are vm_remap'ed back at their original relative positions: code pages with copy=FALSE (sharing the same signed pages with __TEXT, r-x), W with copy=TRUE (copy-on-write, paged only when used).
  // The run-time layout is byte-identical to the original image. Remapping signed pages to a new address and then executing them on iOS is exactly what libffi's trampoline table (FFI_EXEC_TRAMPOLINE_TABLE) does
  #include <mach/mach.h>
@@ -4181,7 +4185,7 @@ index e237a24..2fe8d62 100644
  static void remap_at(module_t *m, vm_address_t to, const void *from, unsigned long size, boolean_t copy, vm_prot_t need) {
      vm_address_t a = to; vm_prot_t cur = 0, max = 0;
      kern_return_t kr = vm_remap(mach_task_self(), &a, size, 0, VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE, mach_task_self(), (vm_address_t)from, copy, &cur, &max, VM_INHERIT_NONE);
-@@ -333,10 +341,22 @@ static const struct mach_header_64 *image_mh(void) {
+@@ -333,10 +341,22 @@
  #endif
  static void map_image(module_t *m, const char *dir) {
      (void)dir;
@@ -4209,7 +4213,7 @@ diff --git a/dm/host/thread.c b/dm/host/thread.c
 index 4d22880..0be9257 100644
 --- a/dm/host/thread.c
 +++ b/dm/host/thread.c
-@@ -14,9 +14,16 @@ static void own_key_init(void) { if (pthread_key_create(&g_keyown, own_free)) di
+@@ -14,9 +14,16 @@
  void guest_thread_init(void) {
      pthread_setspecific(g_keygate, (void *)dm_gate);
      for (int i = 0; i < 2; i++) if (g_keyres[i]) pthread_setspecific(g_keyres[i], (void *)dm_game_res(i));   // resolution parameter slot: {u32 width, u32 height} packed
@@ -4232,7 +4236,7 @@ diff --git a/dm/tools/patch_nso.py b/dm/tools/patch_nso.py
 index 837700c..0eec3b5 100644
 --- a/dm/tools/patch_nso.py
 +++ b/dm/tools/patch_nso.py
-@@ -290,6 +290,15 @@ def BRK(imm): return 0xD4200000 | ((imm & 0xFFFF) << 5)
+@@ -290,6 +290,15 @@
  def BLR(n): return 0xD63F0000 | (n << 5)
  NOP = 0xD503201F
  
@@ -4248,7 +4252,7 @@ index 837700c..0eec3b5 100644
  def dis(w, addr):
      l = list(md.disasm(struct.pack('<I', w), addr)); assert len(l) == 1, hex(w)
      return l[0]
-@@ -680,7 +689,12 @@ for a in sorted(kinds):
+@@ -680,7 +689,12 @@
      elif k in ('cntpct', 'cntvct'): st = site_gate(ins, k, arg); stat(k)
      elif k == 'ctr':   # replaced in place by a constant: DminLine = 4 (64-byte lines); movz xN, #4, lsl #16
          assert arg != 18, f'{a:x} mrs x18, ctr_el0'
@@ -4262,7 +4266,7 @@ index 837700c..0eec3b5 100644
      put_branch(a, st)
  
  # Private visual branch; not OBS, 0x85 is a read-only query. Only this experimental build explicitly opts in; the original Qty/children and Update are unchanged.
-@@ -833,7 +847,16 @@ PARAMS = {'db0507f36b84200ac05f75d76ed5026f': [
+@@ -833,7 +847,16 @@
      (0x1663ee8, '52838e49', 0x1663eec, '72a800e9', 9, 'KASPECTUI', '界面常量缓冲 0x15 号槽 [屏宽, 屏高, 宽高比上限]：界面精灵着色器按它在上限以外画两侧黑柱（带约 20–30 像素向内的柔边，宿主另加余量把柔边推出屏幕）'),
      (0xb152bc, '52838e48', 0xb152c0, '72a800e8', 8, 'KASPECT', '新画面模式视口：边距 = (屏宽 − 屏高 × 上限) / 2，经 0x85bc90 设居中视口'),
      (0x23e888, '52838e48', 0x23e88c, '72a800e8', 8, 'KASPECT', '新画面模式坐标钳制（0x23e760）：x 夹进 [边距, 边距 + 屏高 × 上限]，宽屏两侧的指针 / 触摸不再被夹回中间'),
@@ -4280,7 +4284,7 @@ index 837700c..0eec3b5 100644
  params = PARAMS.get(BUILD_ID, [])
  for oa, wa, ob_, wb, r, key, why in params:
      for o, w0 in ((oa, wa), (ob_, wb)):
-@@ -847,6 +870,47 @@ for oa, wa, ob_, wb, r, key, why in params:
+@@ -847,6 +870,47 @@
      tmp = 16 if r != 16 else 17
      emit(STUR(tmp, 31, -16)); emit(MRS_TPIDRRO(r)); emit_slot_addr(r, tmp, key); emit(LDRX(r, r)); emit(LDUR(tmp, 31, -16)); emit(B(here(), oa + 4))
      struct.pack_into('<I', IMG, oa, B(oa, start)); struct.pack_into('<I', IMG, ob_, NOP); stat('param')
@@ -4328,7 +4332,7 @@ index 837700c..0eec3b5 100644
  
  # The three existing native rule trampolines all use only the dead temporary w8 that is overwritten afterwards, and do not change the w0/stat return, sp or NZCV.
  # 6c6290 is after the original mode3 gate; the Blaze / reference count and data invalidation 6c62dc branches before it and the state update after it are untouched.
-@@ -893,38 +957,38 @@ if FAR:   # patch area before the base: file = text + ro + data (padded to 16K)
+@@ -893,38 +957,38 @@
  else:
      open(P('patched.bin'), 'wb').write(IMG + bytearray(PATCH_OFF - len(IMG)) + patch)
  import hashlib
@@ -4378,10 +4382,10 @@ index 837700c..0eec3b5 100644
  print(NAME, stats, 'cuts', len(cuts), 'obs', len(obs), 'patch', len(patch), 'PATCH_OFF', hex(PATCH_OFF), 'slot_refs', len(fix), 'gates', len(gates))
 diff --git a/dm/host/hle_uipointer.c b/dm/host/hle_uipointer.c
 new file mode 100644
-index 0000000..0a46a46
+index 0000000..6ccf5f8
 --- /dev/null
 +++ b/dm/host/hle_uipointer.c
-@@ -0,0 +1,170 @@
+@@ -0,0 +1,236 @@
 +// UI 指针域（kb/07 §10；2026-11-10 安卓 libd3rewrite.so d3_ui_pointer_* 白盒化后自研落地）：
 +//   壳把未命中控件的触点（phase 0=down 1=move 2=up 3=cancel，坐标 [0,1) 左上原点）经
 +//   dm_uipointer_set 入环形队列；游戏线程拍（hle_hid.c fill()）dm_uipointer_frame 消费：
@@ -4433,6 +4437,54 @@ index 0000000..0a46a46
 +    if (atomic_load(&g_off)) return 0;
 +    atomic_store(&g_back, 1);
 +    return 1;
++}
++
++// ---- 安卓 dm_touch_set（.so 0x1842a8 反汇编逐条对表，2026-11-10 完全照搬轮）----
++// nativeTouch(count, slots, xs, ys) 的宿主侧目标：16 槽 × 28B 状态机（互斥锁内边沿转移）。
++//   phase：0=无 1=活跃 2=待收尾；flag4=读取方已观察位；flag8=收尾后再次移动位；
++//   (x,y)@12/16 主坐标、(x2,y2)@20/24 次坐标（收尾未消费时的移动落点）。
++// 写入边沿（.so 0x184300-0x18438c 逐条对表）：present 且 phase==0 → 下(1，64 位同清 flag4)+主坐标；
++// present 且 phase==2 且 flag4!=0 → flag8=1+次坐标+主坐标同步更新；present 且 phase==2 且
++// flag4==0 → 重开下(1，32 位只写 phase)+主坐标；present 且 phase==1 → 只更新主坐标；
++// absent → phase 1→2（抬），+8 挂起移动位清零（flag4=消费方观察位，生产侧不动）。
++// 消费端（.so touch_fill → d3_world_touch_pump 点地走路链）待逆向接入，本轮探针记录边沿。
++typedef struct {
++    int32_t phase, flag4, flag8;
++    float x, y, x2, y2;
++    int32_t rsv[2];                     // .so 28B 步进对齐
++} d3_touch_slot;
++static pthread_mutex_t g_tmu = PTHREAD_MUTEX_INITIALIZER;
++static d3_touch_slot g_tslots[16];
++
++void dm_touch_set(int n, const int *slots, const float *xs, const float *ys) {
++    if (atomic_load(&g_off)) return;
++    if (n < 0) n = 0;
++    if (n > 16) n = 16;
++    pthread_mutex_lock(&g_tmu);
++    unsigned char present[16] = { 0 };
++    for (int i = 0; i < n; i++) {
++        int slot = slots[i];
++        if (slot < 0 || slot > 15) continue;               // .so：slot>15 跳过（负数防御加固）
++        present[slot] = 1;
++        d3_touch_slot *st = &g_tslots[slot];
++        if (st->phase == 0 || (st->phase == 2 && st->flag4 == 0)) {
++            st->phase = 1; st->flag4 = 0;
++            st->x = xs[i]; st->y = ys[i];
++        } else if (st->phase == 2) {                       // flag4 != 0：收尾未被消费又动
++            st->flag8 = 1;
++            st->x2 = xs[i]; st->y2 = ys[i];
++            st->x = xs[i]; st->y = ys[i];                  // .so：主坐标同步更新
++        } else {                                           // phase==1：活跃移动
++            st->x = xs[i]; st->y = ys[i];
++        }
++    }
++    for (int slot = 0; slot < 16; slot++) {
++        if (present[slot]) continue;
++        d3_touch_slot *st = &g_tslots[slot];
++        if (st->phase == 1) st->phase = 2;                 // 抬（待收尾）
++        st->flag8 = 0;                                     // .so：+8 清零；flag4 留给消费方
++    }
++    pthread_mutex_unlock(&g_tmu);
 +}
 +
 +// ---- UI 模式（安卓 worldControls 同款谓词；2026-11-10 触控重构轮，pump 0xf2970-0xf2b5c 段逐条移植）----
@@ -4517,7 +4569,7 @@ index 0000000..0a46a46
 +    }
 +    static int uimode_report;
 +    if (++uimode_report >= 300 && uimode_us_n) {
-+        LOG("UI 指针：uimode 计时（300 帧）：采样 %d 次 p50≈%.0fμs max=%.0fμs", 
++        LOG("UI 指针：uimode 计时（300 帧）：采样 %d 次 p50≈%.0fμs max=%.0fμs",
 +            uimode_us_n, uimode_us_acc / uimode_us_n, uimode_us_max);
 +        uimode_report = 0; uimode_us_acc = 0; uimode_us_max = 0; uimode_us_n = 0;
 +    }
@@ -4551,4 +4603,22 @@ index 0000000..0a46a46
 +        dm_input_set(DM_BTN_A, 0, 0, 0, 0);
 +        if (--g_apulse == 0) dm_input_set(0, 0, 0, 0, 0);
 +    }
++
++    // dm_touch_set 槽位探针：只读快照对比，边沿（下/抬/收尾）打点（世界域点地走路链接入前
++    // 的量纲/节奏证据；touch_fill 消费语义逆向后退役，kb/07 §13）。限 2 条/帧防刷屏。
++    static d3_touch_slot last[16];
++    static int last_valid;
++    if (!last_valid) { memcpy(last, g_tslots, sizeof last); last_valid = 1; }
++    int logged = 0;
++    pthread_mutex_lock(&g_tmu);
++    for (int i = 0; i < 16 && logged < 2; i++) {
++        if (g_tslots[i].phase == last[i].phase &&
++            g_tslots[i].x == last[i].x && g_tslots[i].y == last[i].y) continue;
++        LOG("UI 指针：touch 槽 %d phase %d→%d (%.3f,%.3f) world=%d",
++            i, last[i].phase, g_tslots[i].phase,
++            (double)g_tslots[i].x, (double)g_tslots[i].y, world_now);
++        last[i] = g_tslots[i];
++        logged++;
++    }
++    pthread_mutex_unlock(&g_tmu);
 +}

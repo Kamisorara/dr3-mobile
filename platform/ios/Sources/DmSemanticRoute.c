@@ -225,12 +225,14 @@ void dmroute_publish(DmSemRoute *r, int cancelled, int w, int h) {
     r->cancelSkills = 0;
     r->ln->changed_at(r->ln->ctx, &st, cancelled, ids, xs, ys, n, r->eventMs);
     if (r->ln->skills) r->ln->skills(r->ln->ctx, sourceOwner, ev, evn, w, h, skillCancelled);
-    if (!cancelled && r->tapValid && n == 0 && r->ln->tap) {   // 安卓：owner 代匹配才回放
+    // 安卓：this.tap=null 先清后判（本拍 raw 非空/换代即弃，不结转到下一拍）
+    int fire = !cancelled && r->tapValid && n == 0 && r->tapOwner == ((r->ownerGeneration << 1) | 1) && r->ln->tap;
+    int tapId = r->tapId; float tapX = normalized(r->tapX, w), tapY = normalized(r->tapY, h);
+    long long tapDown = r->tapDownMs, tapOwner = r->tapOwner;
+    r->tapValid = 0;
+    if (fire) {
         DmSemState snap = dmsi_snapshot(&r->input);
-        if (r->tapOwner == ((r->ownerGeneration << 1) | 1))
-            r->ln->tap(r->ln->ctx, r->tapOwner, r->tapId, normalized(r->tapX, w), normalized(r->tapY, h),
-                       r->tapDownMs, r->eventMs, &snap);
-        r->tapValid = 0;
+        r->ln->tap(r->ln->ctx, tapOwner, tapId, tapX, tapY, tapDown, r->eventMs, &snap);
     }
 }
 

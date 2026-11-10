@@ -52,6 +52,9 @@ test:
 	clang -std=c11 -O1 -Wall -Wextra -Werror -Iplatform/ios/Sources tests/test_ui_pointer.c platform/ios/Sources/DmUiPointer.c -o work/test-ui-pointer
 	./work/test-ui-pointer
 
+	clang -std=c11 -O1 -Wall -Wextra -Werror -Iplatform/ios/Sources tests/test_touch_slots.c platform/ios/Sources/DmTouchSlots.c -o work/test-touch-slots
+	./work/test-touch-slots
+
 	clang -O1 -Wall -fobjc-arc tests/test_controller_effects_probe.m native/controller_effects.m -framework Foundation -framework GameController -framework CoreHaptics -o work/test-controller-effects-probe
 	./work/test-controller-effects-probe
 
