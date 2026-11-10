@@ -4378,10 +4378,10 @@ index 837700c..0eec3b5 100644
  print(NAME, stats, 'cuts', len(cuts), 'obs', len(obs), 'patch', len(patch), 'PATCH_OFF', hex(PATCH_OFF), 'slot_refs', len(fix), 'gates', len(gates))
 diff --git a/dm/host/hle_uipointer.c b/dm/host/hle_uipointer.c
 new file mode 100644
-index 0000000..0e29ab5
+index 0000000..0a46a46
 --- /dev/null
 +++ b/dm/host/hle_uipointer.c
-@@ -0,0 +1,151 @@
+@@ -0,0 +1,170 @@
 +// UI 指针域（kb/07 §10；2026-11-10 安卓 libd3rewrite.so d3_ui_pointer_* 白盒化后自研落地）：
 +//   壳把未命中控件的触点（phase 0=down 1=move 2=up 3=cancel，坐标 [0,1) 左上原点）经
 +//   dm_uipointer_set 入环形队列；游戏线程拍（hle_hid.c fill()）dm_uipointer_frame 消费：
@@ -4490,17 +4490,36 @@ index 0000000..0e29ab5
 +        }
 +    }
 +
-+    // UI 模式谓词每帧算（安卓 pump 同频）；变化 = 换代（gen+=2，安卓 d3_touch_owner_world 同式）
-+    int world_now = 0;
-+    {
-+        int world = uimode_world(base);
-+        world_now = world;
++    // UI 模式谓词：限频每 15 帧算一次（门控翻转延迟 ≤0.25s，可见性可接受）。
++    // 首版每帧调 0x3278C0/0x327B50 两个游戏内部函数，进世界后帧时间 16.7→33.3ms——
++    // 嫌疑=游戏线程内每帧调用踩游戏内部同步/重查询；限频 + 计时统计定位（2026-11-10 真机）。
++    static int uimode_div = 0;
++    static double uimode_us_acc, uimode_us_max;
++    static int uimode_us_n;
++    int world_now;
++    long long cached = atomic_load(&g_owner);
++    if (uimode_div-- > 0) {
++        world_now = (int)(cached & 1);
++    } else {
++        uimode_div = 14;
++        uint64_t t0 = now_ns();
++        world_now = uimode_world(base);
++        uint64_t dt = now_ns() - t0;
++        uimode_us_acc += (double)dt / 1000.0;
++        if ((double)dt / 1000.0 > uimode_us_max) uimode_us_max = (double)dt / 1000.0;
++        uimode_us_n++;
 +        long long prev = atomic_load(&g_owner);
-+        if (((prev & 1) != (long long)world) || prev == 0) {
++        if (((prev & 1) != (long long)world_now) || prev == 0) {
 +            g_gen += 2;
-+            LOG("UI 指针：世界控制态 → %d（gen=%lld）", world, (long long)g_gen);
++            LOG("UI 指针：世界控制态 → %d（gen=%lld）", world_now, (long long)g_gen);
 +        }
-+        atomic_store(&g_owner, ((long long)g_gen << 1) | (long long)world);
++        atomic_store(&g_owner, ((long long)g_gen << 1) | (long long)world_now);
++    }
++    static int uimode_report;
++    if (++uimode_report >= 300 && uimode_us_n) {
++        LOG("UI 指针：uimode 计时（300 帧）：采样 %d 次 p50≈%.0fμs max=%.0fμs", 
++            uimode_us_n, uimode_us_acc / uimode_us_n, uimode_us_max);
++        uimode_report = 0; uimode_us_acc = 0; uimode_us_max = 0; uimode_us_n = 0;
 +    }
 +
 +    // back 注入：安卓置 0x33e_b88 标志由 pump 消费；提交点未逆出前先记录（不瞎写）
