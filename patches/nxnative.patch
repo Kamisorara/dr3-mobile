@@ -2304,7 +2304,7 @@ index 3d309a1..ec44a2c 100644
 +    (void)infos; (void)capacity; return 0;
 +}
 diff --git a/dm/host/hle_hid.c b/dm/host/hle_hid.c
-index 561a3c8..36bd482 100644
+index 561a3c8..e2e1c4f 100644
 --- a/dm/host/hle_hid.c
 +++ b/dm/host/hle_hid.c
 @@ -1,8 +1,12 @@
@@ -2438,7 +2438,28 @@ index 561a3c8..36bd482 100644
  // Mouse / keyboard: not connected
  HLE_FORCE("_ZN2nn3hid15InitializeMouseEv", "鼠标；宿主不提供", void, h_hid_InitMouse, void) {}
  HLE_FORCE("_ZN2nn3hid14GetMouseStatesEPNS0_10MouseStateEi", "鼠标状态：0 条", int, h_hid_MouseStates, void *out, int n) { (void)out; (void)n; return 0; }
-@@ -209,6 +276,11 @@
+@@ -180,12 +247,15 @@
+ HLE_FORCE("_ZN2nn3hid24ShowControllerStrapGuideEv", "腕带说明小程序；宿主不显示", Result, h_hid_Strap, void) { return RES_OK; }
+ HLE_FORCE("_ZN2nn3hid28ShowControllerFirmwareUpdateERKNS0_27ControllerFirmwareUpdateArgE", "手柄固件更新小程序；宿主不显示", Result, h_hid_FwUpd, const void *arg) { (void)arg; return RES_OK; }
+ 
+-// Touch screen: TouchScreenState<N> = { int64 sampling number; int32 count; int32 reserved; TouchState[N] }. Report 0 touch points for now (only the 16-byte header is written)
+-static void touch_head(void *s) { int64_t *p = s; p[0] = atomic_fetch_add(&g_sampling, 1) + 1; ((int32_t *)s)[2] = 0; ((int32_t *)s)[3] = 0; }
+-HLE_FORCE("_ZN2nn3hid21InitializeTouchScreenEv", "连 hid 触屏；宿主暂报无触点", void, h_hid_InitTouch, void) {}
++// Touch screen: TouchScreenState<N> = { int64 sampling number; int32 count; int32 reserved; TouchState[N] }.
++// 2026-11-11 原生触屏通道接线：hle_touch.c touch_fill（前端 dm_touch_set 归一触点 → Start/End 锁存）
++// 填充真实触点——游戏 main 0x1b65260 每帧读 16 态只看首点（finger_id/x/y），面板域 1280×720；
++// 此前恒报 0 触点 = 触屏对游戏完全失聪（首次 iOS 接线）。
++extern int touch_fill(void *out, unsigned long long now_ns);   // hle_touch.c
++HLE_FORCE("_ZN2nn3hid21InitializeTouchScreenEv", "连 hid 触屏", void, h_hid_InitTouch, void) {}
+ #define TOUCH(N) \
+-    HLE_FORCE("_ZN2nn3hid19GetTouchScreenStateILm" #N "EEEvPNS0_16TouchScreenStateIXT_EEE", "触屏当前状态：0 个触点", void, h_hid_Touch1_##N, void *s) { touch_head(s); } \
+-    HLE_FORCE("_ZN2nn3hid20GetTouchScreenStatesILm" #N "EEEiPNS0_16TouchScreenStateIXT_EEEi", "触屏状态：1 条、0 个触点", int, h_hid_TouchN_##N, void *s, int n) { if (n <= 0) return 0; touch_head(s); return 1; }
++    HLE_FORCE("_ZN2nn3hid19GetTouchScreenStateILm" #N "EEEvPNS0_16TouchScreenStateIXT_EEE", "触屏当前状态", void, h_hid_Touch1_##N, void *s) { touch_fill(s, now_ns()); } \
++    HLE_FORCE("_ZN2nn3hid20GetTouchScreenStatesILm" #N "EEEiPNS0_16TouchScreenStateIXT_EEEi", "触屏状态", int, h_hid_TouchN_##N, void *s, int n) { if (n <= 0) return 0; touch_fill(s, now_ns()); return 1; }
+ TOUCH(1) TOUCH(2) TOUCH(3) TOUCH(4) TOUCH(5) TOUCH(6) TOUCH(7) TOUCH(8) TOUCH(9) TOUCH(10) TOUCH(11) TOUCH(12) TOUCH(13) TOUCH(14) TOUCH(15) TOUCH(16)
+ HLE_FORCE("_ZN2nn3hid17InitializeGestureEv", "手势；宿主不提供", void, h_hid_InitGesture, void) {}
+ HLE_FORCE("_ZN2nn3hid16GetGestureStatesEPNS0_12GestureStateEi", "手势状态：0 条", int, h_hid_Gestures, void *out, int n) { (void)out; (void)n; return 0; }
+@@ -209,6 +279,11 @@
  HLE_FORCE("_ZN2nn3hid32SetSixAxisSensorFusionParametersERKNS0_19SixAxisSensorHandleEff", "六轴融合参数；宿主忽略", void, h_hid_FusionSet, const uint32_t *h, float a, float b) { (void)h; (void)a; (void)b; }
  HLE_FORCE("_ZN2nn3hid34ResetSixAxisSensorFusionParametersERKNS0_19SixAxisSensorHandleE", "六轴融合参数；宿主忽略", void, h_hid_FusionReset, const uint32_t *h) { (void)h; }
  HLE_FORCE("_ZN2nn3hid41IsFirmwareUpdateAvailableForSixAxisSensorERKNS0_19SixAxisSensorHandleE", "六轴固件更新：无", unsigned, h_hid_SixFw, const uint32_t *h) { (void)h; return 0; }
@@ -4382,10 +4403,10 @@ index 837700c..0eec3b5 100644
  print(NAME, stats, 'cuts', len(cuts), 'obs', len(obs), 'patch', len(patch), 'PATCH_OFF', hex(PATCH_OFF), 'slot_refs', len(fix), 'gates', len(gates))
 diff --git a/dm/host/hle_uipointer.c b/dm/host/hle_uipointer.c
 new file mode 100644
-index 0000000..6ccf5f8
+index 0000000..067c73f
 --- /dev/null
 +++ b/dm/host/hle_uipointer.c
-@@ -0,0 +1,236 @@
+@@ -0,0 +1,177 @@
 +// UI 指针域（kb/07 §10；2026-11-10 安卓 libd3rewrite.so d3_ui_pointer_* 白盒化后自研落地）：
 +//   壳把未命中控件的触点（phase 0=down 1=move 2=up 3=cancel，坐标 [0,1) 左上原点）经
 +//   dm_uipointer_set 入环形队列；游戏线程拍（hle_hid.c fill()）dm_uipointer_frame 消费：
@@ -4439,53 +4460,12 @@ index 0000000..6ccf5f8
 +    return 1;
 +}
 +
-+// ---- 安卓 dm_touch_set（.so 0x1842a8 反汇编逐条对表，2026-11-10 完全照搬轮）----
-+// nativeTouch(count, slots, xs, ys) 的宿主侧目标：16 槽 × 28B 状态机（互斥锁内边沿转移）。
-+//   phase：0=无 1=活跃 2=待收尾；flag4=读取方已观察位；flag8=收尾后再次移动位；
-+//   (x,y)@12/16 主坐标、(x2,y2)@20/24 次坐标（收尾未消费时的移动落点）。
-+// 写入边沿（.so 0x184300-0x18438c 逐条对表）：present 且 phase==0 → 下(1，64 位同清 flag4)+主坐标；
-+// present 且 phase==2 且 flag4!=0 → flag8=1+次坐标+主坐标同步更新；present 且 phase==2 且
-+// flag4==0 → 重开下(1，32 位只写 phase)+主坐标；present 且 phase==1 → 只更新主坐标；
-+// absent → phase 1→2（抬），+8 挂起移动位清零（flag4=消费方观察位，生产侧不动）。
-+// 消费端（.so touch_fill → d3_world_touch_pump 点地走路链）待逆向接入，本轮探针记录边沿。
-+typedef struct {
-+    int32_t phase, flag4, flag8;
-+    float x, y, x2, y2;
-+    int32_t rsv[2];                     // .so 28B 步进对齐
-+} d3_touch_slot;
-+static pthread_mutex_t g_tmu = PTHREAD_MUTEX_INITIALIZER;
-+static d3_touch_slot g_tslots[16];
-+
-+void dm_touch_set(int n, const int *slots, const float *xs, const float *ys) {
-+    if (atomic_load(&g_off)) return;
-+    if (n < 0) n = 0;
-+    if (n > 16) n = 16;
-+    pthread_mutex_lock(&g_tmu);
-+    unsigned char present[16] = { 0 };
-+    for (int i = 0; i < n; i++) {
-+        int slot = slots[i];
-+        if (slot < 0 || slot > 15) continue;               // .so：slot>15 跳过（负数防御加固）
-+        present[slot] = 1;
-+        d3_touch_slot *st = &g_tslots[slot];
-+        if (st->phase == 0 || (st->phase == 2 && st->flag4 == 0)) {
-+            st->phase = 1; st->flag4 = 0;
-+            st->x = xs[i]; st->y = ys[i];
-+        } else if (st->phase == 2) {                       // flag4 != 0：收尾未被消费又动
-+            st->flag8 = 1;
-+            st->x2 = xs[i]; st->y2 = ys[i];
-+            st->x = xs[i]; st->y = ys[i];                  // .so：主坐标同步更新
-+        } else {                                           // phase==1：活跃移动
-+            st->x = xs[i]; st->y = ys[i];
-+        }
-+    }
-+    for (int slot = 0; slot < 16; slot++) {
-+        if (present[slot]) continue;
-+        d3_touch_slot *st = &g_tslots[slot];
-+        if (st->phase == 1) st->phase = 2;                 // 抬（待收尾）
-+        st->flag8 = 0;                                     // .so：+8 清零；flag4 留给消费方
-+    }
-+    pthread_mutex_unlock(&g_tmu);
-+}
++// 安卓 .so dm_touch_set（0x1842a8）槽位机撤装（2026-11-11）：树里早有原生触屏通道
++// hle_touch.c（dm_touch_set(dm_touch*,n) → touch_fill → nn::hid::GetTouchScreenStates，
++// 游戏 main 0x1b65260 原生读触点、面板域 1280×720）——本轮接线该通道（hle_hid TOUCH 钩子），
++// 壳的 raw 触点直接喂 dm_touch 数组。本轮在 hle_uipointer.c 重造的 16 槽×28B 状态机与
++// hle_touch.c 同名冲突（CI 42850491064 duplicate symbol），且属重复实现，撤；
++// .so 槽位机语义已录 kb/07 §13.2 备查。
 +
 +// ---- UI 模式（安卓 worldControls 同款谓词；2026-11-10 触控重构轮，pump 0xf2970-0xf2b5c 段逐条移植）----
 +// world = 读 [base+0x17E5298] 得世界态结构（非空/非钩子值）→ +0x108 忙标志必须 0 → 读 [base+0x185ebd0]
@@ -4603,22 +4583,4 @@ index 0000000..6ccf5f8
 +        dm_input_set(DM_BTN_A, 0, 0, 0, 0);
 +        if (--g_apulse == 0) dm_input_set(0, 0, 0, 0, 0);
 +    }
-+
-+    // dm_touch_set 槽位探针：只读快照对比，边沿（下/抬/收尾）打点（世界域点地走路链接入前
-+    // 的量纲/节奏证据；touch_fill 消费语义逆向后退役，kb/07 §13）。限 2 条/帧防刷屏。
-+    static d3_touch_slot last[16];
-+    static int last_valid;
-+    if (!last_valid) { memcpy(last, g_tslots, sizeof last); last_valid = 1; }
-+    int logged = 0;
-+    pthread_mutex_lock(&g_tmu);
-+    for (int i = 0; i < 16 && logged < 2; i++) {
-+        if (g_tslots[i].phase == last[i].phase &&
-+            g_tslots[i].x == last[i].x && g_tslots[i].y == last[i].y) continue;
-+        LOG("UI 指针：touch 槽 %d phase %d→%d (%.3f,%.3f) world=%d",
-+            i, last[i].phase, g_tslots[i].phase,
-+            (double)g_tslots[i].x, (double)g_tslots[i].y, world_now);
-+        last[i] = g_tslots[i];
-+        logged++;
-+    }
-+    pthread_mutex_unlock(&g_tmu);
 +}
