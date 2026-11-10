@@ -50,6 +50,9 @@ enum { B_A = 0, B_B, B_X, B_Y, B_LS, B_RS, B_L, B_R, B_ZL, B_ZR, B_PLUS, B_MINUS
        B_LEFT, B_UP, B_RIGHT, B_DOWN, B_SEASON, B_PICKUP, B_N };
 #define SEASON_IDX 16   // art 下标：赛钮（壳自加，不入 Layout）
 
+// 技能槽 → 键号（kb/07 §9.1 实证表：0:Y 1:B 2:A 3:X 4:ZL 5:ZR；宏原居已退役的 DmTouchLayout.h）
+#define DM_SKILL_SLOT_KEY(slot)     ((slot) == 0 ? B_Y : (slot) == 1 ? B_B : (slot) == 2 ? B_A :      (slot) == 3 ? B_X : (slot) == 4 ? B_ZL : (slot) == 5 ? B_ZR : -1)
+
 // 安卓按钮掩码 → 键号（安卓 SemanticInput.buttons 的 nativeControls 喂法）
 static const struct { unsigned long long mask; int key; } k_btn_map[] = {
     { 1ull, B_A }, { 2ull, B_B }, { 4ull, B_X }, { 8ull, B_Y },
@@ -390,7 +393,6 @@ static void l_pickup(void *ctx, long long token, int phase) {
     if (bag >= 0) pos = CGPointMake(_pos[bag].x - 2 * _rad[bag] - 12 * s, _pos[bag].y);
     else {   // 无布局时按同公式锚定（安卓 menuX/bagX 同款）
         float availW = (float)b.size.width - (float)safe.left - (float)safe.right;
-        float availH = (float)b.size.height - (float)safe.top - (float)safe.bottom;
         float minTap = MIN(24.0f * 2.0f, 60.0f * s);
         float topTap = MIN(minTap, 50.0f * s), topHit = MAX(42.0f * s, topTap);
         float toolbarLimit = ((float)b.size.width - ((float)b.size.height * 240.0f) / 720.0f) - 1.0f;
@@ -525,10 +527,8 @@ static void l_pickup(void *ctx, long long token, int phase) {
 - (void)touchesEnded:(NSSet<UITouch *> *)ts withEvent:(UIEvent *)e {
     if ([self panelOpen]) return;
     long long ms = NOW_MS;
-    for (UITouch *t in ts) {
-        CGPoint p = [t locationInView:self];
-        dmroute_up(&_route, (int)(uintptr_t)t, (float)p.x, (float)p.y, ms);
-    }
+    for (UITouch *t in ts)
+        dmroute_up(&_route, (int)(uintptr_t)t, ms);
     dmroute_publish(&_route, 0, (int)self.bounds.size.width, (int)self.bounds.size.height);
     [self refreshArt];
     [self scheduleLongPress];
