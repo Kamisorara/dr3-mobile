@@ -30,6 +30,7 @@ static int32_t g_touch_lx, g_touch_ly, g_touch_rx, g_touch_ry;
 void dm_gamepad_start(void (*on_present)(int present));
 void dm_physical_gamepad_reset(void);
 extern void dm_hudmove_set_controller(int present);
+void dm_uipointer_set(int phase, float x, float y, float bx, float by, long long ms, int paired);   // hle_uipointer.c：触点入宿主队列（kb/07 §10）
 int dm_ingame(void);   // hle_uistate：HUD 根槽非空 = 游戏态
 static void publish(void) {
     pthread_mutex_lock(&g_mu);
