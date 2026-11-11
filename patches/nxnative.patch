@@ -3264,10 +3264,10 @@ index 367779a..9eccbc0 100644
 +#endif
 diff --git a/dm/host/hle_season.c b/dm/host/hle_season.c
 new file mode 100644
-index 0000000..20ee47a
+index 0000000..a7c6912
 --- /dev/null
 +++ b/dm/host/hle_season.c
-@@ -0,0 +1,271 @@
+@@ -0,0 +1,301 @@
 +// 赛季轮换 v1（kb/20 §6 定稿实现；gameplay 分支 2026-11-11）：
 +//   目标（用户定案）：每月 1 号新赛季，2026-11 = S1。
 +//   离线防进不去 = patch_nso.py D3 块的世界装载直补丁（0x492f6c bl GameIsSeasonal → mov w0,#0，恒走普通装载；
@@ -3313,6 +3313,10 @@ index 0000000..20ee47a
 +#define HERO_LOOKUP_OFF 0x520360UL          // 英雄号→记录（kb/17 §1.3）
 +#define HERO_FLAG_OFF 0x12cUL               // 记录 +0x12C：bit1=赛季、bit0=专家（kb/17 §1.3 读侧）
 +#define ORIGIN_DEFAULT "2026-11-01"         // 用户定案：2026-11 = S1
++#define SEASON_NUM_OBJ_OFF 0x114ac60UL      // 单例指针→+0xB0 = 当期赛季号（HeroesList.current_season_num 运行时槽，0x60000 变更探测器/0xa273c0 官方 setter 实证）
++#define SEASON_STATE_OBJ_OFF 0x114ac68UL    // 单例指针→+0xB0 = 赛季状态（1=InProgress；缺省 2=Unknown；UI 串簇 0x362a70 w19==1=InProgress）
++#define SEASON_SLOT_OFF 0xb0UL
++#define SEASON_CHANGED_FLAG_OFF 0x114ac40UL // 变更字节（UI 刷新标记，0x600a4 stlrb 实证）
 +
 +int dm_guest_heap_readable(uint64_t a, size_t n);   // hle_svc.c：客体堆区间判读（英雄记录=堆对象，读前护栏）
 +
@@ -3504,6 +3508,31 @@ index 0000000..20ee47a
 +}
 +
 +// 客体线程每个控制器读进来一次（hle_hid.c fill()），内部 1 秒节流。
++// 会话赛季槽直填（A 阶段，kb/20 §9.7）：官方"联网同步一次→离线玩一季"的落点就是这两个槽，
++// 离线无人重算 → 宿主按日历直写即粘住。号=A[0x114ac60]+0xB0，状态=B[0x114ac68]+0xB0=1(InProgress)。
++static void season_slots_fill(int cur) {
++    static uint8_t *base;
++    if (!base) {
++        for (int i = 0; i < g_nmod; i++)
++            if (!strcmp(g_mod[i].name, "main") && !strcmp(g_mod[i].build_id, DM_D3_BUILD)) base = g_mod[i].base;
++        if (!base) return;
++    }
++    uint64_t num_obj = *(uint64_t *)(base + SEASON_NUM_OBJ_OFF);
++    uint64_t st_obj = *(uint64_t *)(base + SEASON_STATE_OBJ_OFF);
++    if (!num_obj || !st_obj || !dm_guest_heap_readable(num_obj + SEASON_SLOT_OFF, 4) ||
++        !dm_guest_heap_readable(st_obj + SEASON_SLOT_OFF, 4)) return;   // 单例未建（启动早期）：下拍再试
++    uint32_t num_now = *(uint32_t *)(num_obj + SEASON_SLOT_OFF);
++    uint32_t st_now = *(uint32_t *)(st_obj + SEASON_SLOT_OFF);
++    uint32_t want_num = (uint32_t)cur, want_st = 1;   // 1 = InProgress
++    if (num_now != want_num || st_now != want_st) {
++        *(uint32_t *)(num_obj + SEASON_SLOT_OFF) = want_num;
++        *(uint32_t *)(st_obj + SEASON_SLOT_OFF) = want_st;
++        LOG("赛季轮换：会话槽已填 num=%u state=1(InProgress)（原 num=%u state=%u）", want_num, num_now, st_now);
++    }
++    uint8_t *chg = base + SEASON_CHANGED_FLAG_OFF;
++    if (dm_guest_heap_readable(chg, 1) && !*chg) *chg = 1;   // 通知 UI 刷新（0x600a4 同位）
++}
++
 +void dm_season_frame(void) {
 +    static int off = -1;
 +    if (off < 0) {
@@ -3538,6 +3567,7 @@ index 0000000..20ee47a
 +        }
 +        last = cur;
 +    }
++    if (atomic_load(&g_enabled)) season_slots_fill(cur);   // 每拍幂等直填（有覆写者也在 1s 内纠回）
 +}
 diff --git a/dm/host/hle_svc.c b/dm/host/hle_svc.c
 index 7683095..89ba099 100644
