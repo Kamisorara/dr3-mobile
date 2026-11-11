@@ -3266,7 +3266,7 @@ index 367779a..9eccbc0 100644
 +#endif
 diff --git a/dm/host/hle_season.c b/dm/host/hle_season.c
 new file mode 100644
-index 0000000..9590719
+index 0000000..0b0f3a7
 --- /dev/null
 +++ b/dm/host/hle_season.c
 @@ -0,0 +1,458 @@
@@ -3613,7 +3613,7 @@ index 0000000..9590719
 +// guest 指针合法性：落在 guest 地址空间（0x7000000000+512MB）或任一模块镜像（≤32MB）内。
 +// 防并发撕裂读：游戏线程会重写 [0x114aa30] 等槽，fill 线程可能读到写一半的值（2026-11-12
 +// 闪退根因：arr=0x35a... 垃圾值野写 SIGSEGV）。所有间接解引用的指针必须先过此校验。
-+static int guest_ptr_ok(uint64_t a) {
++int guest_ptr_ok(uint64_t a) {   // 非静态：前置声明在文件头（hle_season 内部使用，不改访问级别）
 +    if (!a) return 0;
 +    if (a >= 0x7000000000ULL && a < 0x7200000000ULL) return 1;
 +    for (int i = 0; i < g_nmod; i++) {
