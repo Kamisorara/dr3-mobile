@@ -35,7 +35,12 @@ def sha(path):
 
 
 def run(cmd, env=None, log=None):
-    e = dict(os.environ, DM_ROOT=str(WORK), DM_GAME=TITLE, DM_RULESET='native', DM_PRIVATE_GATES='0',
+    # 私有门缺省开：gameplay 分支的包就是为赛季（svc 0x8f/0x90 门 + 世界装载直补丁都在 PRIVATE_GATES 块里，
+    # 关了它们改写出的 main 没有赛季逻辑——2026-11-11 首次打包就是被这里的硬编码 '0' 坑掉的）。
+    # | Private gates default ON: this branch's pack exists to ship the season (svc 0x8f/0x90 gates and the
+    # | world-load direct patch all live in the PRIVATE_GATES block; with '0' the rewritten main has no season logic).
+    e = dict(os.environ, DM_ROOT=str(WORK), DM_GAME=TITLE, DM_RULESET='native',
+             DM_PRIVATE_GATES=os.environ.get('DM_PRIVATE_GATES', '1'),
              PYTHONUTF8='1')   # 与 tools/dr3.py env() 同一套基础环境 | the same base environment as tools/dr3.py env()
     e.update(env or {})
     say(' '.join(str(x) for x in cmd[:3]) + ' …')
