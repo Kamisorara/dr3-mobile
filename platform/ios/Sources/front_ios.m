@@ -42,14 +42,18 @@ void front_ios_configure_aspect(int on) {   // 适配模式：渲染分辨率按
 - (void)layoutSubviews {
     [super layoutSubviews];
     CAMetalLayer *l = (CAMetalLayer *)self.layer;
-    if (g_metalfx) { l.drawableSize = CGSizeMake(2560, g_wide ? 1176 : 1440); return; }
+    CGSize s = CGSizeMake(round(self.bounds.size.width*l.contentsScale), round(self.bounds.size.height*l.contentsScale));
+    if (s.width > 2560) { s = CGSizeMake(2560, round(s.height*2560.0/s.width)); }
+    // 适配/填充模式：MetalFX canvas 跟屏幕比例走。固定 16:9 canvas（2560×1440）会把屏幕比例的内容
+    // aspect-fit 进去，两侧各加 ~9.5% 黑条（2026-11-11 真机 iPad Air：1.439 内容 → 16:9 canvas 加左右黑边）。
+    // | Aspect/fill modes: the MetalFX canvas follows the screen ratio — a fixed 16:9 canvas letterboxes
+    // | the screen-ratio content (~9.5% black bars per side on an iPad Air).
+    if (g_metalfx && !g_aspect && !g_fill) { l.drawableSize = CGSizeMake(2560, g_wide ? 1176 : 1440); return; }
     // drawable 跟 layer 走但封顶 2560 宽（宽高比不变、无拉伸）：游戏本身 ≤1600×900，再高的分辨率只是
     // 把同一段画面放大；不封顶的话填充模式（layer 比屏幕大）和大屏 fit 模式都会造出巨型缓冲白占显存。
     // | The drawable follows the layer but is capped at 2560 wide (same aspect, no distortion): the game
     // | renders at <=1600x900, so anything higher only upscales; uncapped, fill mode (layer larger than
     // | the screen) and large fitted layers would allocate huge buffers for pixels nobody sees sharper.
-    CGSize s = CGSizeMake(round(self.bounds.size.width*l.contentsScale), round(self.bounds.size.height*l.contentsScale));
-    if (s.width > 2560) { s = CGSizeMake(2560, round(s.height*2560.0/s.width)); }
     l.drawableSize = s;
 }
 @end
