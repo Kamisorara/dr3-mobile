@@ -3264,10 +3264,10 @@ index 367779a..9eccbc0 100644
 +#endif
 diff --git a/dm/host/hle_season.c b/dm/host/hle_season.c
 new file mode 100644
-index 0000000..7a68072
+index 0000000..09b7508
 --- /dev/null
 +++ b/dm/host/hle_season.c
-@@ -0,0 +1,311 @@
+@@ -0,0 +1,322 @@
 +// 赛季轮换 v1（kb/20 §6 定稿实现；gameplay 分支 2026-11-11）：
 +//   目标（用户定案）：每月 1 号新赛季，2026-11 = S1。
 +//   离线防进不去 = patch_nso.py D3 块的世界装载直补丁（0x492f6c bl GameIsSeasonal → mov w0,#0，恒走普通装载；
@@ -3316,7 +3316,10 @@ index 0000000..7a68072
 +#define SEASON_NUM_OBJ_OFF 0x114ac60UL      // 单例指针→+0xB0 = 当期赛季号（HeroesList.current_season_num 运行时槽，0x60000 变更探测器/0xa273c0 官方 setter 实证）
 +#define SEASON_STATE_OBJ_OFF 0x114ac68UL    // 单例指针→+0xB0 = 赛季状态（1=InProgress；缺省 2=Unknown；UI 串簇 0x362a70 w19==1=InProgress）
 +#define SEASON_SLOT_OFF 0xb0UL
-+#define SEASON_CHANGED_FLAG_OFF 0x114ac40UL // 变更字节（UI 刷新标记，0x600a4 stlrb 实证）
++#define SEASON_CHANGED_FLAG_OFF 0x114ac40UL // 「赛季数据已就绪」门（0x5ff00 读，UI 先看它再读槽）
++#define SEASON_EN_A_OBJ_OFF 0x114acd8UL      // 赛季源 A 单例（0x607d4 管线：0x4a71f0 会话源族查询→set +0xB0；离线全 0）
++#define SEASON_EN_B_OBJ_OFF 0x114ace8UL      // 赛季源 B 单例（0x607f8 管线：读 [0x114ace0]→set +0xB0）
++#define SEASON_SET_BYTE_OFF 0xa26fc0UL       // 官方 +0xB0 布尔 setter（字节写+变更位+通知订阅者链表，全语义）
 +
 +int dm_guest_heap_readable(uint64_t a, size_t n);   // hle_svc.c：客体堆区间判读（英雄记录=堆对象，读前护栏）
 +
@@ -3538,9 +3541,17 @@ index 0000000..7a68072
 +    }
 +    // [0x114ac40] 是「赛季数据已就绪」门（0x5ff00 读它，UI 状态机 0x362a60 cbz w0 → 未登录/Unknown
 +    // 分支——**先看这个位再看槽值**；官方 0x600a4 在槽一致后置 1，UI 消费后清 0）。
-+    // 诊断实证（2026-11-11）：只在槽变化时置位 → 首拍后被 UI 消费清零 → 永远"未登录"。
 +    // 每拍脉冲置 1 = 官方"同步后刷新"节奏，UI 每 tick 重算（读到 num/st=1/1 → InProgress）。
 +    *(volatile uint8_t *)(base + SEASON_CHANGED_FLAG_OFF) = 1;
++    // 三路「赛季源」enabled 布尔（安卓参考项目 season_source 门位点 0x607d4/0x607f8/0x4a5f68 同族，
++    // business.json: native_season_source）：A/B 是全局单例，宿主直接调官方 setter（含通知链表激活，
++    // 裸写字节会漏通知）；值相同 setter 内部安静返回（幂等）。C 位点对象动态（x0+0x70），本轮不动。
++    uint64_t ea = *(uint64_t *)(base + SEASON_EN_A_OBJ_OFF);
++    uint64_t eb = *(uint64_t *)(base + SEASON_EN_B_OBJ_OFF);
++    if (ea && dm_guest_heap_readable(ea + SEASON_SLOT_OFF, 1))
++        ((void (*)(uint64_t, int, int))(base + SEASON_SET_BYTE_OFF))(ea, 1, 3);
++    if (eb && dm_guest_heap_readable(eb + SEASON_SLOT_OFF, 1))
++        ((void (*)(uint64_t, int, int))(base + SEASON_SET_BYTE_OFF))(eb, 1, 3);
 +}
 +
 +void dm_season_frame(void) {
