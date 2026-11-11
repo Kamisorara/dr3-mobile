@@ -3264,10 +3264,10 @@ index 367779a..9eccbc0 100644
 +#endif
 diff --git a/dm/host/hle_season.c b/dm/host/hle_season.c
 new file mode 100644
-index 0000000..2a0e6fc
+index 0000000..20ee47a
 --- /dev/null
 +++ b/dm/host/hle_season.c
-@@ -0,0 +1,269 @@
+@@ -0,0 +1,271 @@
 +// 赛季轮换 v1（kb/20 §6 定稿实现；gameplay 分支 2026-11-11）：
 +//   目标（用户定案）：每月 1 号新赛季，2026-11 = S1。
 +//   离线防进不去 = patch_nso.py D3 块的世界装载直补丁（0x492f6c bl GameIsSeasonal → mov w0,#0，恒走普通装载；
@@ -3439,8 +3439,10 @@ index 0000000..2a0e6fc
 +    int enabled = atomic_load(&g_enabled);
 +    int season = atomic_load(&g_season);
 +    if (num == SVC_HOST_SEASON_ISSEASONAL) {
-+        // v2 真赛季：当前已验证英雄是赛季角色才答 1；其余原查询（离线 TLS 链=0，答 0 与原语义一致）
-+        if (enabled && g_cur_hero_seasonal) { regs[0] = 1; regs[8] = 1; }
++        // v3：enabled 即答 1（kb/20 §9.4：死锁已被世界装载直补丁独立封死，恒 1 无死锁路径）。
++        // v2 的条件应答（enabled && g_cur_hero_seasonal）在菜单/建英雄态答 0 → 菜单看不到赛季、
++        // 建不了赛季英雄（2026-11-11 真机用户实证）。掉落盖 season_created=离线垃圾值仍是观察项（kb/20 §9.5 边界③）。
++        if (enabled) { regs[0] = 1; regs[8] = 1; }
 +        else regs[8] = 0;
 +        return 1;
 +    }
