@@ -124,8 +124,9 @@ def bootstrap(_):
                         with urllib.request.urlopen(req, timeout=120) as resp:
                             return json.loads(resp.read())
                     except urllib.error.HTTPError as err:
-                        if err.code < 500 and err.code != 429 or attempt == 3: raise
-                        _time.sleep(2 ** attempt * 2)
+                        # 403 = 次级限流/滥用风控（大树递归查询连跑易触发）：也要长退避重试，别让一次窗口期毁掉整次构建
+                        if (err.code < 500 and err.code != 429 and err.code != 403) or attempt == 3: raise
+                        _time.sleep(2 ** attempt * 15)   # 15/30/60/120s：403 是分钟级窗口，短退避没用
                     except (urllib.error.URLError, TimeoutError, ConnectionError) as err:
                         if attempt == 3: raise
                         _time.sleep(2 ** attempt * 2)
