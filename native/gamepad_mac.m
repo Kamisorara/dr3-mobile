@@ -6,6 +6,7 @@
 #include <string.h>
 #include "dm.h"
 #include "dm_input.h"
+#include "dm_padmap.h"
 
 enum { NSLOT = 8 };
 static struct { const void *who; uint64_t b; int32_t ax[4]; } g_s[NSLOT];
@@ -57,12 +58,17 @@ static void stick(float x, float y, int32_t *ox, int32_t *oy) {
     *ox = (int32_t)lroundf(x * k * DM_STICK_MAX); *oy = (int32_t)lroundf(y * k * DM_STICK_MAX);
 }
 static void publish(GCController *c, GCExtendedGamepad *g) {
-    if (g_face_letter < 0) { const char *e = getenv("DM_PAD_FACE"); g_face_letter = e && !strcmp(e, "letter"); }
+    if (g_face_letter < 0) { const char *e = getenv("DM_PAD_FACE"); g_face_letter = e && !strcmp(e, "letter") ? 1 : e && !strcmp(e, "position") ? 0 : -2; }
     if (!g_active) return;
     uint64_t b = 0;
     int bot = g.buttonA.pressed, rgt = g.buttonB.pressed, lft = g.buttonX.pressed, top = g.buttonY.pressed;
-    if (g_face_letter) { if (bot) b |= DM_BTN_A; if (rgt) b |= DM_BTN_B; if (lft) b |= DM_BTN_X; if (top) b |= DM_BTN_Y; }
-    else { if (rgt) b |= DM_BTN_A; if (bot) b |= DM_BTN_B; if (top) b |= DM_BTN_X; if (lft) b |= DM_BTN_Y; }   // Switch positions
+    // iOS 16+ 对 Switch 系手柄按键帽字母上报（buttonA = 键帽 A = 东位），对 Xbox/MFi 按位置上报（buttonA = 南位）。
+    // 旧逻辑一律当位置用 → Switch Pro 全部错位一格（A/B 反、X/Y 反，2026-11-11 真机）。
+    // 按手柄类别选映射（dm_padmap.h：switch/nintendo/joy-con = Nintendo）；DM_PAD_FACE=letter/position 强制覆盖。
+    int letter = g_face_letter >= 0 ? g_face_letter
+        : dm_padmap_kind(c.productCategory.UTF8String ?: "", c.vendorName.UTF8String ?: "") == DM_PADKIND_NINTENDO;
+    if (letter) { if (bot) b |= DM_BTN_A; if (rgt) b |= DM_BTN_B; if (lft) b |= DM_BTN_X; if (top) b |= DM_BTN_Y; }   // 字母直映（键帽即语义）
+    else { if (rgt) b |= DM_BTN_A; if (bot) b |= DM_BTN_B; if (top) b |= DM_BTN_X; if (lft) b |= DM_BTN_Y; }   // 位置映射（南=确认）
     if (g.leftShoulder.pressed) b |= DM_BTN_L; if (g.rightShoulder.pressed) b |= DM_BTN_R;
     if (g.leftTrigger.pressed) b |= DM_BTN_ZL; if (g.rightTrigger.pressed) b |= DM_BTN_ZR;
     if (g.leftThumbstickButton.pressed) b |= DM_BTN_LS; if (g.rightThumbstickButton.pressed) b |= DM_BTN_RS;
@@ -83,7 +89,10 @@ static void attach(GCController *c) {
     g_count++;
     c.handlerQueue = dispatch_get_main_queue();
     LOG("Gamepad connected: %s (%s), count=%d, face=%s, deadzone=%s", c.vendorName.UTF8String ?: "?",
-        c.productCategory.UTF8String ?: "?", g_count, getenv("DM_PAD_FACE") ?: "position", getenv("DM_PAD_DEADZONE") ?: "0.12");
+        c.productCategory.UTF8String ?: "?", g_count,
+        g_face_letter >= 0 ? (g_face_letter ? "letter" : "position")
+            : dm_padmap_kind(c.productCategory.UTF8String ?: "", c.vendorName.UTF8String ?: "") == DM_PADKIND_NINTENDO ? "letter(auto)" : "position(auto)",
+        getenv("DM_PAD_DEADZONE") ?: "0.12");
     __weak GCController *wc = c;
     g.valueChangedHandler = ^(GCExtendedGamepad *gp, GCControllerElement *el) { (void)el; GCController *sc = wc; if (sc) publish(sc, gp); };
     publish(c, g);
