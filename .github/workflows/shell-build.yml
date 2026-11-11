@@ -25,9 +25,23 @@ jobs:
         run: |
           pip install -r requirements.txt
           brew install xcodegen
+      - name: Restore pinned snapshot (release asset)
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          COMMIT: '9579030e5b1f0443c12b7376559560915b6d4c4b'
+        run: |
+          if [ ! -d third_party/nxnative/dm ]; then
+            # 主力路径：Release 资产里的 pinned 快照（免 API 树重建；孤儿提交重建是 403 限流的根源）
+            gh release download nxnative-s9579030 --repo "$GITHUB_REPOSITORY" --pattern 'nxnative-s9579030.zip' --output third_party/snap.zip
+            mkdir -p third_party/nxnative
+            cd third_party/nxnative
+            python3 -c "import zipfile; zipfile.ZipFile('../snap.zip').extractall('.')"
+            rm -f ../snap.zip
+            echo "$COMMIT" > .dm-pinned
+          fi
       - name: Bootstrap pinned upstream
         env:
-          GITHUB_TOKEN: ${{ github.token }}   # 上游孤儿提交只能经 GitHub API 树重建 | the pinned orphan commit is rebuilt through the GitHub API
+          GITHUB_TOKEN: ${{ github.token }}   # 快照缺失时的兜底：孤儿提交经 GitHub API 树重建 | fallback when the snapshot is missing
         run: python3 tools/dr3.py bootstrap
       - name: Chain inputs digest (diagnostics)
         env:
