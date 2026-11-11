@@ -3580,7 +3580,7 @@ index 96d2674..579e8ae 100644
      pthread_mutex_lock(&g_se_lock); uint32_t wh = se_find(ev); pthread_mutex_unlock(&g_se_lock);
      if (!wh) { hle_bind_system_event(ev, 0); pthread_mutex_lock(&g_se_lock); wh = se_find(ev); pthread_mutex_unlock(&g_se_lock); }
 diff --git a/dm/host/host_stubs.c b/dm/host/host_stubs.c
-index ef7f336..4249ba4 100644
+index ef7f336..f5e9d08 100644
 --- a/dm/host/host_stubs.c
 +++ b/dm/host/host_stubs.c
 @@ -1,6 +1,7 @@
@@ -3598,8 +3598,8 @@ index ef7f336..4249ba4 100644
 -uint64_t svc_host_call(int num, uint64_t *regs) { (void)regs; die("svc_host_call：本作没有宿主门 svc #%#x", num); }
 +uint64_t svc_host_call(int num, uint64_t *regs) {
 +    if (num == SVC_HOST_SEASON_HERO || num == SVC_HOST_SEASON_ISSEASONAL) {   // 赛季门（hle_season.c）
-+        if (dm_season_svc(num, regs)) return regs[0];
-+        die("赛季门处理器未接住 svc #%#x", num);
++        if (!dm_season_svc(num, regs)) die("赛季门处理器未接住 svc #%#x", num);
++        return 1;   // 返回「已处理」（svc_dispatch 102 行按真值判定后回传 regs[0]）；返回应答值会在答 0（离线/非赛季）时落穿内核 switch 当未知号 die —— 2026-11-11 真机开机即崩（Unimplemented SVC 0x8f）的根因
 +    }
 +    die("svc_host_call：本作没有宿主门 svc #%#x", num);
 +}
