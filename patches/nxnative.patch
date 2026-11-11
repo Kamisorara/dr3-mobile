@@ -3266,10 +3266,10 @@ index 367779a..9eccbc0 100644
 +#endif
 diff --git a/dm/host/hle_season.c b/dm/host/hle_season.c
 new file mode 100644
-index 0000000..3881ac7
+index 0000000..bed7af9
 --- /dev/null
 +++ b/dm/host/hle_season.c
-@@ -0,0 +1,360 @@
+@@ -0,0 +1,370 @@
 +// 赛季轮换 v1（kb/20 §6 定稿实现；gameplay 分支 2026-11-11）：
 +//   目标（用户定案）：每月 1 号新赛季，2026-11 = S1。
 +//   离线防进不去 = patch_nso.py D3 块的世界装载直补丁（0x492f6c bl GameIsSeasonal → mov w0,#0，恒走普通装载；
@@ -3318,7 +3318,7 @@ index 0000000..3881ac7
 +#define SEASON_NUM_OBJ_OFF 0x114ac60UL      // 单例指针→+0xB0 = 当期赛季号（HeroesList.current_season_num 运行时槽，0x60000 变更探测器/0xa273c0 官方 setter 实证）
 +#define SEASON_STATE_OBJ_OFF 0x114ac68UL    // 单例指针→+0xB0 = 赛季状态（1=InProgress；缺省 2=Unknown；UI 串簇 0x362a70 w19==1=InProgress）
 +#define SEASON_SLOT_OFF 0xb0UL
-+#define SEASON_CHANGED_FLAG_OFF 0x114ac40UL // 「赛季数据已就绪」门（0x5ff00 读，UI 先看它再读槽）
++#define SEASON_CHANGED_FLAG_OFF 0x114ac40UL // 「就绪门」指针槽：[0x114ac40] 指向原子字节（官方 0x60098 ldr x8,[#0xc40] + 0x600a4 stlrb w9,[x8] 实证；0x5ff00 ldarb 读）。槽本身不是字节！
 +#define SEASON_EN_A_OBJ_OFF 0x114acd8UL      // 赛季源 A 单例（0x607d4 管线：0x4a71f0 会话源族查询→set +0xB0；离线全 0）
 +#define SEASON_EN_B_OBJ_OFF 0x114ace8UL      // 赛季源 B 单例（0x607f8 管线：读 [0x114ace0]→set +0xB0）
 +#define SEASON_SET_BYTE_OFF 0xa26fc0UL       // 官方 +0xB0 布尔 setter（字节写+变更位+通知订阅者链表，全语义）
@@ -3562,10 +3562,6 @@ index 0000000..3881ac7
 +        *(uint32_t *)(st_obj + SEASON_SLOT_OFF) = want_st;
 +        LOG("赛季轮换：会话槽已填 num=%u state=1(InProgress)（原 num=%u state=%u）", want_num, num_now, st_now);
 +    }
-+    // [0x114ac40] 是「赛季数据已就绪」门（0x5ff00 读它，UI 状态机 0x362a60 cbz w0 → 未登录/Unknown
-+    // 分支——**先看这个位再看槽值**；官方 0x600a4 在槽一致后置 1，UI 消费后清 0）。
-+    // 每拍脉冲置 1 = 官方"同步后刷新"节奏，UI 每 tick 重算（读到 num/st=1/1 → InProgress）。
-+    *(volatile uint8_t *)(base + SEASON_CHANGED_FLAG_OFF) = 1;
 +    // 赛季源对象族全置位（安卓参考项目 season_source_merge_bind 同构复刻）：
 +    // 容器 base+0x114acd0 → slot0=*(+8) slot1=*(+0x18) + 链表 *(container) 遍历 13 节点
 +    // （节点 +表[i]*8 → 对象 → +0x70 解引用）= 全部 15 个源对象 → 官方 setter 逐个置 enabled=1。
@@ -3594,6 +3590,19 @@ index 0000000..3881ac7
 +    if (done && logged < 3) { LOG("赛季源：容器解析 %d 对象，setter 全置 1（参考项目 merge_bind 同构）", done); logged++; }
 +}
 +
++// 就绪门脉冲（每帧，hle_hid fill 60Hz）：UI 状态机每帧读 ready，置位频率必须不低于读频率。
++// 官方语义 = 「赛季数据已就绪」（0x5ff00 读、一次性赛季初始化 0x362a18 与状态显示 0x362a60 都看它）。
++static void season_ready_pulse(void) {
++    static uint8_t *base;
++    if (!base) {
++        for (int i = 0; i < g_nmod; i++)
++            if (!strcmp(g_mod[i].name, "main") && !strcmp(g_mod[i].build_id, DM_D3_BUILD)) base = g_mod[i].base;
++        if (!base) return;
++    }
++    uint64_t ready_p = *(uint64_t *)(base + SEASON_CHANGED_FLAG_OFF);
++    if (ready_p && dm_guest_heap_readable(ready_p, 1)) *(volatile uint8_t *)ready_p = 1;
++}
++
 +void dm_season_frame(void) {
 +    static int off = -1;
 +    if (off < 0) {
@@ -3601,6 +3610,7 @@ index 0000000..3881ac7
 +        off = e && !strcmp(e, "0");
 +    }
 +    if (off || strcmp(dm_main_build(), DM_D3_BUILD)) return;   // 门偏移只认 D3 构建
++    if (atomic_load(&g_enabled)) season_ready_pulse();   // 每帧脉冲（不进 1Hz 节流）
 +    if (!cfg_loaded) { static pthread_once_t once = PTHREAD_ONCE_INIT; pthread_once(&once, config_load); }
 +    static uint64_t next_ms;
 +    uint64_t now = (uint64_t)time(NULL) * 1000;
