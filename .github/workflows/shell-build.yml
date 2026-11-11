@@ -31,8 +31,10 @@ jobs:
           COMMIT: '9579030e5b1f0443c12b7376559560915b6d4c4b'
         run: |
           if [ ! -d third_party/nxnative/dm ]; then
-            # 主力路径：Release 资产里的 pinned 快照（免 API 树重建；孤儿提交重建是 403 限流的根源）
-            gh release download nxnative-s9579030 --repo "$GITHUB_REPOSITORY" --pattern 'nxnative-s9579030.zip' --output third_party/snap.zip
+            # 主力路径：Release 资产里的 pinned 快照（免 API 树重建；孤儿提交重建是 403 限流的根源）。
+            # API 直取（gh release download 在 runner 上报 release not found，语义不明）：
+            asset_url=$(curl -sfL -H "Authorization: token $GITHUB_TOKEN"               "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/tags/nxnative-s9579030"               | python3 -c "import json,sys; print(json.load(sys.stdin)['assets'][0]['url'])")
+            curl -sfL -H "Authorization: token $GITHUB_TOKEN" -H "Accept: application/octet-stream"               "$asset_url" -o third_party/snap.zip
             mkdir -p third_party/nxnative
             cd third_party/nxnative
             python3 -c "import zipfile; zipfile.ZipFile('../snap.zip').extractall('.')"
