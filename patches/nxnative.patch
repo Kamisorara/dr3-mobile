@@ -3264,10 +3264,10 @@ index 367779a..9eccbc0 100644
 +#endif
 diff --git a/dm/host/hle_season.c b/dm/host/hle_season.c
 new file mode 100644
-index 0000000..e667525
+index 0000000..7a68072
 --- /dev/null
 +++ b/dm/host/hle_season.c
-@@ -0,0 +1,308 @@
+@@ -0,0 +1,311 @@
 +// 赛季轮换 v1（kb/20 §6 定稿实现；gameplay 分支 2026-11-11）：
 +//   目标（用户定案）：每月 1 号新赛季，2026-11 = S1。
 +//   离线防进不去 = patch_nso.py D3 块的世界装载直补丁（0x492f6c bl GameIsSeasonal → mov w0,#0，恒走普通装载；
@@ -3535,9 +3535,12 @@ index 0000000..e667525
 +        *(uint32_t *)(num_obj + SEASON_SLOT_OFF) = want_num;
 +        *(uint32_t *)(st_obj + SEASON_SLOT_OFF) = want_st;
 +        LOG("赛季轮换：会话槽已填 num=%u state=1(InProgress)（原 num=%u state=%u）", want_num, num_now, st_now);
-+        uint8_t *chg = base + SEASON_CHANGED_FLAG_OFF;
-+        *chg = 1;   // 通知 UI 刷新（0x600a4 同位）
 +    }
++    // [0x114ac40] 是「赛季数据已就绪」门（0x5ff00 读它，UI 状态机 0x362a60 cbz w0 → 未登录/Unknown
++    // 分支——**先看这个位再看槽值**；官方 0x600a4 在槽一致后置 1，UI 消费后清 0）。
++    // 诊断实证（2026-11-11）：只在槽变化时置位 → 首拍后被 UI 消费清零 → 永远"未登录"。
++    // 每拍脉冲置 1 = 官方"同步后刷新"节奏，UI 每 tick 重算（读到 num/st=1/1 → InProgress）。
++    *(volatile uint8_t *)(base + SEASON_CHANGED_FLAG_OFF) = 1;
 +}
 +
 +void dm_season_frame(void) {
