@@ -32,7 +32,7 @@ static int dm_season_number(NSInteger oy, NSInteger om) {
 - (void)buildCard {
     UIView *card = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 460, 330)];
     card.center = CGPointMake(CGRectGetMidX(self.bounds), CGRectGetMidY(self.bounds));
-    card.autoresizingMask = UIViewAutoresizingFlexibleMargins;
+    card.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin | UIViewAutoresizingFlexibleRightMargin | UIViewAutoresizingFlexibleTopMargin | UIViewAutoresizingFlexibleBottomMargin;
     card.backgroundColor = [UIColor colorWithWhite:0.09 alpha:0.97];
     card.layer.cornerRadius = 14;
     card.layer.shadowOpacity = 0.5; card.layer.shadowRadius = 18;
