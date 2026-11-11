@@ -176,10 +176,18 @@ def bootstrap(_):
         if not (pinned.exists() and pinned.read_text().strip() == COMMIT and (actual or not (UPSTREAM / '.git').exists())):
             raise ValueError(f'Upstream commit mismatch (HEAD={actual or "none"}); use the pinned clean checkout')
     patch = ROOT / 'patches/nxnative.patch'
-    applied = subprocess.run(['git', 'apply', '--reverse', '--check', str(patch)], cwd=UPSTREAM, capture_output=True).returncode == 0
+    # 「补丁已应用」判据 = 产物文件在不在（lan_native.h 是补丁新增文件，基线 zip 没有）。
+    # 不能用 git apply --reverse --check：快照树无 .git 时 git 2.56 在非仓库目录静默无效且退出 0
+    # （e1d9ae5 实证），CI 上曾误判"已应用"跳过应用 → 头文件缺失编译挂（43026386771）。
+    applied = (UPSTREAM / 'dm/host/lan_native.h').exists()
     if not applied:
-        run(['git', 'apply', '--check', patch], WORK / 'logs/patch-check.log', cwd=UPSTREAM)
-        run(['git', 'apply', patch], WORK / 'logs/patch.log', cwd=UPSTREAM)
+        if (UPSTREAM / '.git').exists():
+            run(['git', 'apply', '--check', patch], WORK / 'logs/patch-check.log', cwd=UPSTREAM)
+            run(['git', 'apply', patch], WORK / 'logs/patch.log', cwd=UPSTREAM)
+        else:   # 快照树无 .git：直接 GNU/POSIX patch（macOS 自带 patch 支持 -p1 -i）
+            run(['patch', '-p1', '-i', str(patch.resolve())], WORK / 'logs/patch-p1.log', cwd=UPSTREAM)
+        if not (UPSTREAM / 'dm/host/lan_native.h').exists():   # 落地校验（677a621 先例）
+            sys.exit('[x] 补丁应用后 dm/host/lan_native.h 仍缺失：apply 全路径失效')
     copy_native()
     game = UPSTREAM / 'dm/games' / TITLE
     game.mkdir(exist_ok=True)
