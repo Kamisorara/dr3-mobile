@@ -3266,7 +3266,7 @@ index 367779a..9eccbc0 100644
 +#endif
 diff --git a/dm/host/hle_season.c b/dm/host/hle_season.c
 new file mode 100644
-index 0000000..3147dd3
+index 0000000..9590719
 --- /dev/null
 +++ b/dm/host/hle_season.c
 @@ -0,0 +1,458 @@
@@ -3326,6 +3326,7 @@ index 0000000..3147dd3
 +#define SEASON_SRC_NODE_OFF 0x70UL           // 链表节点 → 对象 的固定解引用
 +
 +int dm_guest_heap_readable(uint64_t a, size_t n);   // hle_svc.c：客体堆区间判读（英雄记录=堆对象，读前护栏）
++int guest_ptr_ok(uint64_t a);   // 本文件后段定义：guest 指针合法性（guest AS 或模块镜像），所有间接解引用前必过
 +
 +static _Atomic int g_enabled;               // 总开关快照（重载线程写，门线程读）
 +static _Atomic int g_season;                // 当前生效赛季号
@@ -3609,7 +3610,6 @@ index 0000000..3147dd3
 +#define SERVICE_ARRAY_OFF 0x114aa30UL   // 服务对象数组指针槽（stride 0x1e98，4 服务）
 +#define SERVICE_SESS_FLAG 0x228UL       // +0x228 = 会话标志（u32）
 +#define SERVICE_COUNT 4
-+static int guest_ptr_ok(uint64_t a);   // 定义在本文件后段（服务区），此处前置声明
 +// guest 指针合法性：落在 guest 地址空间（0x7000000000+512MB）或任一模块镜像（≤32MB）内。
 +// 防并发撕裂读：游戏线程会重写 [0x114aa30] 等槽，fill 线程可能读到写一半的值（2026-11-12
 +// 闪退根因：arr=0x35a... 垃圾值野写 SIGSEGV）。所有间接解引用的指针必须先过此校验。
