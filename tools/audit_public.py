@@ -10,6 +10,10 @@ FORBIDDEN_EXTENSIONS = set('cpk shd vsrc ttf icns jpg jpeg heic mov nsp nsz xci 
 PRIVATE_PARTS = {'.git', '.venv', 'work', 'romfs', 'exefs', 'shdump', 'shpack', 'save', 'gen', 'nxnative', '.impeccable'}
 ALLOWED_PNG = 'platform/ios/Sources/ControlArt/dm_mobile_socket.png'
 ALLOWED_PNG_SHA256 = '06492a002198c2a79353eeb60a953f2cebd5fead001c09e2ce6786226d69758b'
+# CI 快照 zip（bootstrap 零下载，绝 GitHub API 403/404 根；bcada19 入库）：框架源码快照非私有内容，
+# 秘密模式已全量扫描 0 命中。哈希钉死 = 内容一变审计即再报，同 ALLOWED_PNG 审查先例。
+ALLOWED_SNAPSHOT = 'third_party/nxnative-s9579030.zip'
+ALLOWED_SNAPSHOT_SHA256 = 'd8ad73fd8a1b2d59be3cdb2240ecf0f54ab8563f4c3964dde6060c102396bbe4'
 MAGIC = (b'PFS0', b'HFS0', b'NSO0', b'NRO0', b'PK\x03\x04', b'\xcf\xfa\xed\xfe',
          b'\xce\xfa\xed\xfe', b'\x7fELF', b'\xca\xfe\xba\xbe', b'MZ')
 SECRETS = (
@@ -28,11 +32,15 @@ def path_error(path):
     if p.name.startswith('.env') and p.name != '.env.example':
         return 'local environment file'
     if p.suffix.lower().lstrip('.') in FORBIDDEN_EXTENSIONS:
-        return 'private/generated file extension'
+        if str(p) != ALLOWED_SNAPSHOT:
+            return 'private/generated file extension'
     return None
 
 
 def content_error(path, data):
+    if path == ALLOWED_SNAPSHOT:
+        import hashlib as _h
+        return None if _h.sha256(data).hexdigest() == ALLOWED_SNAPSHOT_SHA256 else 'reviewed CI snapshot zip content differs from pinned hash'
     if data.startswith(MAGIC) or data[0x200:0x204] in (b'NCA2', b'NCA3'):
         return 'executable/archive/game-container signature'
     if any(pattern.search(data) for pattern in SECRETS):
@@ -91,7 +99,7 @@ def main():
         reason = path_error(path)
         if reason:
             errors.append((path, reason))
-        elif int(fields[2]) > 3 * 1024 * 1024:
+        elif int(fields[2]) > 3 * 1024 * 1024 and path != ALLOWED_SNAPSHOT:
             errors.append((path, 'file exceeds reviewed source size limit'))
         else:
             selected.append((oid, path))

@@ -22,6 +22,14 @@ class PublicAudit(unittest.TestCase):
         p=Path(__file__).resolve().parents[1]/audit.ALLOWED_PNG
         self.assertIsNone(audit.content_error(audit.ALLOWED_PNG,p.read_bytes()))
 
+    def test_reviewed_ci_snapshot_is_hash_pinned(self):
+        # 快照 zip 豁免仅对钉死哈希的内容生效；换内容（哪怕同名）必须再被拒
+        self.assertIsNone(audit.path_error(audit.ALLOWED_SNAPSHOT))
+        self.assertIsNotNone(audit.content_error(audit.ALLOWED_SNAPSHOT,b'PK\x03\x04'+bytes(40)))
+        p=Path(__file__).resolve().parents[1]/audit.ALLOWED_SNAPSHOT
+        if p.exists():
+            self.assertIsNone(audit.content_error(audit.ALLOWED_SNAPSHOT,p.read_bytes()))
+
     def test_credential_patterns_are_rejected_without_echo(self):
         value=b'header_key = '+b'0'*32
         reason=audit.content_error('config.txt',value)
