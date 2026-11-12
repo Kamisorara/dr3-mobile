@@ -3268,19 +3268,18 @@ index 367779a..9eccbc0 100644
 +#endif
 diff --git a/dm/host/hle_season.c b/dm/host/hle_season.c
 new file mode 100644
-index 0000000..582720c
+index 0000000..4945b43
 --- /dev/null
 +++ b/dm/host/hle_season.c
-@@ -0,0 +1,465 @@
+@@ -0,0 +1,431 @@
 +// 赛季轮换 v1（kb/20 §6 定稿实现；gameplay 分支 2026-11-11）：
 +//   目标（用户定案）：每月 1 号新赛季，2026-11 = S1。
 +//   离线防进不去 = patch_nso.py D3 块的世界装载直补丁（0x492f6c bl GameIsSeasonal → mov w0,#0，恒走普通装载；
 +//   kb/20 §3.2 指令级根因：世界装载 0x492990 的 enum==6||GameIsSeasonal → 早退分支跳过装载主路径）。
-+//   配置 = $DM_SAVE/dm-season.tsv（壳设置页 SeasonPanel 写；宿主 1Hz stat 重载，改动即生效、不用重启）：
-+//     origin\tYYYY-MM-DD  轮换起点（当日= S1；缺省 2026-11-01）——唯一可配项
-+//   赛季不可关闭（用户定案 2026-11-12）：面板无总开关；旧文件里的 enabled/mode/season 键一律忽略，
-+//     宿主硬线 enabled=1 + 月更轮换——设备上残留的旧配置（enabled=0）也翻不关赛季。
-+//   赛季号 = 今天相对 origin 的整月差 + 1（日不计——每月 1 号换季），clamp ≥1。
++//   全部写死（用户定案 2026-11-12）：赛季不可关闭 + 月更轮换 + S1 = 2026-11-01，无任何可配项；
++//   面板 = 纯展示（SeasonPanel v3，无编辑控件、不写配置）；dm-season.tsv 整个废除，
++//   设备上残留的旧 tsv（含 enabled=0 / origin 改动）一律不读——配置不可能被翻掉。
++//   赛季号 = 今天相对 2026-11-01 的整月差 + 1（日不计——每月 1 号换季），clamp ≥1。
 +//   主题映射：theme = ((S-1) mod 21) + 1 → P74_ItemPassive_SeasonTheme_%03u（kb/16：21 个官方主题）。
 +//   svc 0x8f（SVC_HOST_SEASON_ISSEASONAL，GameIsSeasonal 0x4c8df0 入口，v2 真赛季核心）：宿主条件应答——
 +//         当前已验证英雄是赛季角色 → w0=1（全链 55 消费者按赛季走：掉落/任务门/UI 对拍族 0x4b430 等）；
@@ -3298,26 +3297,24 @@ index 0000000..582720c
 +//   脚本帧 ABI 接入（kb/17 §6.4，宿主直调不可行）。
 +//   边界：不写角色 Digest season_created（kb/17 §3.4 未解）；档案对象 X+0x34 不碰（门已放行，无需第二半）。
 +// | Season rotation v1 (kb/20 §6). Monthly rotation: a new season on the 1st of every month, 2026-11 = S1.
-+// | Config $DM_SAVE/dm-season.tsv (written by the shell's SeasonPanel, reloaded by the host at 1 Hz).
-+// | The season cannot be turned off (2026-11-12): the panel has no master switch, enabled is hardwired to 1,
-+// | monthly rotation only; legacy enabled/mode/season keys in the tsv are ignored.
++// | Everything is hardwired (2026-11-12): the season cannot be turned off, S1 starts at 2026-11-01,
++// | the panel is display-only and the legacy dm-season.tsv is no longer read at all.
 +// | svc 0x90 gates the hero↔profile season check entry: stamps hero+0x12C bit1; heroes that already
 +// | carry the bit always pass; otherwise the original validation runs.
 +#include "dm.h"
 +#include "hle.h"
 +#include <stdatomic.h>
 +#include <pthread.h>
-+#include <stdio.h>
 +#include <stdlib.h>
 +#include <string.h>
-+#include <sys/stat.h>
 +#include <time.h>
 +
 +#define THEME_COUNT 21                      // P74_ItemPassive_SeasonTheme_001..021（kb/16 §7b）
 +#define THEME_NAME_OFF 0x748450UL           // 名字→id 解析器（kb/18 §3；0x1d = 名字域参数）
 +#define HERO_LOOKUP_OFF 0x520360UL          // 英雄号→记录（kb/17 §1.3）
 +#define HERO_FLAG_OFF 0x12cUL               // 记录 +0x12C：bit1=赛季、bit0=专家（kb/17 §1.3 读侧）
-+#define ORIGIN_DEFAULT "2026-11-01"         // 用户定案：2026-11 = S1
++#define SEASON_ORIGIN_Y 2026                // S1 起点（用户定案 2026-11-12 写死）：2026-11-01
++#define SEASON_ORIGIN_M 11                  // S1 起点（同上）：11 月
 +#define SEASON_NUM_OBJ_OFF 0x114ac60UL      // 单例指针→+0xB0 = 当期赛季号（HeroesList.current_season_num 运行时槽，0x60000 变更探测器/0xa273c0 官方 setter 实证）
 +#define SEASON_STATE_OBJ_OFF 0x114ac68UL    // 单例指针→+0xB0 = 赛季状态（1=InProgress；缺省 2=Unknown；UI 串簇 0x362a70 w19==1=InProgress）
 +#define SEASON_SLOT_OFF 0xb0UL
@@ -3344,40 +3341,19 @@ index 0000000..582720c
 +static int g_nheroes;
 +static pthread_mutex_t g_hero_mu = PTHREAD_MUTEX_INITIALIZER;
 +static struct { int mode_rotate, base; int oy, om; } cfg;
-+static long cfg_mtime = -1;
-+static int cfg_loaded, cfg_missing_logged;
++static int cfg_loaded;
 +
 +// ---- 配置 ----
++// 全部写死（用户定案 2026-11-12）：不可关闭 + 月更轮换 + S1 = 2026-11-01。
++// dm-season.tsv 整个废除——面板是纯展示，设备上残留的旧 tsv 一律不读。
 +static void config_load(void) {
-+    const char *sv = getenv("DM_SAVE");
-+    char path[1024];
-+    if (!sv || (size_t)snprintf(path, sizeof path, "%s/dm-season.tsv", sv) >= sizeof path) return;
-+    int oy = 2026, om = 11;   // 缺省：2026-11 = S1；enabled/rotate 硬线（赛季不可关闭+自动轮换），旧键忽略
-+    FILE *f = fopen(path, "r");
-+    if (!f) {
-+        if (!cfg_missing_logged) { cfg_missing_logged = 1; LOG("赛季轮换：还没有 %s（缺省开：月更，%s = S1）", path, ORIGIN_DEFAULT); }
-+    } else {
-+        char line[256];
-+        while (fgets(line, sizeof line, f)) {
-+            char key[32], val[64];
-+            if (sscanf(line, "%31s\t%63s", key, val) != 2 || key[0] == '#') continue;
-+            // enabled/mode/season 键已废除（2026-11-12 定案）：读到也忽略，防旧 tsv 翻关赛季
-+            if (!strcmp(key, "origin")) {
-+                int y, m, d;
-+                if (sscanf(val, "%d-%d-%d", &y, &m, &d) == 3 && y > 0 && m >= 1 && m <= 12) { oy = y; om = m; }
-+            }
-+        }
-+        fclose(f);
-+        LOG("赛季轮换：不可关闭·月更轮换 origin=%04d-%02d（%s）", oy, om, path);
-+        struct stat st;
-+        cfg_mtime = stat(path, &st) ? -1 : (long)st.st_mtime;
-+    }
 +    cfg.mode_rotate = 1;
 +    cfg.base = 1;
-+    cfg.oy = oy; cfg.om = om;
++    cfg.oy = SEASON_ORIGIN_Y; cfg.om = SEASON_ORIGIN_M;
 +    atomic_store(&g_enabled, 1);            // 赛季不可关闭：宿主唯一真源，门线程的 enabled 分支恒走
 +    atomic_store(&g_season, 1);             // 生效号由 frame 拍按日历写入
 +    cfg_loaded = 1;
++    LOG("赛季轮换：不可关闭·月更轮换 S1=2026-11-01（写死，无配置文件）");
 +}
 +
 +// ---- 旁路表 ----
@@ -3391,15 +3367,6 @@ index 0000000..582720c
 +    if (i < 0 && g_nheroes < HERO_MAX) { i = g_nheroes++; g_heroes[i].id = id; g_heroes[i].season = season; g_heroes[i].rolled = 0; }
 +    if (i >= 0 && g_heroes[i].season > season) g_heroes[i].season = season;   // 保留最早赛季（v1 期英雄迁移：按当期收录后不回退）
 +    pthread_mutex_unlock(&g_hero_mu);
-+}
-+
-+static void config_reload_if_changed(void) {
-+    const char *sv = getenv("DM_SAVE");
-+    char path[1024];
-+    if (!sv || (size_t)snprintf(path, sizeof path, "%s/dm-season.tsv", sv) >= sizeof path) return;
-+    struct stat st;
-+    long m = stat(path, &st) ? -1 : (long)st.st_mtime;
-+    if (m != cfg_mtime) config_load();
 +}
 +
 +// ---- 轮换日历：月更（每月 1 号换季）；今天 < origin 时 clamp 到 S1 ----
@@ -3713,7 +3680,6 @@ index 0000000..582720c
 +    uint64_t now = (uint64_t)time(NULL) * 1000;
 +    if (now < next_ms) return;
 +    next_ms = now + 1000;
-+    config_reload_if_changed();
 +    int cur = season_effective();
 +    static int last = -1;
 +    if (cur != last) {
@@ -4090,7 +4056,7 @@ index 4d22880..0be9257 100644
          // Derivation: pillar inner edge x = screen height * limit / 2, so for every delta added to the limit the inner edge moves outward by screen height * delta / 2 on each side. Measured on Mac 1952x900, the soft edge is <= 30 pixels wide
          // (with limit = screen aspect ratio, columns 0–20 at the right edge fade from black to bright, and it disappears once the limit is pushed to 2.4) => need delta >= 2 * 30 / 900 ~ 0.067; 0.15 is taken (about 67 pixels outward per side), leaving more than double the margin.
 diff --git a/dm/tools/patch_nso.py b/dm/tools/patch_nso.py
-index 837700c..5596fe5 100644
+index 837700c..539cc3f 100644
 --- a/dm/tools/patch_nso.py
 +++ b/dm/tools/patch_nso.py
 @@ -680,7 +680,12 @@ for a in sorted(kinds):
@@ -4182,7 +4148,7 @@ index 837700c..5596fe5 100644
 +        put_branch(off, start); stat('d3_season_herocheck')
 +        cuts.append((off, struct.pack('<I', word).hex(), struct.pack('<I', B(off, start)).hex(), why, '仅宿主'))
 +    season_hero_gate(0x4b1b0, 0xd10143ff, 0x90,
-+        '赛季 v1：角色↔档案赛季校验入口 → svc 0x90：宿主按 dm-season.tsv 应答（不可关闭：恒幂等盖 hero+0x12C bit1；位已置放行；否则原校验；hle_season.c）')
++        '赛季 v1：角色↔档案赛季校验入口 → svc 0x90：宿主应答（赛季不可关闭+S1 写死 2026-11-01：恒幂等盖 hero+0x12C bit1；位已置放行；否则原校验；hle_season.c）')
 +
 +    # ③ GameIsSeasonal（0x4c8df0）入口 → svc 0x8f 通透应答门（kb/20 §9.5：宿主按"当前已验证英雄是否赛季"答 1/0；
 +    #    open 路径 = 恢复 x8 + ret，直接回传宿主写的 w0，不走固定捷径）。世界装载位点已直补丁恒 0（①），
