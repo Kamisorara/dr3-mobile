@@ -4092,7 +4092,7 @@ index 4d22880..0be9257 100644
          // Derivation: pillar inner edge x = screen height * limit / 2, so for every delta added to the limit the inner edge moves outward by screen height * delta / 2 on each side. Measured on Mac 1952x900, the soft edge is <= 30 pixels wide
          // (with limit = screen aspect ratio, columns 0–20 at the right edge fade from black to bright, and it disappears once the limit is pushed to 2.4) => need delta >= 2 * 30 / 900 ~ 0.067; 0.15 is taken (about 67 pixels outward per side), leaving more than double the margin.
 diff --git a/dm/tools/patch_nso.py b/dm/tools/patch_nso.py
-index 837700c..9928ba2 100644
+index 837700c..1961493 100644
 --- a/dm/tools/patch_nso.py
 +++ b/dm/tools/patch_nso.py
 @@ -680,7 +680,12 @@ for a in sorted(kinds):
@@ -4127,7 +4127,7 @@ index 837700c..9928ba2 100644
  params = PARAMS.get(BUILD_ID, [])
  for oa, wa, ob_, wb, r, key, why in params:
      for o, w0 in ((oa, wa), (ob_, wb)):
-@@ -847,6 +861,140 @@ for oa, wa, ob_, wb, r, key, why in params:
+@@ -847,6 +861,155 @@ for oa, wa, ob_, wb, r, key, why in params:
      tmp = 16 if r != 16 else 17
      emit(STUR(tmp, 31, -16)); emit(MRS_TPIDRRO(r)); emit_slot_addr(r, tmp, key); emit(LDRX(r, r)); emit(LDUR(tmp, 31, -16)); emit(B(here(), oa + 4))
      struct.pack_into('<I', IMG, oa, B(oa, start)); struct.pack_into('<I', IMG, ob_, NOP); stat('param')
@@ -4265,10 +4265,25 @@ index 837700c..9928ba2 100644
 +    cuts.append((_off, _ob, struct.pack('<I', _svc).hex(),
 +                 '创建确认 0x359bc0 内 bl 0x56aa0（档案会话三路或检查，0 → CreateHeroNoProfileErrorNX64 弹「没联网」）→ 宿主 enabled 强制 w0=1（离线对象+0/+8 未证，保险门）；关=代调原函数（hle_season.c）', '仅宿主'))
 +    stat('d3_season_create_session')
++
++    # ⑤c 赛季创建可用性拒绝链旁路（2026-11-12 真机截图弹窗根因，第 4 检查点=最终闸）：
++    #    创建总入口 0x351xxx（SeasonNotAvailable「请稍后重试」/ SeasonNotAvailableOnline「未连接服务器无法创建赛季英雄」
++    #    / OnlineStateErrorParentalBlockSwitch 三拒绝窗宿主）。进创建主体 0x35118c（名字输入→确认→0x3615f0→本地队列）
++    #    的条件：0x35111c cbz [0x18626c4+0x38]（w11）或 0x351124 cbnz [0x18626c4]；否则拒绝链：
++    #    「请稍后重试」窗 → bl 0x56b10（服务对象+0/+8 任一非零=放行）→ bl 0x57260 连接状态机
++    #    （旗标+0x228==0 走慢路径：obj+0/+8→0x7ea10→[+0x238]→离线恒返回 2）→ ==2 弹「未连接」、==4 弹家长控制。
++    #    离线 [0x18626c4] 族全零且 obj+0/+8 未填 → 必落拒绝链（真机截图实证）。
++    #    刀 = cbz → b 无条件跳 0x35118c（等长直写）：绕过整段拒绝链走官方创建流程；标准/硬核类型不经本段不受影响。
++    _off, _ob, _nb = 0x35111c, '8b030034', '1c000014'
++    assert struct.unpack_from('<I', IMG, _off)[0] == int.from_bytes(bytes.fromhex(_ob), 'little'), f'赛季可用性剪口原字不符 {_off:#x}'
++    struct.pack_into('<I', IMG, _off, int.from_bytes(bytes.fromhex(_nb), 'little'))
++    cuts.append((_off, _ob, _nb,
++                 '赛季创建可用性拒绝链旁路：cbz [0x18626c4+0x38] → b 无条件进创建主体 0x35118c（0x351124 cbnz [0x18626c4] 同条件族；0x57260 状态机离线恒 2=「未连接服务器」拒绝窗 SeasonNotAvailableOnline——真机截图弹窗，2026-11-12）', '仅宿主'))
++    stat('d3_season_create_bypass')
  
  # The three existing native rule trampolines all use only the dead temporary w8 that is overwritten afterwards, and do not change the w0/stat return, sp or NZCV.
  # 6c6290 is after the original mode3 gate; the Blaze / reference count and data invalidation 6c62dc branches before it and the state update after it are untouched.
-@@ -893,38 +1041,38 @@ if FAR:   # patch area before the base: file = text + ro + data (padded to 16K)
+@@ -893,38 +1056,38 @@ if FAR:   # patch area before the base: file = text + ro + data (padded to 16K)
  else:
      open(P('patched.bin'), 'wb').write(IMG + bytearray(PATCH_OFF - len(IMG)) + patch)
  import hashlib
