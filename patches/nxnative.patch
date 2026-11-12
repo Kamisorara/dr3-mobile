@@ -2188,17 +2188,18 @@ index 1a63bd7..9fcffec 100644
  
  // ---------- Host gate dispatch ----------
 diff --git a/dm/host/hle.h b/dm/host/hle.h
-index 79fda3d..c678031 100644
+index 79fda3d..2613d83 100644
 --- a/dm/host/hle.h
 +++ b/dm/host/hle.h
-@@ -77,4 +77,6 @@ uint64_t dm_audio_render_calls(void);   // Cumulative sound card callback count
+@@ -77,4 +77,7 @@ uint64_t dm_audio_render_calls(void);   // Cumulative sound card callback count
  //   0x8c   Current act saved while in a rift (when the character is in a rift map w9 is replaced with 4 = Act V, writes x9; x8 always 0) dm_rift.c      0x6fa9d0 (branch gate: x8≠0 jumps to 0x6fa9d4, otherwise executes the original instruction and returns to 0x6fa9d4)
  //   0x8d   Extra mercenary equipment slots (mercenary + rift level ≥10 + belt / boots / gloves / ring / amulet: w0 is replaced with 1, writes x0; x8 always 0) dm_rift.c      0x64a34c (branch gate: x8≠0 jumps to 0x64a350, otherwise executes the original instruction and returns to 0x64a350)
  //   0x8e   Client-side check for the extra mercenary equipment slots (rift level ≥10 + the item is a belt / boots / gloves / ring / amulet: w1 is replaced with the item's own type number, writes x1; x8 always 0) dm_rift.c      0x3beb58 (branch gate: x8≠0 jumps to 0x3beb5c, otherwise executes the original instruction and returns to 0x3beb5c)
 -enum { SVC_HOST_TACT_ZLIB = 0x80, SVC_HOST_C2S_DELIVER = 0x81, SVC_HOST_C2S_SYS = 0x82, SVC_HOST_GRANNY_A = 0x83, SVC_HOST_GRANNY_B = 0x84, SVC_HOST_PRIVATE_SKILL_RENDER = 0x85, SVC_HOST_PRIVATE_SKILL_AIM = 0x86, SVC_HOST_GROUND_ASSET = 0x87, SVC_HOST_DROP_SOUND = 0x88, SVC_HOST_RIFT_EXIT = 0x89, SVC_HOST_JOIN_SPAWN = 0x8a, SVC_HOST_JOIN_CORPSE = 0x8b, SVC_HOST_SAVE_ACT = 0x8c, SVC_HOST_MERC_SLOT = 0x8d, SVC_HOST_MERC_SLOT_CL = 0x8e };   // 0x87: fetch the model path for ground items (dm_dropfilter.c drop light)   // 0x83/0x84: Granny per-block decode call sites (hle_granny.c)
 +//   0x91   Season source A enabled override（call-site gate；enabled 时按日历强制 +0xB0 布尔）hle_season.c  0x607d4（bl 0xa26fc0 call site；离线会话源查询恒 0，门拿真实单例代调官方 setter）
 +//   0x92   Season source B enabled override（同族，读 [0x114ace0]）hle_season.c  0x607f8（bl 0xa26fc0 call site；同上）
-+enum { SVC_HOST_TACT_ZLIB = 0x80, SVC_HOST_C2S_DELIVER = 0x81, SVC_HOST_C2S_SYS = 0x82, SVC_HOST_GRANNY_A = 0x83, SVC_HOST_GRANNY_B = 0x84, SVC_HOST_PRIVATE_SKILL_RENDER = 0x85, SVC_HOST_PRIVATE_SKILL_AIM = 0x86, SVC_HOST_GROUND_ASSET = 0x87, SVC_HOST_DROP_SOUND = 0x88, SVC_HOST_RIFT_EXIT = 0x89, SVC_HOST_JOIN_SPAWN = 0x8a, SVC_HOST_JOIN_CORPSE = 0x8b, SVC_HOST_SAVE_ACT = 0x8c, SVC_HOST_MERC_SLOT = 0x8d, SVC_HOST_MERC_SLOT_CL = 0x8e, SVC_HOST_SEASON_ISSEASONAL = 0x8f, SVC_HOST_SEASON_HERO = 0x90, SVC_HOST_SEASON_SRC_A = 0x91, SVC_HOST_SEASON_SRC_B = 0x92 };   // 0x8f = GameIsSeasonal 条件应答门（v2：当前已验证英雄是赛季角色才答 1；世界装载位点已直补丁恒 0，无早退死锁路径；kb/20 §9.5）   // 0x87: fetch the model path for ground items (dm_dropfilter.c drop light)   // 0x83/0x84: Granny per-block decode call sites (hle_granny.c)
++//   0x93   Season source C enabled override（尾调用点门；enabled 时按日历强制 +0xB0 布尔）hle_season.c  0x4a5f68（b 0xa26fc0 尾调用点；官方 merge-publish 内循环：读记录 +0x64/+0x68 当前值→[+0x70] 目标→setter 按当前值重刷，离线=0 会抹掉已置的 1——参考项目 gates.tsv 第三 season_source 行，2026-11-12 审计补）
++enum { SVC_HOST_TACT_ZLIB = 0x80, SVC_HOST_C2S_DELIVER = 0x81, SVC_HOST_C2S_SYS = 0x82, SVC_HOST_GRANNY_A = 0x83, SVC_HOST_GRANNY_B = 0x84, SVC_HOST_PRIVATE_SKILL_RENDER = 0x85, SVC_HOST_PRIVATE_SKILL_AIM = 0x86, SVC_HOST_GROUND_ASSET = 0x87, SVC_HOST_DROP_SOUND = 0x88, SVC_HOST_RIFT_EXIT = 0x89, SVC_HOST_JOIN_SPAWN = 0x8a, SVC_HOST_JOIN_CORPSE = 0x8b, SVC_HOST_SAVE_ACT = 0x8c, SVC_HOST_MERC_SLOT = 0x8d, SVC_HOST_MERC_SLOT_CL = 0x8e, SVC_HOST_SEASON_ISSEASONAL = 0x8f, SVC_HOST_SEASON_HERO = 0x90, SVC_HOST_SEASON_SRC_A = 0x91, SVC_HOST_SEASON_SRC_B = 0x92, SVC_HOST_SEASON_SRC_C = 0x93 };   // 0x8f = GameIsSeasonal 条件应答门（v2：当前已验证英雄是赛季角色才答 1；世界装载位点已直补丁恒 0，无早退死锁路径；kb/20 §9.5）   // 0x87: fetch the model path for ground items (dm_dropfilter.c drop light)   // 0x83/0x84: Granny per-block decode call sites (hle_granny.c)
 diff --git a/dm/host/hle_account.c b/dm/host/hle_account.c
 index 362a6c2..61dbe98 100644
 --- a/dm/host/hle_account.c
@@ -3266,10 +3267,10 @@ index 367779a..9eccbc0 100644
 +#endif
 diff --git a/dm/host/hle_season.c b/dm/host/hle_season.c
 new file mode 100644
-index 0000000..0b0f3a7
+index 0000000..e8215e3
 --- /dev/null
 +++ b/dm/host/hle_season.c
-@@ -0,0 +1,458 @@
+@@ -0,0 +1,446 @@
 +// 赛季轮换 v1（kb/20 §6 定稿实现；gameplay 分支 2026-11-11）：
 +//   目标（用户定案）：每月 1 号新赛季，2026-11 = S1。
 +//   离线防进不去 = patch_nso.py D3 块的世界装载直补丁（0x492f6c bl GameIsSeasonal → mov w0,#0，恒走普通装载；
@@ -3445,9 +3446,9 @@ index 0000000..0b0f3a7
 +}
 +
 +int dm_season_svc(int num, uint64_t *regs) {
-+    if (num == SVC_HOST_SEASON_SRC_A || num == SVC_HOST_SEASON_SRC_B) {
-+        // 赛季源 setter 调用点门（0x607d4/0x607f8，参考项目 season_source 同形）：
-+        // 进门寄存器 = bl 0xa26fc0 的原参数（x0=目标单例, x1=查询bool, x2=mode）。
++    if (num == SVC_HOST_SEASON_SRC_A || num == SVC_HOST_SEASON_SRC_B || num == SVC_HOST_SEASON_SRC_C) {
++        // 赛季源 setter 调用点门（0x607d4/0x607f8 bl 形 + 0x4a5f68 尾调用 b 形，参考项目 season_source 三路同形）：
++        // 进门寄存器 = 0xa26fc0 的原参数（x0=目标单例, x1=查询bool, x2=mode）。
 +        // enabled 时强制 w1=1，代调官方 setter（+0xB0 字节写+变更位+通知链表全语义；离线查询恒 0，
 +        // 不接管则 enabled 被官方代码写 0——宿主侧直填单例会与之拉锯，这就是门形的价值：拿真实 x0）。
 +        static uint8_t *base;
@@ -3602,13 +3603,18 @@ index 0000000..0b0f3a7
 +//   [0x18627a4] =「赛季进行中」= 创建界面唯一真闸（类型循环上限 0x351768 / 选型保持 0x34de38 /
 +//   选项可见 0x34dd0c 三处只读它）；官方在英雄选择屏更新函数 0x34da10 里由 ready&&state==1 派生。
 +//   宿主每帧直写 1（与官方派生值一致，消除对更新函数触发时机的依赖）。
-+//   [0x18626bc] = 服务会话标志（0x57140=服务对象+0x228）——离线恒 0，选项可见性条件恰好需要它为 0，不动。
-+// 默认联网（用户定案 2026-11-12）：与其逐个伪造检查点，把服务会话层整体置「已登录」。
-+// service+0x228 = u32 会话标志（全部 190 处访问均为 32 位判零/清零，无解引用——纯标志置位安全），
-+// 0x57140/0x56aa0/0x615f0 等全部登录态判定一次过；创建流程本身走本地消息回环（离线创建普通
-+// 英雄同路径已验证），不需要真网络。D3 离线架构 = 本地服务器，状态层翻转即「默认在线」。
-+#define SERVICE_ARRAY_OFF 0x114aa30UL   // 服务对象数组指针槽（stride 0x1e98，4 服务）
-+#define SERVICE_SESS_FLAG 0x228UL       // +0x228 = 会话标志（u32）
++//   [0x18626bc] = 访客标志阴影（0x34e858 写 = 0x57140 读的服务对象+0x228）——可见性条件要求它为 0，不干预。
++// ⚠️ 2026-11-12 审计推翻「默认联网」（6ce2d1b 已回退）：service+0x228 不是「联网标志」而是「访客标志」，
++// 0 = 正式档案会话、非 0 = 访客态。四路独立证据：
++//   ① 0x34e858：bl 0x57140 读旗标 → str [0x18626bc]（阴影）→ 旗标≠0 构建 ConsoleHeroCreate:SeasonalGuestWarning（赛季访客警告）；
++//   ② 0x34dd0c 创建入口可见性 = [0x18627a4]!=0 && [0x18626bc]==0 —— 要求旗标阴影为 0，置 1 会把已亮的入口藏回去；
++//   ③ 0x359bc0 创建确认：旗标≠0 → 落入 CreateHeroNoProfileErrorNX64 弹窗构造（=真机看到的「没联网」弹窗）；
++//      旗标==0 → 0x359d44 正常创建流程；
++//   ④ 安卓参考项目 gates.tsv 全清单：零个会话层位点——其创建解锁只靠三路 season_source 门，不碰 +0x228。
++// 结论：置 1 = 把游戏钉死访客态 = 弹窗常驻 + 入口隐藏。离线旗标若天然非 0，正确方向是「清 0」而非置 1
++//（等真机读回旗标值再定，本版先完全不干预）。0x57140(svc_id)=ldr [0x114aa30]+svc_id*0x1e98+0x228（指令级实锤）。
++#define SERVICE_ARRAY_OFF 0x114aa30UL   // 服务对象数组指针槽（stride 0x1e98，4 服务；0x57140/0x56aa0 访问器指令级核验）
++#define SERVICE_SESS_FLAG 0x228UL       // +0x228 = 访客标志（u32；0=正式档案，非0=访客/异常态）
 +#define SERVICE_COUNT 4
 +// guest 指针合法性：落在 guest 地址空间（0x7000000000+512MB）或任一模块镜像（≤32MB）内。
 +// 防并发撕裂读：游戏线程会重写 [0x114aa30] 等槽，fill 线程可能读到写一半的值（2026-11-12
@@ -3622,24 +3628,6 @@ index 0000000..0b0f3a7
 +    }
 +    return 0;
 +}
-+static void service_online_feed(void) {
-+    static uint8_t *base;
-+    if (!base) {
-+        for (int i = 0; i < g_nmod; i++)
-+            if (!strcmp(g_mod[i].name, "main") && !strcmp(g_mod[i].build_id, DM_D3_BUILD)) base = g_mod[i].base;
-+        if (!base) return;
-+    }
-+    uint64_t arr = *(uint64_t *)(base + SERVICE_ARRAY_OFF);
-+    if (!guest_ptr_ok(arr)) return;   // 撕裂/未初始化值拒绝
-+    for (uint32_t s = 0; s < SERVICE_COUNT; s++) {
-+        uint64_t so = arr + (uint64_t)s * 0x1e98;
-+        if (!guest_ptr_ok(so)) return;
-+        if (*(uint32_t *)(so + SERVICE_SESS_FLAG) != 1) *(uint32_t *)(so + SERVICE_SESS_FLAG) = 1;
-+    }
-+    static int logged;
-+    if (logged < 2) { LOG("默认联网：4 服务会话标志置 1（service+0x228，纯 u32 标志无解引用）"); logged++; }
-+}
-+
 +static void season_create_gate_feed(void) {
 +    static uint8_t *base;
 +    if (!base) {
@@ -3666,10 +3654,12 @@ index 0000000..0b0f3a7
 +            uint64_t svc = *(uint64_t *)(base + 0x114aa30UL);
 +            uint32_t svc_id = *(uint32_t *)(base + 0x114ab70UL);
 +            uint64_t so = (guest_ptr_ok(svc) && svc_id < SERVICE_COUNT) ? svc + (uint64_t)svc_id * 0x1e98 : 0;
-+            LOG("创建检查读回：profile=%llx 阈值+0x16f4=%u 标志+0x16f8=%u 开关+0x16fc=%u svc_id=%u svc+0x7b8=%u svc+0x228=%llx",
++            // svc+0x228 = 访客标志（0=正式档案，非0=访客态→弹「没联网」）。打印旗标值而非指针（上版误印 so 指针）。
++            LOG("创建检查读回：profile=%llx 阈值+0x16f4=%u 标志+0x16f8=%u 开关+0x16fc=%u svc_id=%u svc+0x7b8=%u svc+0x228值=%u（访客标志，期望0）",
 +                prof,
 +                *(uint32_t *)(prof + 0x16f4), *(uint32_t *)(prof + 0x16f8), *(uint32_t *)(prof + 0x16fc),
-+                svc_id, so ? *(uint32_t *)(so + 0x7b8) : 0xffffffff, so);
++                svc_id, so ? *(uint32_t *)(so + 0x7b8) : 0xffffffff,
++                so ? *(uint32_t *)(so + SERVICE_SESS_FLAG) : 0xffffffff);
 +        }
 +    }
 +}
@@ -3697,7 +3687,6 @@ index 0000000..0b0f3a7
 +        off = e && !strcmp(e, "0");
 +    }
 +    if (off || strcmp(dm_main_build(), DM_D3_BUILD)) return;   // 门偏移只认 D3 构建
-+    service_online_feed();   // 默认联网：每帧保活（不依赖赛季开关——联网态是全局基础设施）
 +    if (atomic_load(&g_enabled)) { season_ready_pulse(); season_create_gate_feed(); }   // 每帧（不进 1Hz 节流）
 +    if (!cfg_loaded) { static pthread_once_t once = PTHREAD_ONCE_INIT; pthread_once(&once, config_load); }
 +    static uint64_t next_ms;
@@ -3780,7 +3769,7 @@ index 96d2674..579e8ae 100644
      pthread_mutex_lock(&g_se_lock); uint32_t wh = se_find(ev); pthread_mutex_unlock(&g_se_lock);
      if (!wh) { hle_bind_system_event(ev, 0); pthread_mutex_lock(&g_se_lock); wh = se_find(ev); pthread_mutex_unlock(&g_se_lock); }
 diff --git a/dm/host/host_stubs.c b/dm/host/host_stubs.c
-index ef7f336..766a672 100644
+index ef7f336..c056c1d 100644
 --- a/dm/host/host_stubs.c
 +++ b/dm/host/host_stubs.c
 @@ -1,6 +1,7 @@
@@ -3791,14 +3780,15 @@ index ef7f336..766a672 100644
  #include "front.h"
  
  void crash_sample_self(void) {}
-@@ -24,4 +25,11 @@ uint64_t dm_game_res(int docked) { return front_game_res(docked); }
+@@ -24,4 +25,12 @@ uint64_t dm_game_res(int docked) { return front_game_res(docked); }
  int dm_screen_real(int *w, int *h) { *w = *h = 0; return 0; }
  void dm_ui_rect(int *x, int *y, int *w, int *h) { *x = *y = *w = *h = 0; }
  // svc #0x80.. host gates: only D2R's rewrite rules create them; they should not appear in this game's build output
 -uint64_t svc_host_call(int num, uint64_t *regs) { (void)regs; die("svc_host_call：本作没有宿主门 svc #%#x", num); }
 +uint64_t svc_host_call(int num, uint64_t *regs) {
 +    if (num == SVC_HOST_SEASON_HERO || num == SVC_HOST_SEASON_ISSEASONAL
-+        || num == SVC_HOST_SEASON_SRC_A || num == SVC_HOST_SEASON_SRC_B) {   // 赛季门（hle_season.c）
++        || num == SVC_HOST_SEASON_SRC_A || num == SVC_HOST_SEASON_SRC_B
++        || num == SVC_HOST_SEASON_SRC_C) {   // 赛季门（hle_season.c）
 +        if (!dm_season_svc(num, regs)) die("赛季门处理器未接住 svc #%#x", num);
 +        return 1;   // 返回「已处理」（svc_dispatch 102 行按真值判定后回传 regs[0]）；返回应答值会在答 0（离线/非赛季）时落穿内核 switch 当未知号 die —— 2026-11-11 真机开机即崩（Unimplemented SVC 0x8f）的根因
 +    }
@@ -4080,7 +4070,7 @@ index 4d22880..0be9257 100644
          // Derivation: pillar inner edge x = screen height * limit / 2, so for every delta added to the limit the inner edge moves outward by screen height * delta / 2 on each side. Measured on Mac 1952x900, the soft edge is <= 30 pixels wide
          // (with limit = screen aspect ratio, columns 0–20 at the right edge fade from black to bright, and it disappears once the limit is pushed to 2.4) => need delta >= 2 * 30 / 900 ~ 0.067; 0.15 is taken (about 67 pixels outward per side), leaving more than double the margin.
 diff --git a/dm/tools/patch_nso.py b/dm/tools/patch_nso.py
-index 837700c..adcacf5 100644
+index 837700c..e5819c7 100644
 --- a/dm/tools/patch_nso.py
 +++ b/dm/tools/patch_nso.py
 @@ -680,7 +680,12 @@ for a in sorted(kinds):
@@ -4115,7 +4105,7 @@ index 837700c..adcacf5 100644
  params = PARAMS.get(BUILD_ID, [])
  for oa, wa, ob_, wb, r, key, why in params:
      for o, w0 in ((oa, wa), (ob_, wb)):
-@@ -847,6 +861,101 @@ for oa, wa, ob_, wb, r, key, why in params:
+@@ -847,6 +861,121 @@ for oa, wa, ob_, wb, r, key, why in params:
      tmp = 16 if r != 16 else 17
      emit(STUR(tmp, 31, -16)); emit(MRS_TPIDRRO(r)); emit_slot_addr(r, tmp, key); emit(LDRX(r, r)); emit(LDUR(tmp, 31, -16)); emit(B(here(), oa + 4))
      struct.pack_into('<I', IMG, oa, B(oa, start)); struct.pack_into('<I', IMG, ob_, NOP); stat('param')
@@ -4214,10 +4204,30 @@ index 837700c..adcacf5 100644
 +        cuts.append((_off, _ob, struct.pack('<I', _svc).hex(),
 +                     f'赛季源门 svc #0x{_num:x}：bl 0xa26fc0 调用点（+0xB0 布尔 setter）→ 宿主拿真实单例强制 w1=1 代调（参考项目 season_source 同形；hle_season.c）', '仅宿主'))
 +        stat('d3_season_source_gate')
++    #    C 路 0x4a5f68：尾调用 b 0xa26fc0（无框架叶函数 0x4a5f40，x30=调用者返回地址，后继 udf#0）——
++    #    2026-11-12 审计：这是官方 merge-publish 内循环（读记录 +0x64/+0x68 当前值 → [+0x70] 目标 → setter 按
++    #    当前值重刷；离线=0 会把 A/B 门与容器遍历置的 1 抹掉）→ 参考项目 gates.tsv 第三 season_source 行，必须门住。
++    #    门块 = ⑤ 调用点模板同构，尾改 ret（宿主代调 setter 后直接返回原函数调用者；bl 形的「门返回 off+4」在此
++    #    不可用——原指令是尾调用，其后继不是本函数的流）。hle.h 登记行标「尾调用点」供 structck ⓪/⑤ 分派。
++    def season_source_tail_gate(_off, _ob, _num, why):
++        assert struct.unpack_from('<I', IMG, _off)[0] == int.from_bytes(bytes.fromhex(_ob), 'little'), f'赛季源C门原字不符 {_off:#x}'
++        _start = here()
++        emit(STP_PRE(29, 30, 31, -16))
++        emit_gate_call(); emit(BLR(30))
++        _ret = here()
++        emit(LDP_POST(29, 30, 31, 16))
++        emit(0xD65F03C0)                       # ret —— 宿主已代调 setter；x30 = 叶函数调用者的返回地址
++        gates.append((_ret, 'svc', _num, _off))
++        put_branch(_off, _start)
++        kinds[_off] = ('svc', _num)
++        cuts.append((_off, _ob, struct.pack('<I', 0xD4000001 | (_num << 5)).hex(), why, '仅宿主'))
++        stat('d3_season_source_gate')
++    season_source_tail_gate(0x4a5f68, '16041614', 0x93,
++        '赛季源门 svc #0x93：b 0xa26fc0 尾调用点（官方 merge-publish 内循环：读记录 +0x64/+0x68 当前值→[+0x70] 目标→setter 按当前值重刷；离线=0 会抹掉已置 1）→ 宿主拿真实目标强制 w1=1 代调（参考项目 season_source 第三路；hle_season.c）')
  
  # The three existing native rule trampolines all use only the dead temporary w8 that is overwritten afterwards, and do not change the w0/stat return, sp or NZCV.
  # 6c6290 is after the original mode3 gate; the Blaze / reference count and data invalidation 6c62dc branches before it and the state update after it are untouched.
-@@ -893,38 +1002,38 @@ if FAR:   # patch area before the base: file = text + ro + data (padded to 16K)
+@@ -893,38 +1022,38 @@ if FAR:   # patch area before the base: file = text + ro + data (padded to 16K)
  else:
      open(P('patched.bin'), 'wb').write(IMG + bytearray(PATCH_OFF - len(IMG)) + patch)
  import hashlib
