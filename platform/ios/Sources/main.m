@@ -15,6 +15,10 @@ void front_ios_focus_event(int ev);
 void front_ios_configure_display(int wide, int metalfx, int fill);
 void front_ios_configure_aspect(int on);
 int dr3_lan_supported(void) __attribute__((weak_import));
+// WebDAV 云存档同步（WebDavSync.m）：startMode 起下拉线程、front_ios_boot 放行前等完、切后台立即推送
+void dm_webdav_boot_start(void);
+void dm_webdav_wait_boot(void);
+void dm_webdav_push_now(const char *why);
 
 static char *g_argv[4]; static int g_argc;
 static int g_launch_selected;
@@ -147,6 +151,7 @@ static void *boot_thread(void *p) {
 void front_ios_boot(void) {   // Called by front_ios.m once the window and Metal view exist
     static int once; if (!g_launch_selected || !g_boot_ok || once++) return;
     void front_ios_audio_session(void); front_ios_audio_session();   // set a short I/O buffer before the game opens audio output (front_ios.m)
+    dm_webdav_wait_boot();   // 云存档：等启动下拉完成或超时（硬上限 boot_timeout+1s），此后游戏才可能挂载存档
     pthread_attr_t a; pthread_attr_init(&a); pthread_attr_setstacksize(&a, 64u << 20);   // the Switch main thread stack is set by npdm; the host gives plenty
     pthread_t t; pthread_create(&t, &a, boot_thread, NULL); pthread_detach(t);
 }
@@ -176,6 +181,7 @@ int front_ios_boot_ok(void) { return g_boot_ok; }
     setenv("DM_GAME_RES","1280x720",1);
     setenv("DM_DR3_LAN",lan?"1":"0",1);
     fprintf(stderr,"boot: launch mode=%s HUD=%d MetalFX=%s LAN=%d\n",aspect?"aspect":fill?"fill":"normal",hud,metalfx?"spatial":"off",lan);
+    dm_webdav_boot_start();   // 云存档：趁预加载先把下拉跑起来（无配置零动作）；front_ios_boot 里等完才放行 dm_main
     front_ios_configure_display(0,metalfx,fill);
     front_ios_configure_aspect(aspect);
     dm_host_preload_start(g_argc,g_argv);
@@ -194,7 +200,7 @@ int front_ios_boot_ok(void) { return g_boot_ok; }
     UIApplication.sharedApplication.idleTimerDisabled=YES;
 }
 - (void)sceneWillResignActive:(UIScene *)s { front_ios_focus_event(0); }
-- (void)sceneDidEnterBackground:(UIScene *)s { front_ios_focus_event(1); }
+- (void)sceneDidEnterBackground:(UIScene *)s { front_ios_focus_event(1); dm_webdav_push_now("切后台"); }
 - (void)sceneWillEnterForeground:(UIScene *)s { front_ios_focus_event(2); }
 - (void)sceneDidBecomeActive:(UIScene *)s { front_ios_focus_event(3); }
 @end

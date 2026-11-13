@@ -59,6 +59,9 @@ targets:
         NSLocalNetworkUsageDescription: 用于发现并加入同一 Wi-Fi 内的暗黑破坏神 III 游戏。
         NSBonjourServices:
           - _dr3lan._udp
+        # WebDAV 云存档（WebDavSync.m）：允许 http:// 的局域网 WebDAV 服务器；https（如坚果云）不受影响
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
         UIApplicationSceneManifest:
           UIApplicationSupportsMultipleScenes: false
           UISceneConfigurations:
