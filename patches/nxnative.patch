@@ -1612,7 +1612,7 @@ index 31b4420..51cec58 100644
 +	clang $(CFLAGS) -I../gfx/nvn/include -I$(dir $(GAME_H)) -I$(GAME_DIR) -I$(VPX) -I../third_party/stb_vorbis -fobjc-arc -o $@ $(SRC) $(GFX) $(VPX_LIB) -framework Cocoa -framework GameController -framework CoreHaptics -framework QuartzCore -framework Metal -framework MetalFX -framework AudioToolbox -framework ImageIO -framework UniformTypeIdentifiers
 diff --git a/dm/host/controller_effects.h b/dm/host/controller_effects.h
 new file mode 100644
-index 0000000..9c79feb
+index 0000000..5576630
 --- /dev/null
 +++ b/dm/host/controller_effects.h
 @@ -0,0 +1,59 @@
@@ -1677,7 +1677,7 @@ index 0000000..9c79feb
 +#undef DM_EFFECT_API
 diff --git a/dm/host/controller_effects.m b/dm/host/controller_effects.m
 new file mode 100644
-index 0000000..b39a06b
+index 0000000..de29d8f
 --- /dev/null
 +++ b/dm/host/controller_effects.m
 @@ -0,0 +1,153 @@
@@ -2017,7 +2017,7 @@ index c7559ca..1cbe064 100644
          pthread_attr_t a; pthread_attr_init(&a); pthread_attr_setstacksize(&a, 64u << 20);
 diff --git a/dm/host/gamepad_mac.m b/dm/host/gamepad_mac.m
 new file mode 100644
-index 0000000..7549e30
+index 0000000..bef2735
 --- /dev/null
 +++ b/dm/host/gamepad_mac.m
 @@ -0,0 +1,137 @@
@@ -2188,14 +2188,169 @@ index 1a63bd7..9fcffec 100644
  
  // ---------- Host gate dispatch ----------
 diff --git a/dm/host/hle.h b/dm/host/hle.h
-index 79fda3d..6ce5f39 100644
+index 79fda3d..2c0f26d 100644
 --- a/dm/host/hle.h
 +++ b/dm/host/hle.h
-@@ -77,4 +77,8 @@ uint64_t dm_audio_render_calls(void);   // Cumulative sound card callback count
- //   0x8c   Current act saved while in a rift (when the character is in a rift map w9 is replaced with 4 = Act V, writes x9; x8 always 0) dm_rift.c      0x6fa9d0 (branch gate: x8≠0 jumps to 0x6fa9d4, otherwise executes the original instruction and returns to 0x6fa9d4)
- //   0x8d   Extra mercenary equipment slots (mercenary + rift level ≥10 + belt / boots / gloves / ring / amulet: w0 is replaced with 1, writes x0; x8 always 0) dm_rift.c      0x64a34c (branch gate: x8≠0 jumps to 0x64a350, otherwise executes the original instruction and returns to 0x64a350)
- //   0x8e   Client-side check for the extra mercenary equipment slots (rift level ≥10 + the item is a belt / boots / gloves / ring / amulet: w1 is replaced with the item's own type number, writes x1; x8 always 0) dm_rift.c      0x3beb58 (branch gate: x8≠0 jumps to 0x3beb5c, otherwise executes the original instruction and returns to 0x3beb5c)
+@@ -1,80 +1,84 @@
+-// HLE common: register host implementations by Switch mangled name.
+-// Note the differences between Apple AAPCS64 and Switch: Apple requires the caller to extend <32-bit arguments (bool/char/short), Switch code does not extend ⇒
+-// such parameters are always declared as int/unsigned and truncated by ourselves. Variadic arguments go on the stack on Apple and in registers on Switch ⇒ variadic functions cannot use C's "..." directly.
+-#pragma once
+-#include "dm.h"
+-typedef struct { const char *name; void *fn; } hle_ent;
+-#define HLE(mangled, ret, cname, ...)                                                             \
+-    static ret cname(__VA_ARGS__);                                                                \
+-    __attribute__((used, section("__DATA,swhle"))) static const hle_ent hle_ent_##cname = {mangled, (void *)cname}; \
+-    static ret cname(__VA_ARGS__)
+-
+-typedef uint32_t Result;   // nn::Result: w0, 0 = success
+-#define RES_OK 0u
+-#define RES_FAIL 0x2A2u      // Generic failure (cut features such as networking uniformly return this)
+-
+-// Guest address → host object side table
+-void *objmap_get(const void *guest);
+-void objmap_put(const void *guest, void *host);
+-void *objmap_del(const void *guest);
+-uint64_t now_ns(void);
+-// This thread is doing the host's own heavy work (NVN submit / present: encoding Metal commands; on hardware that is the GPU's business and does not occupy a guest core). The same-core preemption approximation (hle_thread.c) does not count it as "running"
+-extern __thread _Atomic int dm_host_work;
+-uint64_t guest_ns(void);              // Guest clock (hle_os.c; does not advance while DM_TICK_HOLD is frozen)
+-int dm_detclock_enabled(void);
+-void dm_guest_clock_advanced(void);
+-uint64_t dm_guest_frame(void);        // Incremented each time the host presents a frame; unaffected by machine load
+-uint64_t dm_server_tick(void);        // In-run server tick; returns UINT64_MAX when not in a run or while DM_TICK_HOLD is frozen
+-void guest_clock_freeze(int on);
+-void guest_clock_freeze_for(int reason, int on);   // Freeze by reason (1 background, 2 system keyboard); see hle_os.c
+-
+-// Forced takeover: even if the SDK module has a definition, all references to that symbol at load time (JUMP_SLOT/GLOB_DAT/ABS64) are resolved to the host implementation.
+-// Used only for the service-layer nn:: (service clients of fs/oe/aoc/pctl...); the SDK's libc++ and nn::os internals do not go into this table.
+-// Every entry must state the reason for the takeover; an entry in the table that no module references makes loading report a failure and abort (a wrong list must fail loudly).
+-typedef struct { const char *name; void *fn; const char *why; } hle_force_ent;
+-#define HLE_FORCE(mangled, why, ret, cname, ...)                                                   \
+-    static ret cname(__VA_ARGS__);                                                                \
+-    __attribute__((used, section("__DATA,swforce"))) static const hle_force_ent hle_force_##cname = {mangled, (void *)cname, why}; \
+-    static ret cname(__VA_ARGS__)
+-// Same as above, but the implementation runs on this thread's big host stack (hle_bigstack.c): what is registered is a stub generated at compile time (the implementation's address goes into x16, then a jump to dm_bigstack_enter).
+-// For take-overs with large stack use (the file system sizes its buffers by PATH_MAX): a game thread's stack can be as small as 8 KB. Only register arguments are carried over (<= 8 integer, <= 8 floating point); not for variadic functions
+-#define HLE_FORCE_BIG(mangled, why, ret, cname, ...)                                               \
+-    static ret cname(__VA_ARGS__) __attribute__((used));                                          \
+-    extern const char cname##_bs[];                                                               \
+-    __asm__(".text\n.p2align 2\n.globl _" #cname "_bs\n.private_extern _" #cname "_bs\n_" #cname "_bs:\n" \
+-            "    adrp x16, _" #cname "@PAGE\n    add x16, x16, _" #cname "@PAGEOFF\n    b _dm_bigstack_enter\n"); \
+-    __attribute__((used, section("__DATA,swforce"))) static const hle_force_ent hle_force_##cname = {mangled, (const void *)cname##_bs, why}; \
+-    static ret cname(__VA_ARGS__)
+-
+-// Operation mode (0 handheld / 1 docked): owned by hle_oe.c, and the hid controller style follows it; the front end can switch it at runtime
+-int dm_opmode(void);
+-void dm_3d_scale_hot(int hot);      // When overheating, lower the 3D render scale to 0.70 (UI untouched); 0 = restore
+-ssize_t dm_data_pread(int fd, void *buf, size_t n, off_t off);   // Resource archive reads: zero-stripped archives with a ".holes" extent table are translated through the table (hle_fs.c)
+-void dm_data_note_fd(int fd, const char *hostpath);
+-int dm_overlay_file(const char *rel, char *out, size_t n);   // File in the overlay: DM_ROMFS_OVERLAY may have several layers (colon-separated, earlier ones take priority); look for <layer>/<rel> layer by layer, and on a hit write it to out and return 1 (hle_fs.c)
+-void dm_set_opmode(int m);          // On change, push notification 30 / 31 according to the switches the game has turned on
+-// Focus (1 foreground / 2 focus lost / 3 background): called by the front end on lifecycle changes; a change pushes notification 15
+-void dm_focus_set(int st);
+-// Audio pause / resume following the lifecycle (called by the front end on going to background / returning to foreground)
+-void dm_audio_suspend(int on);
+-uint64_t dm_audio_render_calls(void);   // Cumulative sound card callback count (the silent sink is not counted)
+-
+-// ---------- Host call number registry (a cut replaces a game-internal function entry with `svc #number; ret`, and the rewriter turns it into a host gate) ----------
+-// Horizon's SVC numbers only go up to 0x7F; 0x80 onward is reserved for host calls. New ones must be registered here and numbers must not repeat; dispatch is in hle_svc.c → svc_host_call.
+-//   No.    Purpose                                      File            Cut (main offset)
+-//   0x80   TACT BLTE block zlib decode → libdeflate           hle_tact.c      0x1b0ee60 (DecodeZlib entry)
+-//   0x81   Client command packet delivery (receive pump → server receive)         diag.c          0x5d3a88 (bl 0x632510 call site; forwarded as is by default, dropped under DM_C2S_REPLAY)
+-//   0x82   System-class client message delivery (receive pump → 0x6310b0)       diag.c          0x5d39c8 (bl 0x6310b0 call site; forwarded as is by default, dropped from the file's first tick on under DM_C2S_REPLAY)
+-//   0x83   Granny section per-block decode (section read 0x11f0110)           hle_granny.c    0x11f02dc (bl 0x11f4af0 call site; by default replaced with the pre-decoded candidate, forwarded as is if it does not check out)
+-//   0x84   Granny fixup table per-block decode (section read 0x11f07d0)       hle_granny.c    0x11f0914 (bl 0x11f4af0 call site; same as above)
+-//   0x85   Private skill HUD self-draw query (read-only, writes x8)          hle_tact.c      0x3e443c (branch gate: x8≠0 jumps to 0x3e4460, otherwise executes the original instruction and returns to 0x3e4440; touch-only private gate)
+-//   0x86   Private skill ground direction (forwards to the original 0x2b4ef8, then redirects by the right stick) hle_private_aim.c 0x2faf04 (bl 0x2b4ef8 call site; touch-only private gate)
+-//   0x87   Ground item appearance path (forwards to the original 0xa14dc4, then repoints by rule to the lit variant) dm_dropfilter.c 0x8fa590 (bl 0xa14dc4 call site; only items in mode 3 / 5 are changed, output in the x8 string)
+-//   0x88   Item landing drop sound (forwards to the original 0x470c20, then swaps tier-one items to a notification sound) dm_dropfilter.c 0x468f2c (bl 0x470c20 call site; writes x0 = sound id)
+-//   0x89   Rift exit rerouting (in a rift run the destination is replaced with the next map, writes x2 / x3 / x8) dm_rift.c      0x7cc1e0 (branch gate: x8≠0 jumps to 0x634000, otherwise executes the original instruction and returns to 0x7cc1e4)
+-//   0x8a   Spawn point for the player on run entry (forwards to the original 0x5596c0; replaced with a point next to the waypoint when entering in town)  dm_townwp.c     0x5d8040 (bl 0x5596c0 call site; in the player join function 0x5d7f70)
+-//   0x8b   Drop point for the corpse on run entry (same as above, the same point as the player gets)                      dm_townwp.c     0x5d8400 (bl 0x5596c0 call site; in the same function)
+-//   0x8c   Current act saved while in a rift (when the character is in a rift map w9 is replaced with 4 = Act V, writes x9; x8 always 0) dm_rift.c      0x6fa9d0 (branch gate: x8≠0 jumps to 0x6fa9d4, otherwise executes the original instruction and returns to 0x6fa9d4)
+-//   0x8d   Extra mercenary equipment slots (mercenary + rift level ≥10 + belt / boots / gloves / ring / amulet: w0 is replaced with 1, writes x0; x8 always 0) dm_rift.c      0x64a34c (branch gate: x8≠0 jumps to 0x64a350, otherwise executes the original instruction and returns to 0x64a350)
+-//   0x8e   Client-side check for the extra mercenary equipment slots (rift level ≥10 + the item is a belt / boots / gloves / ring / amulet: w1 is replaced with the item's own type number, writes x1; x8 always 0) dm_rift.c      0x3beb58 (branch gate: x8≠0 jumps to 0x3beb5c, otherwise executes the original instruction and returns to 0x3beb5c)
 -enum { SVC_HOST_TACT_ZLIB = 0x80, SVC_HOST_C2S_DELIVER = 0x81, SVC_HOST_C2S_SYS = 0x82, SVC_HOST_GRANNY_A = 0x83, SVC_HOST_GRANNY_B = 0x84, SVC_HOST_PRIVATE_SKILL_RENDER = 0x85, SVC_HOST_PRIVATE_SKILL_AIM = 0x86, SVC_HOST_GROUND_ASSET = 0x87, SVC_HOST_DROP_SOUND = 0x88, SVC_HOST_RIFT_EXIT = 0x89, SVC_HOST_JOIN_SPAWN = 0x8a, SVC_HOST_JOIN_CORPSE = 0x8b, SVC_HOST_SAVE_ACT = 0x8c, SVC_HOST_MERC_SLOT = 0x8d, SVC_HOST_MERC_SLOT_CL = 0x8e };   // 0x87: fetch the model path for ground items (dm_dropfilter.c drop light)   // 0x83/0x84: Granny per-block decode call sites (hle_granny.c)
++// HLE common: register host implementations by Switch mangled name.
++// Note the differences between Apple AAPCS64 and Switch: Apple requires the caller to extend <32-bit arguments (bool/char/short), Switch code does not extend ⇒
++// such parameters are always declared as int/unsigned and truncated by ourselves. Variadic arguments go on the stack on Apple and in registers on Switch ⇒ variadic functions cannot use C's "..." directly.
++#pragma once
++#include "dm.h"
++typedef struct { const char *name; void *fn; } hle_ent;
++#define HLE(mangled, ret, cname, ...)                                                             \
++    static ret cname(__VA_ARGS__);                                                                \
++    __attribute__((used, section("__DATA,swhle"))) static const hle_ent hle_ent_##cname = {mangled, (void *)cname}; \
++    static ret cname(__VA_ARGS__)
++
++typedef uint32_t Result;   // nn::Result: w0, 0 = success
++#define RES_OK 0u
++#define RES_FAIL 0x2A2u      // Generic failure (cut features such as networking uniformly return this)
++
++// Guest address → host object side table
++void *objmap_get(const void *guest);
++void objmap_put(const void *guest, void *host);
++void *objmap_del(const void *guest);
++uint64_t now_ns(void);
++// This thread is doing the host's own heavy work (NVN submit / present: encoding Metal commands; on hardware that is the GPU's business and does not occupy a guest core). The same-core preemption approximation (hle_thread.c) does not count it as "running"
++extern __thread _Atomic int dm_host_work;
++uint64_t guest_ns(void);              // Guest clock (hle_os.c; does not advance while DM_TICK_HOLD is frozen)
++int dm_detclock_enabled(void);
++void dm_guest_clock_advanced(void);
++uint64_t dm_guest_frame(void);        // Incremented each time the host presents a frame; unaffected by machine load
++uint64_t dm_server_tick(void);        // In-run server tick; returns UINT64_MAX when not in a run or while DM_TICK_HOLD is frozen
++void guest_clock_freeze(int on);
++void guest_clock_freeze_for(int reason, int on);   // Freeze by reason (1 background, 2 system keyboard); see hle_os.c
++
++// Forced takeover: even if the SDK module has a definition, all references to that symbol at load time (JUMP_SLOT/GLOB_DAT/ABS64) are resolved to the host implementation.
++// Used only for the service-layer nn:: (service clients of fs/oe/aoc/pctl...); the SDK's libc++ and nn::os internals do not go into this table.
++// Every entry must state the reason for the takeover; an entry in the table that no module references makes loading report a failure and abort (a wrong list must fail loudly).
++typedef struct { const char *name; void *fn; const char *why; } hle_force_ent;
++#define HLE_FORCE(mangled, why, ret, cname, ...)                                                   \
++    static ret cname(__VA_ARGS__);                                                                \
++    __attribute__((used, section("__DATA,swforce"))) static const hle_force_ent hle_force_##cname = {mangled, (void *)cname, why}; \
++    static ret cname(__VA_ARGS__)
++// Same as above, but the implementation runs on this thread's big host stack (hle_bigstack.c): what is registered is a stub generated at compile time (the implementation's address goes into x16, then a jump to dm_bigstack_enter).
++// For take-overs with large stack use (the file system sizes its buffers by PATH_MAX): a game thread's stack can be as small as 8 KB. Only register arguments are carried over (<= 8 integer, <= 8 floating point); not for variadic functions
++#define HLE_FORCE_BIG(mangled, why, ret, cname, ...)                                               \
++    static ret cname(__VA_ARGS__) __attribute__((used));                                          \
++    extern const char cname##_bs[];                                                               \
++    __asm__(".text\n.p2align 2\n.globl _" #cname "_bs\n.private_extern _" #cname "_bs\n_" #cname "_bs:\n" \
++            "    adrp x16, _" #cname "@PAGE\n    add x16, x16, _" #cname "@PAGEOFF\n    b _dm_bigstack_enter\n"); \
++    __attribute__((used, section("__DATA,swforce"))) static const hle_force_ent hle_force_##cname = {mangled, (const void *)cname##_bs, why}; \
++    static ret cname(__VA_ARGS__)
++
++// Operation mode (0 handheld / 1 docked): owned by hle_oe.c, and the hid controller style follows it; the front end can switch it at runtime
++int dm_opmode(void);
++void dm_3d_scale_hot(int hot);      // When overheating, lower the 3D render scale to 0.70 (UI untouched); 0 = restore
++ssize_t dm_data_pread(int fd, void *buf, size_t n, off_t off);   // Resource archive reads: zero-stripped archives with a ".holes" extent table are translated through the table (hle_fs.c)
++void dm_data_note_fd(int fd, const char *hostpath);
++int dm_overlay_file(const char *rel, char *out, size_t n);   // File in the overlay: DM_ROMFS_OVERLAY may have several layers (colon-separated, earlier ones take priority); look for <layer>/<rel> layer by layer, and on a hit write it to out and return 1 (hle_fs.c)
++void dm_set_opmode(int m);          // On change, push notification 30 / 31 according to the switches the game has turned on
++// Focus (1 foreground / 2 focus lost / 3 background): called by the front end on lifecycle changes; a change pushes notification 15
++void dm_focus_set(int st);
++// Audio pause / resume following the lifecycle (called by the front end on going to background / returning to foreground)
++void dm_audio_suspend(int on);
++uint64_t dm_audio_render_calls(void);   // Cumulative sound card callback count (the silent sink is not counted)
++
++// ---------- Host call number registry (a cut replaces a game-internal function entry with `svc #number; ret`, and the rewriter turns it into a host gate) ----------
++// Horizon's SVC numbers only go up to 0x7F; 0x80 onward is reserved for host calls. New ones must be registered here and numbers must not repeat; dispatch is in hle_svc.c → svc_host_call.
++//   No.    Purpose                                      File            Cut (main offset)
++//   0x80   TACT BLTE block zlib decode → libdeflate           hle_tact.c      0x1b0ee60 (DecodeZlib entry)
++//   0x81   Client command packet delivery (receive pump → server receive)         diag.c          0x5d3a88 (bl 0x632510 call site; forwarded as is by default, dropped under DM_C2S_REPLAY)
++//   0x82   System-class client message delivery (receive pump → 0x6310b0)       diag.c          0x5d39c8 (bl 0x6310b0 call site; forwarded as is by default, dropped from the file's first tick on under DM_C2S_REPLAY)
++//   0x83   Granny section per-block decode (section read 0x11f0110)           hle_granny.c    0x11f02dc (bl 0x11f4af0 call site; by default replaced with the pre-decoded candidate, forwarded as is if it does not check out)
++//   0x84   Granny fixup table per-block decode (section read 0x11f07d0)       hle_granny.c    0x11f0914 (bl 0x11f4af0 call site; same as above)
++//   0x85   Private skill HUD self-draw query (read-only, writes x8)          hle_tact.c      0x3e443c (branch gate: x8≠0 jumps to 0x3e4460, otherwise executes the original instruction and returns to 0x3e4440; touch-only private gate)
++//   0x86   Private skill ground direction (forwards to the original 0x2b4ef8, then redirects by the right stick) hle_private_aim.c 0x2faf04 (bl 0x2b4ef8 call site; touch-only private gate)
++//   0x87   Ground item appearance path (forwards to the original 0xa14dc4, then repoints by rule to the lit variant) dm_dropfilter.c 0x8fa590 (bl 0xa14dc4 call site; only items in mode 3 / 5 are changed, output in the x8 string)
++//   0x88   Item landing drop sound (forwards to the original 0x470c20, then swaps tier-one items to a notification sound) dm_dropfilter.c 0x468f2c (bl 0x470c20 call site; writes x0 = sound id)
++//   0x89   Rift exit rerouting (in a rift run the destination is replaced with the next map, writes x2 / x3 / x8) dm_rift.c      0x7cc1e0 (branch gate: x8≠0 jumps to 0x634000, otherwise executes the original instruction and returns to 0x7cc1e4)
++//   0x8a   Spawn point for the player on run entry (forwards to the original 0x5596c0; replaced with a point next to the waypoint when entering in town)  dm_townwp.c     0x5d8040 (bl 0x5596c0 call site; in the player join function 0x5d7f70)
++//   0x8b   Drop point for the corpse on run entry (same as above, the same point as the player gets)                      dm_townwp.c     0x5d8400 (bl 0x5596c0 call site; in the same function)
++//   0x8c   Current act saved while in a rift (when the character is in a rift map w9 is replaced with 4 = Act V, writes x9; x8 always 0) dm_rift.c      0x6fa9d0 (branch gate: x8≠0 jumps to 0x6fa9d4, otherwise executes the original instruction and returns to 0x6fa9d4)
++//   0x8d   Extra mercenary equipment slots (mercenary + rift level ≥10 + belt / boots / gloves / ring / amulet: w0 is replaced with 1, writes x0; x8 always 0) dm_rift.c      0x64a34c (branch gate: x8≠0 jumps to 0x64a350, otherwise executes the original instruction and returns to 0x64a350)
++//   0x8e   Client-side check for the extra mercenary equipment slots (rift level ≥10 + the item is a belt / boots / gloves / ring / amulet: w1 is replaced with the item's own type number, writes x1; x8 always 0) dm_rift.c      0x3beb58 (branch gate: x8≠0 jumps to 0x3beb5c, otherwise executes the original instruction and returns to 0x3beb5c)
 +//   0x91   Season source A enabled override（call-site gate；enabled 时按日历强制 +0xB0 布尔）hle_season.c  0x607d4（bl 0xa26fc0 call site；离线会话源查询恒 0，门拿真实单例代调官方 setter）
 +//   0x92   Season source B enabled override（同族，读 [0x114ace0]）hle_season.c  0x607f8（bl 0xa26fc0 call site；同上）
 +//   0x93   Season source C enabled override（尾调用点门；enabled 时按日历强制 +0xB0 布尔）hle_season.c  0x4a5f68（b 0xa26fc0 尾调用点；官方 merge-publish 内循环：读记录 +0x64/+0x68 当前值→[+0x70] 目标→setter 按当前值重刷，离线=0 会抹掉已置的 1——参考项目 gates.tsv 第三 season_source 行，2026-11-12 审计补）
@@ -3268,10 +3423,10 @@ index 367779a..9eccbc0 100644
 +#endif
 diff --git a/dm/host/hle_season.c b/dm/host/hle_season.c
 new file mode 100644
-index 0000000..4945b43
+index 0000000..34d0195
 --- /dev/null
 +++ b/dm/host/hle_season.c
-@@ -0,0 +1,431 @@
+@@ -0,0 +1,557 @@
 +// 赛季轮换 v1（kb/20 §6 定稿实现；gameplay 分支 2026-11-11）：
 +//   目标（用户定案）：每月 1 号新赛季，2026-11 = S1。
 +//   离线防进不去 = patch_nso.py D3 块的世界装载直补丁（0x492f6c bl GameIsSeasonal → mov w0,#0，恒走普通装载；
@@ -3280,7 +3435,10 @@ index 0000000..4945b43
 +//   面板 = 纯展示（SeasonPanel v3，无编辑控件、不写配置）；dm-season.tsv 整个废除，
 +//   设备上残留的旧 tsv（含 enabled=0 / origin 改动）一律不读——配置不可能被翻掉。
 +//   赛季号 = 今天相对 2026-11-01 的整月差 + 1（日不计——每月 1 号换季），clamp ≥1。
-+//   主题映射：theme = ((S-1) mod 21) + 1 → P74_ItemPassive_SeasonTheme_%03u（kb/16：21 个官方主题）。
++//   主题映射 v4（2026-11-13 定案）：官方主题顺序循环 12 个（S14→S15→…→S22→S24→S25→S27，排除无
++//   Perk 旗标的 S23/S26），theme_idx = (S-1) mod 12；主题载体 = Perk.CommunityEvent 15 键
++//   （argv blob 注入 + 赛季源 setter 按键值，参考项目全语义移植；位表/键序 = .so merge_bind
++//   0xb4b40 位展开 + 0x2dae18 主题卡 +0x08 + 0x2d97e8 键串表，2026-11-13 指令级核对）。
 +//   svc 0x8f（SVC_HOST_SEASON_ISSEASONAL，GameIsSeasonal 0x4c8df0 入口，v2 真赛季核心）：宿主条件应答——
 +//         当前已验证英雄是赛季角色 → w0=1（全链 55 消费者按赛季走：掉落/任务门/UI 对拍族 0x4b430 等）；
 +//         否则 x8=0 走原查询（离线 TLS 链本就 0）。世界装载位点已直补丁恒 0（防早退卡加载，kb/20 §3.2），
@@ -3293,8 +3451,11 @@ index 0000000..4945b43
 +//       enabled（恒 1，不可关闭）→ 幂等盖位；
 +//       位已置（本轮盖的或存档带的）→ 放行（不反锁）；
 +//       否则 → x8=0 走原校验。
-+//   D 层探针（只读）：生效赛季变化时 0x748450(0x1d, name) 解析主题 SNO 号；施放待 PowerCreateBuff
-+//   脚本帧 ABI 接入（kb/17 §6.4，宿主直调不可行）。
++//   Perk argv 注入（main.c guest_main，nnMain 前）：dm_season_perk_argv() 拼当期主题 15 键 blob 挂
++//   argv[1]（boot 冻结——换季主题下次启动生效，参考项目 SetHostArgv 同语义：每进程一次）。
++//   rollover 官方严格（2026-11-13 定案）：旁路表持久化 $DM_SAVE/dm-season-heroes.tsv（id/season/rolled），
++//   已 rolled 英雄进门不重盖位（修此前纯内存态「重启即失忆、重盖位」缺口）——跨季英雄永久转非赛季，
++//   同一主题 12 个月后再次轮到时需新建英雄（官方语义）。
 +//   边界：不写角色 Digest season_created（kb/17 §3.4 未解）；档案对象 X+0x34 不碰（门已放行，无需第二半）。
 +// | Season rotation v1 (kb/20 §6). Monthly rotation: a new season on the 1st of every month, 2026-11 = S1.
 +// | Everything is hardwired (2026-11-12): the season cannot be turned off, S1 starts at 2026-11-01,
@@ -3309,8 +3470,49 @@ index 0000000..4945b43
 +#include <string.h>
 +#include <time.h>
 +
-+#define THEME_COUNT 21                      // P74_ItemPassive_SeasonTheme_001..021（kb/16 §7b）
-+#define THEME_NAME_OFF 0x748450UL           // 名字→id 解析器（kb/18 §3；0x1d = 名字域参数）
++// ---- v4 主题系统：官方主题顺序循环 12 个（用户定案 2026-11-13）----
++// bit = 主题卡表 .so 0x2dae18 的 +0x08（12 主题恰好占满 b0-b11；S22=b1 双键）。
++static const struct season_theme {
++    int off;                 // 官方赛季号
++    unsigned bit;            // Perk 位（主题卡 +0x08）
++    const char *zh, *keys, *desc;
++} k_themes[] = {
++    {14, 0x200, "贪婪赛季",     "DoubleTreasureGoblins",             "宝藏哥布林双倍刷新"},
++    {15, 0x400, "赫拉迪姆之赐", "DoubleBountyBags",                  "悬赏礼盒双倍"},
++    {16, 0x800, "威仪赛季",     "RoyalGrandeur",                     "全员白送皇家气派之戒"},
++    {17, 0x010, "噩梦赛季",     "LegacyOfNightmares",                "全员白送噩梦遗产双戒"},
++    {18, 0x004, "三神教赛季",   "TriunesWill",                       "地面周期刷三神教法阵"},
++    {19, 0x008, "永恒冲突",     "Pandemonium",                       "万魔殿连杀奖励"},
++    {20, 0x001, "禁忌档案馆",   "KanaiPowers",                       "卡奈魔盒三槽自由混搭"},
++    {21, 0x020, "风暴试炼",     "TrialsOfTempests",                  "周期元素风暴附身"},
++    {22, 0x002, "往昔之影",     "ShadowClones+FourthKanaisCubeSlot", "神龛召唤暗影分身 + 魔盒第 4 槽"},
++    {24, 0x100, "虚灵记忆",     "EthrealItems",                      "21 件虚灵武器"},
++    {25, 0x080, "地狱领主",     "SoulShards",                        "7 枚灵魂碎片"},
++    {27, 0x040, "光明的召唤",   "SanctifiedItems",                   "天使坩埚圣化传奇"},
++};
++#define THEME_SEQ_COUNT ((int)(sizeof k_themes / sizeof k_themes[0]))
++static const struct season_theme *g_boot_theme;    // 启动冻结（argv 注入时定，会话内不变）
++
++// 15 个 Perk 键（.so 0x2d97e8 键串表逐字复刻——官方拼写就是 Ethreal，勿改）。
++// 键序 = 门值序 = merge_bind 位展开（.so 0xb4b40 逐条实证）：
++// {mode, 0, b0, b1, b1, b2, b3, b4, b5, b6, b8, b7, b9, b10, b11}（b1 双键、b7/b8 相对键序互换）。
++static const char *const k_perk_keys[15] = {
++    "Perk.CommunityEventEnabled=", "Perk.CommunityEventSeasonOnly=",
++    "Perk.CommunityEventKanaiPowers=", "Perk.CommunityEventShadowClones=",
++    "Perk.CommunityEventFourthKanaisCubeSlot=", "Perk.CommunityEventTriunesWill=",
++    "Perk.CommunityEventPandemonium=", "Perk.CommunityEventLegacyOfNightmares=",
++    "Perk.CommunityEventTrialsOfTempests=", "Perk.CommunityEventSanctifiedItems=",
++    "Perk.CommunityEventEthrealItems=", "Perk.CommunityEventSoulShards=",
++    "Perk.CommunityEventDoubleTreasureGoblins=", "Perk.CommunityEventDoubleBountyBags=",
++    "Perk.CommunityEventRoyalGrandeur=",
++};
++// 主题位 → 15 键值（objs[i] ↔ val[i]，与 merge_bind gate 展开 + publish_bool 匹配同序）
++static void perk_gate_vals(const struct season_theme *t, int out[15]) {
++    int b[12];
++    for (int i = 0; i < 12; i++) b[i] = (t->bit >> i) & 1;
++    int v[15] = {1, 0, b[0], b[1], b[1], b[2], b[3], b[4], b[5], b[6], b[8], b[7], b[9], b[10], b[11]};
++    memcpy(out, v, sizeof v);
++}
 +#define HERO_LOOKUP_OFF 0x520360UL          // 英雄号→记录（kb/17 §1.3）
 +#define HERO_FLAG_OFF 0x12cUL               // 记录 +0x12C：bit1=赛季、bit0=专家（kb/17 §1.3 读侧）
 +#define SEASON_ORIGIN_Y 2026                // S1 起点（用户定案 2026-11-12 写死）：2026-11-01
@@ -3334,14 +3536,57 @@ index 0000000..4945b43
 +static _Atomic int g_cur_hero;              // 最近一次过 0x90 门的英雄号（0=无）
 +static _Atomic int g_cur_hero_seasonal;     // 该英雄是否赛季角色（0x8f 应答依据）
 +
-+// 旁路表：hero_id → season（进局时收录；换季 rollover 依据）。卸 mod 即失忆（存档裸档无戳）——
-+// 真持久赛季戳 = Digest.season_created 字段号解码（kb/17 §3.4，P5 线）。
++// 旁路表：hero_id → season（进局时收录；换季 rollover 依据）。v4 起持久化 dm-season-heroes.tsv
++//（官方严格 rollover）；卸 mod 后 tsv 失联、存档裸档无戳——真持久赛季戳 = Digest.season_created
++// 字段号解码（kb/17 §3.4，P5 线）。
 +#define HERO_MAX 512
 +static struct { uint32_t id; int season; int rolled; } g_heroes[HERO_MAX];
 +static int g_nheroes;
 +static pthread_mutex_t g_hero_mu = PTHREAD_MUTEX_INITIALIZER;
 +static struct { int mode_rotate, base; int oy, om; } cfg;
 +static int cfg_loaded;
++
++// 赛季源快照（season_slots_fill 每拍刷新；门 0x91/0x92/0x93 按进门 x0 匹配取主题键值）
++static pthread_mutex_t g_src_mu = PTHREAD_MUTEX_INITIALIZER;
++static uint64_t g_src_objs[15];
++static int g_src_vals[15];
++static int g_src_n;
++
++// ---- 旁路表持久化（官方严格 rollover，2026-11-13）：$DM_SAVE/dm-season-heroes.tsv（id\tseason\trolled）----
++static int hero_find(uint32_t id);        // 定义在后（旁路表小节）
++static void heroes_save_locked(void) {   // 调用方持 g_hero_mu；tmp+rename 原子替换
++    const char *dir = getenv("DM_SAVE");
++    if (!dir || !*dir) return;
++    char path[512], tmp[540];
++    snprintf(path, sizeof path, "%s/dm-season-heroes.tsv", dir);
++    snprintf(tmp, sizeof tmp, "%s.tmp", path);
++    FILE *f = fopen(tmp, "w");
++    if (!f) return;
++    for (int i = 0; i < g_nheroes; i++)
++        fprintf(f, "%u\t%d\t%d\n", g_heroes[i].id, g_heroes[i].season, g_heroes[i].rolled);
++    fclose(f);
++    rename(tmp, path);
++}
++static void heroes_load(void) {
++    const char *dir = getenv("DM_SAVE");
++    if (!dir || !*dir) return;
++    char path[512];
++    snprintf(path, sizeof path, "%s/dm-season-heroes.tsv", dir);
++    FILE *f = fopen(path, "r");
++    if (!f) return;
++    pthread_mutex_lock(&g_hero_mu);
++    unsigned id; int s, r;
++    while (g_nheroes < HERO_MAX && fscanf(f, "%u\t%d\t%d", &id, &s, &r) == 3) {
++        int i = hero_find(id);
++        if (i < 0) { i = g_nheroes++; g_heroes[i].id = id; }
++        g_heroes[i].season = s;
++        g_heroes[i].rolled = r ? 1 : 0;
++    }
++    int n = g_nheroes;
++    pthread_mutex_unlock(&g_hero_mu);
++    fclose(f);
++    LOG("赛季轮换：旁路表载入 %d 英雄（dm-season-heroes.tsv）", n);
++}
 +
 +// ---- 配置 ----
 +// 全部写死（用户定案 2026-11-12）：不可关闭 + 月更轮换 + S1 = 2026-11-01。
@@ -3353,6 +3598,7 @@ index 0000000..4945b43
 +    atomic_store(&g_enabled, 1);            // 赛季不可关闭：宿主唯一真源，门线程的 enabled 分支恒走
 +    atomic_store(&g_season, 1);             // 生效号由 frame 拍按日历写入
 +    cfg_loaded = 1;
++    heroes_load();
 +    LOG("赛季轮换：不可关闭·月更轮换 S1=2026-11-01（写死，无配置文件）");
 +}
 +
@@ -3378,6 +3624,32 @@ index 0000000..4945b43
 +    int diff = (t.tm_year + 1900 - cfg.oy) * 12 + (t.tm_mon + 1 - cfg.om);   // 整月差，日不计
 +    if (diff < 0) diff = 0;
 +    return diff + 1;
++}
++
++// ---- Perk argv（main.c 在 nnMain 前调一次；boot 冻结主题——换季下次启动生效，参考项目同语义）----
++char *dm_season_perk_argv(void) {
++    if (strcmp(dm_main_build(), DM_D3_BUILD)) return NULL;   // 仅 D3 档案（与 dm_season_frame 同守卫；main.c 通用入口）
++    static pthread_once_t once = PTHREAD_ONCE_INIT;
++    pthread_once(&once, config_load);
++    static char blob[560];          // 15 键 Σ(len+2)=533 + 裕量
++    static int done;
++    if (done) return blob;
++    int season = season_effective();
++    g_boot_theme = &k_themes[(season - 1) % THEME_SEQ_COUNT];
++    int v[15];
++    perk_gate_vals(g_boot_theme, v);
++    char *p = blob;
++    for (int i = 0; i < 15; i++) {
++        size_t n = strlen(k_perk_keys[i]);
++        memcpy(p, k_perk_keys[i], n);
++        p[n] = v[i] ? '1' : '0';
++        p[n + 1] = i < 14 ? ' ' : '\0';
++        p += n + 2;
++    }
++    done = 1;
++    LOG("Perk argv：S%d 主题 %s（官方S%d）· %s → %#x：%s", season, g_boot_theme->zh,
++        g_boot_theme->off, g_boot_theme->desc, g_boot_theme->bit, blob);
++    return blob;
 +}
 +
 +// ---- 英雄门处理器（hle_svc.c svc_dispatch → host_stubs.c svc_host_call；调用号 hle.h SVC_HOST_SEASON_HERO）----
@@ -3432,18 +3704,25 @@ index 0000000..4945b43
 +    if (num == SVC_HOST_SEASON_SRC_A || num == SVC_HOST_SEASON_SRC_B || num == SVC_HOST_SEASON_SRC_C) {
 +        // 赛季源 setter 调用点门（0x607d4/0x607f8 bl 形 + 0x4a5f68 尾调用 b 形，参考项目 season_source 三路同形）：
 +        // 进门寄存器 = 0xa26fc0 的原参数（x0=目标单例, x1=查询bool, x2=mode）。
-+        // enabled 时强制 w1=1，代调官方 setter（+0xB0 字节写+变更位+通知链表全语义；离线查询恒 0，
-+        // 不接管则 enabled 被官方代码写 0——宿主侧直填单例会与之拉锯，这就是门形的价值：拿真实 x0）。
++        // 调用点门块（site_gate 模板）无回退路径——恒跳原 bl 的下一条 → 宿主必须代调官方 setter
++        //（+0xB0 字节写+变更位+通知链表全语义）。
++        // v4 主题化（= 参考 season_source_publish_bool 语义）：x0 匹配 season_slots_fill 快照 → 命中 i
++        // 强制 w1=该键主题值（0x92 位点必中 ptr[1]/SeasonOnly=0——参考项目同样恒发 0，非赛季限定模式）；
++        // 未命中（如 0x91 位点传容器对象本身，参考项目不覆写它）→ 原查询 bool 透传代调。
 +        static uint8_t *base;
 +        if (!base) {
 +            for (int i = 0; i < g_nmod; i++)
 +                if (!strcmp(g_mod[i].name, "main") && !strcmp(g_mod[i].build_id, DM_D3_BUILD)) base = g_mod[i].base;
 +        }
 +        if (base && regs[0] && dm_guest_heap_readable(regs[0] + SEASON_SLOT_OFF, 1)) {
-+            int force = atomic_load(&g_enabled) ? 1 : (int)(regs[1] & 1);
-+            ((void (*)(uint64_t, int, int))(base + SEASON_SET_BYTE_OFF))(regs[0], force, (int)regs[2]);
-+            if (force) { static uint32_t n; if ((n = (n + 1) % 60) == 1)
-+                LOG("赛季源门 svc %#x：单例 %#llx enabled 已按日历置 1（原查询 %u）", num, (unsigned long long)regs[0], (unsigned)(regs[1] & 1)); }
++            int val = (int)(regs[1] & 1);
++            pthread_mutex_lock(&g_src_mu);
++            for (int i = 0; i < g_src_n; i++)
++                if (g_src_objs[i] == regs[0]) { val = g_src_vals[i]; break; }
++            pthread_mutex_unlock(&g_src_mu);
++            ((void (*)(uint64_t, int, int))(base + SEASON_SET_BYTE_OFF))(regs[0], val, (int)regs[2]);
++            { static uint32_t n; if ((n = (n + 1) % 60) == 1)
++                LOG("赛季源门 svc %#x：单例 %#llx 置 %d（原查询 %u）", num, (unsigned long long)regs[0], val, (unsigned)(regs[1] & 1)); }
 +        }
 +        regs[0] = 0;   // setter 返回 void
 +        return 1;
@@ -3471,7 +3750,6 @@ index 0000000..4945b43
 +    uint32_t hero_id = (uint32_t)regs[0];
 +    uint64_t hero = ((uint64_t(*)(uint32_t))(base + HERO_LOOKUP_OFF))(hero_id);
 +    if (!hero || !dm_guest_heap_readable(hero + HERO_FLAG_OFF, 4)) { regs[8] = 0; return 1; }   // 查不到记录：原校验
-+    uint32_t *f = (uint32_t *)(hero + HERO_FLAG_OFF);
 +    pthread_mutex_lock(&g_hero_mu);
 +    int hi = hero_find(hero_id);
 +    int known_season = hi >= 0 ? g_heroes[hi].season : -1;
@@ -3481,9 +3759,10 @@ index 0000000..4945b43
 +        hero_flag_write(hero_id, 0);        // 官方 rollover：旧赛季角色进门即转非赛季（此后本门答 0 = 原校验）
 +        pthread_mutex_lock(&g_hero_mu);
 +        g_heroes[hi].rolled = 1;
++        heroes_save_locked();
 +        pthread_mutex_unlock(&g_hero_mu);
-+    } else if (enabled) {
-+        hero_flag_write(hero_id, 1);        // 幂等盖位（当期/首见英雄）
++    } else if (enabled && !(hi >= 0 && rolled)) {
++        hero_flag_write(hero_id, 1);        // 幂等盖位（当期/首见英雄；已 rolled 不重盖——官方严格，重启不失忆）
 +    }
 +    if (hero_flag_read(hero_id) & 2) {          // 赛季英雄（本轮盖的或存档带的）→ 放行 + 记当期
 +        regs[0] = 1;
@@ -3493,7 +3772,7 @@ index 0000000..4945b43
 +        pthread_mutex_lock(&g_hero_mu);
 +        int i2 = hero_find(hero_id);
 +        if (i2 < 0 && g_nheroes < HERO_MAX) { i2 = g_nheroes++; g_heroes[i2].id = hero_id; g_heroes[i2].rolled = 0; }
-+        if (i2 >= 0 && g_heroes[i2].season < 1) g_heroes[i2].season = season > 0 ? season : 1;   // 首见按当期收录
++        if (i2 >= 0 && g_heroes[i2].season < 1) { g_heroes[i2].season = season > 0 ? season : 1; heroes_save_locked(); }   // 首见按当期收录（落盘）
 +        pthread_mutex_unlock(&g_hero_mu);
 +    } else {
 +        regs[8] = 0;                            // 非赛季英雄：原校验
@@ -3503,19 +3782,12 @@ index 0000000..4945b43
 +    return 1;
 +}
 +
-+// ---- D 层主题 SNO 探针（只读；生效赛季变化时打一条）----
-+static void season_theme_probe(int season) {
-+    static uint8_t *base;
-+    if (!base) {
-+        for (int i = 0; i < g_nmod; i++)
-+            if (!strcmp(g_mod[i].name, "main") && !strcmp(g_mod[i].build_id, DM_D3_BUILD)) base = g_mod[i].base;
-+        if (!base) return;
-+    }
-+    int theme = (season - 1) % THEME_COUNT + 1;
-+    char name[64];
-+    snprintf(name, sizeof name, "P74_ItemPassive_SeasonTheme_%03u", theme);
-+    int sno = ((int(*)(uint32_t, const char *))(base + THEME_NAME_OFF))(0x1d, name);
-+    LOG("赛季主题探针：S%d → %s → SNO %d（施放待 PowerCreateBuff 帧接入，kb/17 §6.4）", season, name, sno);
++// ---- 主题日志（生效赛季变化时打一条；argv 主题 boot 冻结，换季下次启动生效）----
++static void season_theme_log(int season) {
++    const struct season_theme *t = &k_themes[(season - 1) % THEME_SEQ_COUNT];
++    LOG("赛季主题：S%d → %s（官方S%d）· %s [%s]", season, t->zh, t->off, t->desc, t->keys);
++    if (g_boot_theme && t != g_boot_theme)
++        LOG("赛季主题：argv 已冻结为 %s（官方S%d），换季主题下次启动生效", g_boot_theme->zh, g_boot_theme->off);
 +}
 +
 +// 客体线程每个控制器读进来一次（hle_hid.c fill()），内部 1 秒节流。
@@ -3547,12 +3819,16 @@ index 0000000..4945b43
 +        *(uint32_t *)(st_obj + SEASON_SLOT_OFF) = want_st;
 +        LOG("赛季轮换：会话槽已填 num=%u state=1(InProgress)（原 num=%u state=%u）", want_num, num_now, st_now);
 +    }
-+    // 赛季源对象族全置位（安卓参考项目 season_source_merge_bind 同构复刻）：
-+    // 容器 base+0x114acd0 → slot0=*(+8) slot1=*(+0x18) + 链表 *(container) 遍历 13 节点
-+    // （节点 +表[i]*8 → 对象 → +0x70 解引用）= 全部 15 个源对象 → 官方 setter 逐个置 enabled=1。
-+    // 对象指针运行时解析（此前猜 [0x114acd8]/[0x114ace8] 静态单例的教训：时机与数量都不全）。
++    // 赛季源对象族按主题键值置位（参考项目 season_source_merge_bind 同构复刻，v4 主题化）：
++    // 容器 base+0x114acd0 → ptr0=*(+8)（键0 Enabled）ptr1=*(+0x18)（键1 SeasonOnly）+ 链表 13 节点
++    // （节点 +表[i]*8 → 对象 → +0x70 解引用）= 15 个源对象 ↔ 15 键；idx 表 = .so 0x568ec 前 13 项
++    // 逐字核对（2026-11-13；第 14 项 0x40 未被 merge_bind 使用）。val 序 = merge_bind 位展开
++    //（perk_gate_vals）。objs/val 同步发布快照 g_src_*，供门 0x91/0x92/0x93 按 x0 匹配。
 +    static const uint32_t src_tbl[13] = {0xc, 0xe, 0xf, 0xa, 0xb, 0x9, 0xd, 0x13, 0x10, 0x11, 0x6, 0x7, 0x8};
 +    void (*setter)(uint64_t, int, int) = (void (*)(uint64_t, int, int))(base + SEASON_SET_BYTE_OFF);
++    const struct season_theme *t = g_boot_theme ? g_boot_theme : &k_themes[(cur - 1) % THEME_SEQ_COUNT];
++    int vals[15];
++    perk_gate_vals(t, vals);
 +    // 护栏放宽：容器/节点/对象都在 guest 镜像段（堆护栏曾全误杀 → 0 对象）。
 +    // 指针由游戏构造（官方 merge_bind 同款裸读裸调），非空即可。
 +    uint64_t objs[15]; int n = 0;
@@ -3572,12 +3848,16 @@ index 0000000..4945b43
 +    }
 +    int done = 0;
 +    for (int i = 0; i < n; i++)
-+        if (guest_ptr_ok(objs[i])) { setter(objs[i], 1, 3); done++; }
++        if (guest_ptr_ok(objs[i])) { setter(objs[i], vals[i], 3); done++; }
++    pthread_mutex_lock(&g_src_mu);
++    for (int i = 0; i < n; i++) { g_src_objs[i] = objs[i]; g_src_vals[i] = vals[i]; }
++    g_src_n = n;
++    pthread_mutex_unlock(&g_src_mu);
 +    static int logged;
 +    if (logged < 3) {
 +        uint64_t ready_p = *(uint64_t *)(base + SEASON_CHANGED_FLAG_OFF);
-+        LOG("赛季源：容器解析 %d 对象（容器=%llx 对象0=%llx 对象1=%llx ready_p=%llx），setter 全置 1",
-+            done, *(uint64_t *)(base + SEASON_SRC_CONTAINER_OFF), o0, o1, ready_p);
++        LOG("赛季源：容器解析 %d 对象按主题 %s（官方S%d）置键值（容器=%llx 对象0=%llx 对象1=%llx ready_p=%llx）",
++            done, t->zh, t->off, *(uint64_t *)(base + SEASON_SRC_CONTAINER_OFF), o0, o1, ready_p);
 +        logged++;
 +    }
 +}
@@ -3685,8 +3965,8 @@ index 0000000..4945b43
 +    if (cur != last) {
 +        atomic_store(&g_season, cur);
 +        LOG("赛季轮换：生效赛季 S%d（%s）", cur, cfg.mode_rotate ? "月更轮换" : "固定");
-+        if (atomic_load(&g_enabled)) season_theme_probe(cur);
-+        // 官方 rollover 模拟（kb/20 §9.5）：换季即刻把表内旧赛季英雄清位转非赛季
++        if (atomic_load(&g_enabled)) season_theme_log(cur);
++        // 官方 rollover 模拟（kb/20 §9.5）：换季即刻把表内旧赛季英雄清位转非赛季（v4 落盘）
 +        if (atomic_load(&g_enabled) && cur > 1) {
 +            int converted = 0;
 +            pthread_mutex_lock(&g_hero_mu);
@@ -3696,6 +3976,7 @@ index 0000000..4945b43
 +                    g_heroes[i].rolled = 1;
 +                    converted++;
 +                }
++            if (converted) heroes_save_locked();
 +            pthread_mutex_unlock(&g_hero_mu);
 +            if (converted) LOG("赛季轮换：rollover → %d 个旧赛季角色转非赛季", converted);
 +        }
@@ -3755,22 +4036,64 @@ index 96d2674..579e8ae 100644
      pthread_mutex_lock(&g_se_lock); uint32_t wh = se_find(ev); pthread_mutex_unlock(&g_se_lock);
      if (!wh) { hle_bind_system_event(ev, 0); pthread_mutex_lock(&g_se_lock); wh = se_find(ev); pthread_mutex_unlock(&g_se_lock); }
 diff --git a/dm/host/host_stubs.c b/dm/host/host_stubs.c
-index ef7f336..0e58809 100644
+index ef7f336..3dc966d 100644
 --- a/dm/host/host_stubs.c
 +++ b/dm/host/host_stubs.c
-@@ -1,6 +1,7 @@
- // Hook points left behind by the game-specific modules split out of d2r-mobile (diagnostic tick gates, TACT/Granny, UI screen, touch UI interaction, ...):
- // the generic host still calls them, and they get empty implementations here. When a feature is redone for this game, replace the matching stub with the real thing.
- #include "dm.h"
-+#include "hle.h"
- #include "front.h"
- 
- void crash_sample_self(void) {}
-@@ -24,4 +25,12 @@ uint64_t dm_game_res(int docked) { return front_game_res(docked); }
- int dm_screen_real(int *w, int *h) { *w = *h = 0; return 0; }
- void dm_ui_rect(int *x, int *y, int *w, int *h) { *x = *y = *w = *h = 0; }
- // svc #0x80.. host gates: only D2R's rewrite rules create them; they should not appear in this game's build output
+@@ -1,27 +1,36 @@
+-// Hook points left behind by the game-specific modules split out of d2r-mobile (diagnostic tick gates, TACT/Granny, UI screen, touch UI interaction, ...):
+-// the generic host still calls them, and they get empty implementations here. When a feature is redone for this game, replace the matching stub with the real thing.
+-#include "dm.h"
+-#include "front.h"
+-
+-void crash_sample_self(void) {}
+-void inflate_bench_maybe(void) {}
+-void ticks_install(void) {}
+-void target_rank_install(void) {}
+-void dm_padmode_boot(void) {}
+-void dm_prof_mark(const char *seg) { (void)seg; }
+-void dm_prof_add(int id, uint64_t ns, uint64_t bytes) { (void)id; (void)ns; (void)bytes; }
+-void tact_chk_init(void) {}
+-void tact_prefetch_start(const char *outdir) { (void)outdir; }
+-void tact_prefetch_stop(void) {}
+-void granny_prof_dump(void) {}
+-void uimsg_subscribe(void (*fn)(const char *cat, const char *act, const char *arg)) { (void)fn; }
+-void dm_ui_text_entered(const char *text) { (void)text; }
+-int dm_custom_lang_explicit(void) { return 0; }
+-int dm_ingame_now(void) { return 0; }
+-void dm_uiscreen_res_reread(void) {}
+-// Game resolution: whatever the front end gives (Mac window / iOS screen), without D2R's UI-screen rewriting
+-uint64_t dm_game_res(int docked) { return front_game_res(docked); }
+-int dm_screen_real(int *w, int *h) { *w = *h = 0; return 0; }
+-void dm_ui_rect(int *x, int *y, int *w, int *h) { *x = *y = *w = *h = 0; }
+-// svc #0x80.. host gates: only D2R's rewrite rules create them; they should not appear in this game's build output
 -uint64_t svc_host_call(int num, uint64_t *regs) { (void)regs; die("svc_host_call：本作没有宿主门 svc #%#x", num); }
++// Hook points left behind by the game-specific modules split out of d2r-mobile (diagnostic tick gates, TACT/Granny, UI screen, touch UI interaction, ...):
++// the generic host still calls them, and they get empty implementations here. When a feature is redone for this game, replace the matching stub with the real thing.
++#include "dm.h"
++#include "hle.h"
++#include "front.h"
++
++void crash_sample_self(void) {}
++void inflate_bench_maybe(void) {}
++void ticks_install(void) {}
++void target_rank_install(void) {}
++void dm_padmode_boot(void) {}
++void dm_prof_mark(const char *seg) { (void)seg; }
++void dm_prof_add(int id, uint64_t ns, uint64_t bytes) { (void)id; (void)ns; (void)bytes; }
++void tact_chk_init(void) {}
++void tact_prefetch_start(const char *outdir) { (void)outdir; }
++void tact_prefetch_stop(void) {}
++void granny_prof_dump(void) {}
++void uimsg_subscribe(void (*fn)(const char *cat, const char *act, const char *arg)) { (void)fn; }
++void dm_ui_text_entered(const char *text) { (void)text; }
++int dm_custom_lang_explicit(void) { return 0; }
++int dm_ingame_now(void) { return 0; }
++void dm_uiscreen_res_reread(void) {}
++// Game resolution: whatever the front end gives (Mac window / iOS screen), without D2R's UI-screen rewriting
++uint64_t dm_game_res(int docked) { return front_game_res(docked); }
++int dm_screen_real(int *w, int *h) { *w = *h = 0; return 0; }
++void dm_ui_rect(int *x, int *y, int *w, int *h) { *x = *y = *w = *h = 0; }
++// svc #0x80.. host gates: only D2R's rewrite rules create them; they should not appear in this game's build output
 +uint64_t svc_host_call(int num, uint64_t *regs) {
 +    if (num == SVC_HOST_SEASON_HERO || num == SVC_HOST_SEASON_ISSEASONAL
 +        || num == SVC_HOST_SEASON_SRC_A || num == SVC_HOST_SEASON_SRC_B
@@ -3782,7 +4105,7 @@ index ef7f336..0e58809 100644
 +}
 diff --git a/dm/host/lan_discovery_apple.m b/dm/host/lan_discovery_apple.m
 new file mode 100644
-index 0000000..fb3a375
+index 0000000..5e04e73
 --- /dev/null
 +++ b/dm/host/lan_discovery_apple.m
 @@ -0,0 +1,98 @@
@@ -4032,6 +4355,18 @@ index e237a24..2fe8d62 100644
      // Patch area before the base (patch_off < 0): W ends at the end of data (FILE_IMAGE_LEN); bss and the key page are zero pages from vm_allocate and are not in the executable
      int front = m->patch_off < 0;
      if (z0 + zw != (front ? m->file_image_len : (uint64_t)m->patch_off) || (z0 & 0x3FFF) || (zw & 0x3FFF) || (z1 & 0x3FFF) || ((uintptr_t)x0 & 0x3FFF) || ((uintptr_t)w & 0x3FFF) || ((uintptr_t)x1 & 0x3FFF))
+diff --git a/dm/host/main.c b/dm/host/main.c
+index 6ff3a44..f401687 100644
+--- a/dm/host/main.c
++++ b/dm/host/main.c
+@@ -29,6 +29,7 @@ static void guest_main(void) {
+     dm_prof_mark("② SDK 初始化（nnosInitialize → nninitStartup）");
+     run_module_inits();   // rtld callback B: each module's DT_INIT (global constructors)
+     dm_prof_mark("③ 各模块 init_array");
++    { extern char *dm_season_perk_argv(void); char *perk = dm_season_perk_argv(); if (perk && g_argc < 63) g_argv[g_argc++] = perk; }   // 赛季主题 Perk 参数 → argv[1]（hle_season.c v4；boot 冻结，nnMain 前一次）
+     ((fnp)req("_ZN2nn2os11SetHostArgcEi"))((void *)(uint64_t)g_argc);
+     ((fnp)req("_ZN2nn2os11SetHostArgvEPPc"))(g_argv);
+     { void dm_guest_spawn_selftest(void); dm_guest_spawn_selftest(); }   // DM_GUEST_SPAWN_TEST self-test of host-created guest threads (hle_guestthread.c)
 diff --git a/dm/host/thread.c b/dm/host/thread.c
 index 4d22880..0be9257 100644
 --- a/dm/host/thread.c

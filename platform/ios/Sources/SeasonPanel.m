@@ -9,7 +9,21 @@ static int dm_season_number(NSInteger oy, NSInteger om) {
     return (int)MAX(diff, 0) + 1;
 }
 
+// 与 hle_season.c 同式的 12 主题表（v4，2026-11-13）：官方 S14→…→S22→S24→S25→S27 顺序循环
+//（排除无 Perk 旗标的 S23/S26）；theme_idx = (S-1) mod 12。
+static const int kThemeOff[12] = {14, 15, 16, 17, 18, 19, 20, 21, 22, 24, 25, 27};
+static NSString *const kThemeZh[12] = {
+    @"贪婪赛季", @"赫拉迪姆之赐", @"威仪赛季", @"噩梦赛季", @"三神教赛季", @"永恒冲突",
+    @"禁忌档案馆", @"风暴试炼", @"往昔之影", @"虚灵记忆", @"地狱领主", @"光明的召唤",
+};
+static NSString *const kThemeDesc[12] = {
+    @"宝藏哥布林双倍刷新", @"悬赏礼盒双倍", @"全员白送皇家气派之戒", @"全员白送噩梦遗产双戒",
+    @"地面周期刷三神教法阵", @"万魔殿连杀奖励", @"卡奈魔盒三槽自由混搭", @"周期元素风暴附身",
+    @"神龛召唤暗影分身 + 魔盒第 4 槽", @"21 件虚灵武器", @"7 枚灵魂碎片", @"天使坩埚圣化传奇",
+};
+
 // 赛季面板 = 纯展示（用户定案 2026-11-12）：S1 写死 2026-11-01、月更轮换、不可关闭，无任何可编辑项。
+// v4（2026-11-13）：主题 = 官方 12 主题顺序循环；跨季英雄转非赛季（官方严格 rollover）。
 // 面板不写任何配置；宿主侧同样写死（dm-season.tsv 整个废除）。
 @implementation SeasonPanel
 
@@ -61,10 +75,12 @@ static int dm_season_number(NSInteger oy, NSInteger om) {
 
 - (void)refresh {
     int s = dm_season_number(2026, 11);
+    int t = (s - 1) % 12;
     UILabel *cur = (UILabel *)[self viewWithTag:100];
     cur.text = [NSString stringWithFormat:@"当前生效 S%d", s];
     UILabel *desc = (UILabel *)[self viewWithTag:101];
-    desc.text = @"自动轮换（不可关闭）：每月 1 号新赛季\n2026-11 当月 = S1，已写死";
+    desc.text = [NSString stringWithFormat:@"主题：%@（官方S%d）· %@\n每月 1 号换季（跨季英雄转非赛季）；主题自下次启动生效",
+                 kThemeZh[t], kThemeOff[t], kThemeDesc[t]];
 }
 
 - (void)close { [self removeFromSuperview]; }
