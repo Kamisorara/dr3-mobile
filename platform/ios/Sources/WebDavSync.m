@@ -97,7 +97,9 @@ static BOOL g_cfgEnabled;
 static double g_cfgBootTimeout = 5.0, g_cfgPoll = 2.0, g_cfgDebounce = 3.0;
 
 static NSDictionary *dw_load_config(void) {
-    NSString *p = [g_docDir stringByAppendingPathComponent:@"webdav.json"];
+    // 自包含取路径（不依赖 g_docDir：boot_start 里配置加载先于 dw_paths_init，用全局量会把路径拼成 nil）
+    NSString *p = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES)[0]
+                   stringByAppendingPathComponent:@"webdav.json"];
     NSData *d = [NSData dataWithContentsOfFile:p];
     if (!d) return nil;
     NSError *err = nil;
