@@ -1,5 +1,5 @@
 diff --git a/dm/gfx/nvn/hle_nvn.c b/dm/gfx/nvn/hle_nvn.c
-index d4c3531..de5f4f5 100644
+index d4c3531..ddf5bd9 100644
 --- a/dm/gfx/nvn/hle_nvn.c
 +++ b/dm/gfx/nvn/hle_nvn.c
 @@ -52,6 +52,7 @@ static uint8_t g_unimpl_seen[NVN_NFUNC];
@@ -267,7 +267,34 @@ index d4c3531..de5f4f5 100644
      "nvnCommandBufferSetShaderScratchMemory",
      "nvnCommandBufferPushDebugGroupDynamic",
      "nvnCommandBufferPopDebugGroup",
-@@ -1218,6 +1329,9 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
+@@ -973,6 +1084,11 @@ NVN(nvnQueueAcquireTexture, NVNqueueAcquireTextureResult, NVNqueue *q, NVNwindow
+ // Frame boundary: on each present, print / write to disk the call count of each NVN function for this frame
+ static uint64_t g_prev[NVN_NFUNC];
+ static FILE *g_tsv;
++// 300 帧周期 stderr 摘要总开关（DM_NVN_SUMMARY，默认关，d2r 纪律：默认只打里程碑和错误）：
++// 计时/帧间隔/上屏/翻译/线程策略/预排布/帧 N/内存读数这一族每 300 帧的汇总行，排查性能时在
++// env.txt 加 DM_NVN_SUMMARY=1。逐帧明细走 DM_NVN_TSV 文件，不受此开关影响。
++// nvn_mtl.m（显示节拍）与 nvn_metalfx_spatial.h（metalfx completed）同用，原型就近 extern 声明。
++int nvn_summary_on(void) { static int on = -1; if (on < 0) on = !!getenv("DM_NVN_SUMMARY"); return on; }
+ static void dump_frame(void) {
+     static int inited, nframes = 3, calls = 1;
+     if (!inited) {
+@@ -994,12 +1110,12 @@ static void dump_frame(void) {
+     }
+     if (g_tsv) fflush(g_tsv);
+     if (g_frame <= (uint64_t)nframes) LOG("[nvn] %s %llu：%u 个函数 %llu 次调用 |%s", g_frame ? "帧" : "初始化", g_frame, nfn, total, line);
+-    else if (g_frame % 300 == 0) LOG("[nvn] 帧 %llu：%u 个函数 %llu 次调用", g_frame, nfn, total);
++    else if (g_frame % 300 == 0 && nvn_summary_on()) LOG("[nvn] 帧 %llu：%u 个函数 %llu 次调用", g_frame, nfn, total);
+     g_frame++; cs_dump();
+     // Every 300 frames read resident memory and hand it to the graphics layer to print the memory readout line (mtl_mem_stat, low frequency, capped). Memory watchdog: when resident memory exceeds the cap, log a failure and exit on its own. On by default only on the Mac host (24 GB: runaway host memory
+     // drags the whole machine into a kernel panic, which happened twice with other programs on the same machine), or set for tests with DM_MEM_CAP_GB=<integer>; the player's iOS app has no cap (exiting before the system kills it is pointless and only adds another kind of crash)
+     if (g_frame % 300 == 0) { task_vm_info_data_t vi; mach_msg_type_number_t cnt = TASK_VM_INFO_COUNT;
+-        if (task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&vi, &cnt) == KERN_SUCCESS) { unsigned long long mb = (unsigned long long)(vi.phys_footprint >> 20); void mtl_mem_stat(unsigned long long, unsigned long long); mtl_mem_stat(g_frame, mb);
++        if (task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&vi, &cnt) == KERN_SUCCESS) { unsigned long long mb = (unsigned long long)(vi.phys_footprint >> 20); void mtl_mem_stat(unsigned long long, unsigned long long); if (nvn_summary_on()) mtl_mem_stat(g_frame, mb);
+             static long cap = -1; if (cap < 0) { const char *e = getenv("DM_MEM_CAP_GB"); cap = e ? atol(e) : DM_MEM_CAP_DEFAULT_GB; }
+             if (cap > 0 && mb > (unsigned long long)cap * 1024) { LOG("【红】内存看门狗：常驻 %llu MB 超过上限 %ld GB（帧 %llu），自行退出", mb, cap, (unsigned long long)g_frame); _exit(86); } } }
+     dm_guest_frame_tick();   // Deterministic guest clock (DM_DETCLOCK, host hle_os.c): each present advances a fixed step; a no-op when not enabled
+@@ -1218,6 +1334,9 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
              if (pproc) trow(f, "@proc_cpu_ms", (pc - pproc) / 1e6); pproc = pc;
              trow(f, "@call_ms", (t0 - g_t0_ns) / 1e6);
          }
@@ -277,7 +304,16 @@ index d4c3531..de5f4f5 100644
          trow(f, "@passes", (double)(ps - prev_pass)); trow(f, "@draws", (double)(dr - prev_draw));
          static uint64_t pl, pst, pf, pudc; uint64_t l, st, fu; mtl_bw(&l, &st, &fu);
          trow(f, "@rt_load_mb", (l - pl) / 1048576.0); trow(f, "@rt_store_mb", (st - pst) / 1048576.0); trow(f, "@pass_full_rw", (double)(fu - pf));
-@@ -1435,7 +1549,14 @@ NVN_NOPROTO(nvnProgramSetShadersExt, NVNboolean, NVNprogram *p, int n, const sha
+@@ -1265,7 +1384,7 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
+         uint64_t g0, g1; if (frame_rec() && mtl_gpu_span(f - 8, &g0, &g1)) { trow(f - 8, "@gpu_beg_ms", (g0 - g_t0_ns) / 1e6); trow(f - 8, "@gpu_end_ms", (g1 - g_t0_ns) / 1e6); } }
+     prev_in = t0; prev_pass = ps; prev_draw = dr;
+     dump_frame();
+-    if (g_frame % TWIN == 0) tsummary(g_frame);
++    if (g_frame % TWIN == 0 && nvn_summary_on()) tsummary(g_frame);
+     mtl_set_frame(g_frame);
+     // Real-device semantics: present only enqueues and returns immediately; this frame's display time is scheduled by the pacer, and the texture can be acquired again only at "display time + one period" (blocking in AcquireTexture)
+     uint64_t period = present_period(o), now = dm_detclock_enabled() ? guest_ns() : now_ns();
+@@ -1435,7 +1554,14 @@ NVN_NOPROTO(nvnProgramSetShadersExt, NVNboolean, NVNprogram *p, int n, const sha
  // Singular / combined forms → plural / separate forms; state the replay layer does not have yet (conditional render, depth bounds, ...) is logged once and drawing continues (better to over-draw than to drop).
  #include "../tex/nvn_deswizzle.h"
  
@@ -293,7 +329,7 @@ index d4c3531..de5f4f5 100644
  // Combined texture handle (texture id | sampler id << 20) is recorded into the texture slot as is: the replay layer takes the texture from the low 20 bits and the sampler from the high bits (nvn_mtl.m NVN_RB_SAMPT)
  NVN(nvnCommandBufferBindTexture, void, NVNcommandBuffer *c, NVNshaderStage st, int i, NVNtextureHandle h) { uint64_t v = (uint64_t)h; bind_handles(c, OP_BIND_TEX, st, i, 1, &v); }
  // "Deferred" binding: the GPU reads the handles h points to when it executes this command, not at recording. The per-texture binding of The Legend of Zelda: Breath of the Wild's engine (main+0xec2e64) always uses it,
-@@ -1573,4 +1694,12 @@ int nvn_host_signal_sync(void *nvnsync) {
+@@ -1573,4 +1699,12 @@ int nvn_host_signal_sync(void *nvnsync) {
      if (!o || o->magic != MAGIC('S', 'Y', 'N', 'C')) return -1;
      o->fence = 0; o->fenced = 1; return 0;
  }
@@ -370,10 +406,10 @@ index 0000000..06df5cf
 +}
 diff --git a/dm/gfx/nvn/nvn_metalfx_spatial.h b/dm/gfx/nvn/nvn_metalfx_spatial.h
 new file mode 100644
-index 0000000..54cdfbe
+index 0000000..c30851c
 --- /dev/null
 +++ b/dm/gfx/nvn/nvn_metalfx_spatial.h
-@@ -0,0 +1,150 @@
+@@ -0,0 +1,152 @@
 +// Real MetalFX Spatial, isolated from guest render-target identity and shaders.
 +// Owned by the presentation thread. Reuse a slot only after its present ticket
 +// completes: Metal 4 does not retain its resources until GPU completion.
@@ -384,6 +420,8 @@ index 0000000..54cdfbe
 +#include <stdatomic.h>
 +#include <math.h>
 +#include <stdio.h>
++
++extern int nvn_summary_on(void);   // hle_nvn.c：300 帧周期 stderr 摘要开关（DM_NVN_SUMMARY，默认关）
 +
 +typedef struct { NSUInteger x,y,width,height; } nvn_fx_rect;
 +typedef void (^nvn_fx_resource_hook)(id<MTLResource> resource);
@@ -508,7 +546,7 @@ index 0000000..54cdfbe
 +            uint64_t ns=(uint64_t)((completed.GPUEndTime-completed.GPUStartTime)*1e9);
 +            uint64_t total=atomic_fetch_add(&self->_gpuSpanNs,ns)+ns;
 +            uint64_t count=atomic_fetch_add(&self->_completed,1)+1;
-+            if(count==1 || count%300==0)fprintf(stderr,"[dm] [metalfx] completed=%llu average-command-GPU-span=%.3fms (staging+FX command, not isolated scaler cost)\n",(unsigned long long)count,(double)total/count/1e6);
++            if(count==1 || (count%300==0 && nvn_summary_on()))fprintf(stderr,"[dm] [metalfx] completed=%llu average-command-GPU-span=%.3fms (staging+FX command, not isolated scaler cost)\n",(unsigned long long)count,(double)total/count/1e6);
 +        }
 +    }];
 +    [command commit];[_queue4 waitForEvent:_bridge value:finished];return _outputs[slot];
@@ -537,7 +575,7 @@ index ac77b3c..0756c83 100644
  int mtl_wait(uint64_t fence, uint64_t timeout_ns);   // Returns 1 when the GPU has completed up to fence, 0 on timeout
  void mtl_finish(void);                               // Wait for all submitted commands to complete
 diff --git a/dm/gfx/nvn/nvn_mtl.m b/dm/gfx/nvn/nvn_mtl.m
-index 10c5eac..e76ee31 100644
+index 10c5eac..52e5593 100644
 --- a/dm/gfx/nvn/nvn_mtl.m
 +++ b/dm/gfx/nvn/nvn_mtl.m
 @@ -21,6 +21,8 @@
@@ -1314,6 +1352,15 @@ index 10c5eac..e76ee31 100644
      if (atomic_load_explicit(&g_origin_ll, memory_order_relaxed)) { uv[1] += uv[3]; uv[3] = -uv[3]; }   // lower-left origin: the window image is stored bottom-up
      [g_present_args setAddress:g_present_uv[uv_i].gpuAddress atIndex:0];
      [en setViewport:vp]; [en setRenderPipelineState:g_blit_pso];
+@@ -6287,7 +6570,7 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
+         static uint64_t lead_n;
+         leads[lead_n % 300] = (target_ts - CACurrentMediaTime()) * 1000.0; e2e[lead_n % 300] = g_link_it_tin > 0 ? (target_ts - g_link_it_tin) * 1000.0 : 0;
+         lead_n++;
+-        if (lead_n % 300 == 0) {
++        if (lead_n % 300 == 0 && nvn_summary_on()) {   // 显示节拍 300 拍摘要：挂 DM_NVN_SUMMARY（默认关，hle_nvn.c 定义）
+             double a[300]; memcpy(a, leads, sizeof a);
+             for (int i = 1; i < 300; i++) { double v = a[i]; int j = i - 1; while (j >= 0 && a[j] > v) { a[j + 1] = a[j]; j--; } a[j + 1] = v; }
+             double b[300]; memcpy(b, e2e, sizeof b);
 diff --git a/dm/gfx/nvn/nvn_obj.h b/dm/gfx/nvn/nvn_obj.h
 index fa314c4..d99e1c4 100644
 --- a/dm/gfx/nvn/nvn_obj.h
@@ -3423,10 +3470,10 @@ index 367779a..9eccbc0 100644
 +#endif
 diff --git a/dm/host/hle_season.c b/dm/host/hle_season.c
 new file mode 100644
-index 0000000..34d0195
+index 0000000..2d6cfa8
 --- /dev/null
 +++ b/dm/host/hle_season.c
-@@ -0,0 +1,557 @@
+@@ -0,0 +1,562 @@
 +// 赛季轮换 v1（kb/20 §6 定稿实现；gameplay 分支 2026-11-11）：
 +//   目标（用户定案）：每月 1 号新赛季，2026-11 = S1。
 +//   离线防进不去 = patch_nso.py D3 块的世界装载直补丁（0x492f6c bl GameIsSeasonal → mov w0,#0，恒走普通装载；
@@ -3790,6 +3837,11 @@ index 0000000..34d0195
 +        LOG("赛季主题：argv 已冻结为 %s（官方S%d），换季主题下次启动生效", g_boot_theme->zh, g_boot_theme->off);
 +}
 +
++// 读回诊断总开关（DM_SEASON_DIAG，默认关）：赛季三件套（槽诊断/闸读回/创建检查读回）是逆向期的
++// 持续观察日志，特性验收（kb/20 §10.3）后默认安静；排查赛季门时在 env.txt 加 DM_SEASON_DIAG=1 打开。
++// 懒缓存一次（d2r 纪律：开关启动读一次，热路径不 getenv）。
++static int season_diag(void) { static int on = -1; if (on < 0) on = !!getenv("DM_SEASON_DIAG"); return on; }
++
 +// 客体线程每个控制器读进来一次（hle_hid.c fill()），内部 1 秒节流。
 +// 会话赛季槽直填（A 阶段，kb/20 §9.7）：官方"联网同步一次→离线玩一季"的落点就是这两个槽，
 +// 离线无人重算 → 宿主按日历直写即粘住。号=A[0x114ac60]+0xB0，状态=B[0x114ac68]+0xB0=1(InProgress)。
@@ -3802,9 +3854,9 @@ index 0000000..34d0195
 +    }
 +    uint64_t num_obj = *(uint64_t *)(base + SEASON_NUM_OBJ_OFF);
 +    uint64_t st_obj = *(uint64_t *)(base + SEASON_STATE_OBJ_OFF);
-+    static int diag;   // 每 15 拍打一次原始状态（单例可能延迟构造，持续观察）
++    static int diag;   // 每 15 拍打一次原始状态（单例可能延迟构造，持续观察）；DM_SEASON_DIAG 关时不打
 +    int do_diag = ++diag >= 15; if (do_diag) diag = 0;
-+    if (do_diag || (num_obj && st_obj))
++    if (season_diag() && (do_diag || (num_obj && st_obj)))
 +        LOG("赛季槽诊断：num_obj=%llx st_obj=%llx 值=[num=%u st=%u]（期望 num=%d st=1）", 
 +            num_obj, st_obj,
 +            num_obj ? *(uint32_t *)(num_obj + SEASON_SLOT_OFF) : 0,
@@ -3900,7 +3952,7 @@ index 0000000..34d0195
 +    }
 +    *(uint32_t *)(base + 0x18627a4UL) = 1;
 +    static int diag;
-+    if (++diag >= 60) {   // ~1 秒一拍（fill 60Hz），读回整条判定链
++    if (season_diag() && ++diag >= 60) {   // ~1 秒一拍（fill 60Hz），读回整条判定链；DM_SEASON_DIAG（默认关）不开则不读不打
 +        diag = 0;
 +        uint64_t ready_p = *(uint64_t *)(base + SEASON_CHANGED_FLAG_OFF);
 +        uint32_t ready_v = guest_ptr_ok(ready_p) ? *(volatile uint8_t *)ready_p : 0xffffffff;

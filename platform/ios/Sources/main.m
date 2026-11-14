@@ -5,6 +5,7 @@
 #include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
+#include <sys/utsname.h>
 #include <unistd.h>
 #include "game_profile.h"   // game profile constants (the RomFS marker path)
 
@@ -93,6 +94,16 @@ static int boot_env(void) {
     NSString *log = [doc stringByAppendingPathComponent:@"log.txt"], *prev = [doc stringByAppendingPathComponent:@"log.prev.txt"];
     [fm removeItemAtPath:prev error:nil]; [fm moveItemAtPath:log toPath:prev error:nil];
     if (freopen(log.fileSystemRepresentation, "w", stderr)) setvbuf(stderr, NULL, _IOLBF, 0);
+    // 日志头四件套（d2r 同款，报问题时最先要知道的）：版本(构建) 机型 系统时间 一行交代
+    {   utsname un; uname(&un);
+        NSOperatingSystemVersion os = NSProcessInfo.processInfo.operatingSystemVersion;
+        NSDictionary *pl = NSBundle.mainBundle.infoDictionary;
+        NSDateFormatter *df = [[NSDateFormatter alloc] init];
+        df.dateFormat = @"yyyy-MM-dd HH:mm:ss"; df.locale = [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"];
+        fprintf(stderr, "boot: DR3Mobile %s(%s) %s iOS %ld.%ld.%ld %s\n",
+                [pl[@"CFBundleShortVersionString"] UTF8String] ?: "?", [pl[@"CFBundleVersion"] UTF8String] ?: "?",
+                un.machine, (long)os.majorVersion, (long)os.minorVersion, (long)os.patchVersion,
+                [df stringFromDate:NSDate.date].UTF8String); }
     // Environment switch files (for on-device diagnostics: a sideloaded app cannot be given environment variables from outside): one KEY=VALUE per line, # starts a comment; Documents/env.txt takes precedence over dm/env.txt in the bundle (put there by build_ipa.sh's DM_ENV_FILE)
     for (NSString *ef in @[[doc stringByAppendingPathComponent:@"env.txt"], [[res stringByAppendingPathComponent:@"dm"] stringByAppendingPathComponent:@"env.txt"]]) {
         NSString *txt = [NSString stringWithContentsOfFile:ef encoding:NSUTF8StringEncoding error:nil];
