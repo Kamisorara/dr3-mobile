@@ -4443,7 +4443,7 @@ index 4d22880..0be9257 100644
          // Derivation: pillar inner edge x = screen height * limit / 2, so for every delta added to the limit the inner edge moves outward by screen height * delta / 2 on each side. Measured on Mac 1952x900, the soft edge is <= 30 pixels wide
          // (with limit = screen aspect ratio, columns 0–20 at the right edge fade from black to bright, and it disappears once the limit is pushed to 2.4) => need delta >= 2 * 30 / 900 ~ 0.067; 0.15 is taken (about 67 pixels outward per side), leaving more than double the margin.
 diff --git a/dm/tools/patch_nso.py b/dm/tools/patch_nso.py
-index 837700c..539cc3f 100644
+index 837700c..8c70acc 100644
 --- a/dm/tools/patch_nso.py
 +++ b/dm/tools/patch_nso.py
 @@ -680,7 +680,12 @@ for a in sorted(kinds):
@@ -4478,7 +4478,7 @@ index 837700c..539cc3f 100644
  params = PARAMS.get(BUILD_ID, [])
  for oa, wa, ob_, wb, r, key, why in params:
      for o, w0 in ((oa, wa), (ob_, wb)):
-@@ -847,6 +861,155 @@ for oa, wa, ob_, wb, r, key, why in params:
+@@ -847,6 +861,186 @@ for oa, wa, ob_, wb, r, key, why in params:
      tmp = 16 if r != 16 else 17
      emit(STUR(tmp, 31, -16)); emit(MRS_TPIDRRO(r)); emit_slot_addr(r, tmp, key); emit(LDRX(r, r)); emit(LDUR(tmp, 31, -16)); emit(B(here(), oa + 4))
      struct.pack_into('<I', IMG, oa, B(oa, start)); struct.pack_into('<I', IMG, ob_, NOP); stat('param')
@@ -4496,6 +4496,37 @@ index 837700c..539cc3f 100644
 +        struct.pack_into('<I', IMG, o, new)
 +        # cuts.tsv 的两列 hex 是字节序列（structck bytes.fromhex 后与映像原样比对），不是字值
 +        cuts.append((o, struct.pack('<I', old).hex(), struct.pack('<I', new).hex(), why, '仅宿主')); stat('d3_param_cut')
++
++    # D3 长会话 OOM 堆扩容（2026-11-14 真机 4h07m 闪退；_scratch/d3_longsession_oom_re.md 全链逆向）：
++    #   引擎内存全定长——0xa20 引导主 StandardAllocator 768 MiB（AllocateAddressRegion+Pages+Initialize，整块 boot 一次性提交），
++    #   0xa36b50（boot 0xa36af0→0xa36b08 与 AllocOrDie 0xa36e20 懒初始化双路径）从主 SA 切 512 MiB 通用块建子分配器
++    #   （块+0x190 起、可用 = 块−0x190，0x1FFFFE70）= AllocOrDie 默认源（[0x1a50690 紧急管理器]+0x58）。
++    #   4h 会话后通用堆 1,618,912 字节连续块分配失败：重试 + 紧急回调链（[+0x60] 子系统紧急释放）全败 →
++    #   错误码 0x82 "Out of Memory Error / Unable to allocate %d bytes"（上报器 0xa2ad70，码 ≥0x80 → bl 0xa2c440 陷阱自杀）。
++    #   主 SA boot 一次性提交 → 内部耗尽对 alias 总量（全程平台 2.50 GB）不可见，外部无任何先兆。
++    #   游戏从不读 GetInfo(6/7)（sdk 仅 1 处 svc 0x29、22 个调用者无一用 Total/Used；main 无直接 svc）→ 无压力反馈回路可修，
++    #   唯一杠杆 = 扩容定长堆。主 SA 768→1152、通用块 512→896（×1.75）：SA 预算 896+128MiB 初始化块+杂项 ≈ 边距 88 MiB 与原版一致；
++    #   alias 新平台 ≈2.88 GB < 4 GiB。DM_D3_HEAP_PATCH=0 恢复原值；DM_D3_MAIN_HEAP_MB/DM_D3_GENERAL_HEAP_MB 可调（64 KiB 倍数）。
++    if os.environ.get('DM_D3_HEAP_PATCH', '1') != '0':
++        main_mb = int(os.environ.get('DM_D3_MAIN_HEAP_MB', 1152)); general_mb = int(os.environ.get('DM_D3_GENERAL_HEAP_MB', 896))
++        assert main_mb >= 768 and general_mb >= 512 and main_mb * 16 <= 0xFFFF and general_mb * 16 <= 0xFFFF \
++            and general_mb * 1048576 + 0x8000000 + 0x5800000 <= main_mb * 1048576, '堆档位不合法（主/通用堆过小或超出 movz 表达范围）'
++        movz_wd = lambda rd, kb_: 0x52A00000 | (kb_ << 5) | rd   # movz wd,#kb_,lsl 12（64 KiB 倍数）
++        hi16 = ((general_mb * 1048576 - 0x190) >> 16) & 0xFFFF   # 子分配器可用 = 通用块 − 0x190；lo16 恒 0xFE70（64 KiB 对齐下不变）
++        assert ((general_mb * 1048576 - 0x190) & 0xFFFF) == 0xFE70, '通用块尺寸导致 lo16 变化，需另补 0xa36b70'
++        for o, old, new, why in (
++            (0xa64, 0x320407e1, movz_wd(1, main_mb * 16), f'主 SA 地址区尺寸 ORR w1,#0x30000000 → movz w1,#{main_mb}MiB（长会话 OOM 扩容）'),
++            (0xa74, 0x320407e1, movz_wd(1, main_mb * 16), f'主 SA 提交页尺寸 ORR w1,#0x30000000 → movz w1,#{main_mb}MiB'),
++            (0xa90, 0x320407e2, movz_wd(2, main_mb * 16), f'SA::Initialize 尺寸 ORR w2,#0x30000000 → movz w2,#{main_mb}MiB'),
++            (0xa36b64, 0x320303e0, movz_wd(0, general_mb * 16), f'通用堆块尺寸 ORR w0,#0x20000000 → movz w0,#{general_mb}MiB'),
++            (0xa36b74, 0x72a3ffe2, 0x72800000 | (1 << 21) | (hi16 << 5) | 2, f'通用子分配器可用 movk w2,#0x1fff → #{hi16:#x}（={general_mb}MiB−0x190）'),
++        ):
++            w = struct.unpack_from('<I', IMG, o)[0]
++            assert w == old, f'D3 堆扩容剪口原字不符 {o:#x}：{w:08x}'
++            assert o not in kinds and not any(seg[0].address <= o < seg[-1].address + 4 for seg in windows), f'D3 堆扩容剪口与改写点冲突 {o:#x}'
++            struct.pack_into('<I', IMG, o, new)
++            cuts.append((o, struct.pack('<I', old).hex(), struct.pack('<I', new).hex(), why, '仅宿主'))
++        stat('d3_heap_cut')
 +
 +# D3 赛季 v1（kb/20 §6 定稿；hle_season.c 宿主处理器；2026-11-11 gameplay 分支）：
 +#   ① 世界装载防死锁直补丁（kb/20 §3.2 指令级根因）：0x492990 世界装载函数里 0x492f6c bl GameIsSeasonal(0x4c8df0)——
@@ -4634,7 +4665,7 @@ index 837700c..539cc3f 100644
  
  # The three existing native rule trampolines all use only the dead temporary w8 that is overwritten afterwards, and do not change the w0/stat return, sp or NZCV.
  # 6c6290 is after the original mode3 gate; the Blaze / reference count and data invalidation 6c62dc branches before it and the state update after it are untouched.
-@@ -893,38 +1056,38 @@ if FAR:   # patch area before the base: file = text + ro + data (padded to 16K)
+@@ -893,38 +1087,38 @@ if FAR:   # patch area before the base: file = text + ro + data (padded to 16K)
  else:
      open(P('patched.bin'), 'wb').write(IMG + bytearray(PATCH_OFF - len(IMG)) + patch)
  import hashlib
