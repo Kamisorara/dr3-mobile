@@ -95,7 +95,7 @@ static int boot_env(void) {
     [fm removeItemAtPath:prev error:nil]; [fm moveItemAtPath:log toPath:prev error:nil];
     if (freopen(log.fileSystemRepresentation, "w", stderr)) setvbuf(stderr, NULL, _IOLBF, 0);
     // 日志头四件套（d2r 同款，报问题时最先要知道的）：版本(构建) 机型 系统时间 一行交代
-    {   utsname un; uname(&un);
+    {   struct utsname un; uname(&un);   // modules 构建下 utsname 必须带 struct 标签
         NSOperatingSystemVersion os = NSProcessInfo.processInfo.operatingSystemVersion;
         NSDictionary *pl = NSBundle.mainBundle.infoDictionary;
         NSDateFormatter *df = [[NSDateFormatter alloc] init];
