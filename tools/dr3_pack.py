@@ -134,6 +134,16 @@ def main():
     shell_chain = info.get('CHAIN') or ''   # 壳编译期的占位口径；真实口径见装配阶段的二进制重写 | the shell's placeholder digest; the real one is handled at assembly time
 
     def rewritten():
+        # 产物存在 + 改写器指纹一致（patch_nso 每次把自身 sha256 写进 build_src.sha256）。
+        # 只看存在曾让堆扩容补丁吃了旧缓存：ipa 里 Guest 还是旧字（2026-11-14，kb/23 §6）。
+        # | Outputs exist AND the rewriter fingerprint matches (patch_nso records its own sha256 into build_src.sha256).
+        # | Existence-only once shipped a stale main.patched.bin and the heap cuts silently missed the ipa.
+        try:
+            want = next(l.split()[0] for l in (WORK / 'rewrite' / 'build_src.sha256').read_text().splitlines() if l.strip())
+        except (OSError, StopIteration):
+            return False
+        if want != sha(UPSTREAM / 'dm/tools/patch_nso.py'):
+            return False
         return all((WORK / 'rewrite' / f'{n}.patched.bin').exists() for n in mods)
 
     def do_rewrite():
