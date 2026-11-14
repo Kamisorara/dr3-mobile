@@ -1882,7 +1882,7 @@ index 0000000..de29d8f
 +}
 +void dm_controller_effects_stop(void) {initialized();atomic_fetch_add(&generation,1);synchronous(^{stop_all();});}
 diff --git a/dm/host/dm.h b/dm/host/dm.h
-index fda33ac..fdc8f00 100644
+index fda33ac..5d90e45 100644
 --- a/dm/host/dm.h
 +++ b/dm/host/dm.h
 @@ -46,7 +46,11 @@ extern module_t g_mod[MAX_MOD];
@@ -1897,6 +1897,15 @@ index fda33ac..fdc8f00 100644
  // Four thread-local slots: K18 = the Switch's x18, KTLS = tpidr_el0, KTLR = tpidrro_el0 (ThreadLocalRegion), KGATE = host gate entry; the actual key numbers are written into the key page by the loader
  extern pthread_key_t g_key18, g_keytls, g_keytlr, g_keygate;
  extern pthread_key_t g_keyres[2], g_keyaspect, g_keyaspectui;
+@@ -59,7 +63,7 @@ module_t *module_of(const void *p);
+ // Gate dispatch: rewritten svc / timer reads come in through the common entry, ret_addr = the return point of that gate block, regs points to the saved x0..x30
+ uint64_t gate_dispatch(uint64_t ret_addr, uint64_t *regs);
+ // Observation gates (rewriter OBS table; numbering matches patch_nso.py): read-only callbacks, called on a gate hit once attached
+-enum { OBS_UIMSG = 1, OBS_TICK = 2, OBS_C2S = 3, OBS_C2S_SYS = 4, OBS_SETLANG = 5, OBS_TARGET_RANK = 7, OBS_UI_PROJECT = 8, OBS_FREEZE_WORLD = 10, OBS_FREEZE_CLIENT = 11, OBS_FREEZE_ANIM = 12, OBS_FREEZE_RENDER = 13, OBS_TEXTBOX = 14, OBS_EVENT_MSG = 15, OBS_LEVEL_WARP = 16, OBS_QUEST_KILL = 17, OBS_NOTICE_INPUT = 18, OBS_MOVIE_RING_LINK = 19, OBS_MOVIE_RING_UNLINK = 20, OBS_MAX = 21 };   // 6 = iOS binding read (dm_touch_game_bridge.c)
++enum { OBS_UIMSG = 1, OBS_TICK = 2, OBS_C2S = 3, OBS_C2S_SYS = 4, OBS_SETLANG = 5, OBS_TARGET_RANK = 7, OBS_UI_PROJECT = 8, OBS_OOM_FATAL = 9, OBS_FREEZE_WORLD = 10, OBS_FREEZE_CLIENT = 11, OBS_FREEZE_ANIM = 12, OBS_FREEZE_RENDER = 13, OBS_TEXTBOX = 14, OBS_EVENT_MSG = 15, OBS_LEVEL_WARP = 16, OBS_QUEST_KILL = 17, OBS_NOTICE_INPUT = 18, OBS_MOVIE_RING_LINK = 19, OBS_MOVIE_RING_UNLINK = 20, OBS_CACHE_RETRY = 21, OBS_MAX = 22 };   // 6 = iOS binding read (dm_touch_game_bridge.c); 9/21 = D3 OOM 诊断（kb/23 §7，patch_nso D3 块发射）
+ void gate_obs_set(int id, void (*fn)(const uint64_t *regs));
+ int gate_obs_present(int id);
+ void dm_quiet_difficulty_msg(int on);   // In a rift run, block the original game's 「游戏难度设为 N」(Game difficulty set to N) message (observation gate 15, diag.c)
 diff --git a/dm/host/dm_d3_graphics.h b/dm/host/dm_d3_graphics.h
 new file mode 100644
 index 0000000..c6da2da
@@ -4088,10 +4097,10 @@ index 96d2674..579e8ae 100644
      pthread_mutex_lock(&g_se_lock); uint32_t wh = se_find(ev); pthread_mutex_unlock(&g_se_lock);
      if (!wh) { hle_bind_system_event(ev, 0); pthread_mutex_lock(&g_se_lock); wh = se_find(ev); pthread_mutex_unlock(&g_se_lock); }
 diff --git a/dm/host/host_stubs.c b/dm/host/host_stubs.c
-index ef7f336..3dc966d 100644
+index ef7f336..438a45c 100644
 --- a/dm/host/host_stubs.c
 +++ b/dm/host/host_stubs.c
-@@ -1,27 +1,36 @@
+@@ -1,27 +1,73 @@
 -// Hook points left behind by the game-specific modules split out of d2r-mobile (diagnostic tick gates, TACT/Granny, UI screen, touch UI interaction, ...):
 -// the generic host still calls them, and they get empty implementations here. When a feature is redone for this game, replace the matching stub with the real thing.
 -#include "dm.h"
@@ -4121,6 +4130,7 @@ index ef7f336..3dc966d 100644
 -uint64_t svc_host_call(int num, uint64_t *regs) { (void)regs; die("svc_host_call：本作没有宿主门 svc #%#x", num); }
 +// Hook points left behind by the game-specific modules split out of d2r-mobile (diagnostic tick gates, TACT/Granny, UI screen, touch UI interaction, ...):
 +// the generic host still calls them, and they get empty implementations here. When a feature is redone for this game, replace the matching stub with the real thing.
++#include <stdatomic.h>
 +#include "dm.h"
 +#include "hle.h"
 +#include "front.h"
@@ -4154,6 +4164,42 @@ index ef7f336..3dc966d 100644
 +        return 1;   // 返回「已处理」（svc_dispatch 102 行按真值判定后回传 regs[0]）；返回应答值会在答 0（离线/非赛季）时落穿内核 switch 当未知号 die —— 2026-11-11 真机开机即崩（Unimplemented SVC 0x8f）的根因
 +    }
 +    die("svc_host_call：本作没有宿主门 svc #%#x", num);
++}
++
++// ---- D3 OOM 诊断观测门（patch_nso D3 块发射，kb/23 §7；只读寄存器，零行为改动）----
++// main 分配注册表（0x1a50650 起 8 字）：+0x00=128MiB 块 +0x08=0x8000000 预算 +0x10=缓存分配器后备(AllocOrDie 真池)
++// +0x20=368MiB SNO region 分配器 +0x28=16MiB region +0x30=通用块 +0x40=紧急管理器 +0x48=0xd8 缓存包装
++static int dm_stubs_main_base(uint64_t *base, uint64_t *size) {
++    for (int k = 0; k < g_nmod; k++) if (!strcmp(g_mod[k].name, "main")) { *base = (uint64_t)(uintptr_t)g_mod[k].base; *size = g_mod[k].size; return 1; }
++    return 0;
++}
++// OBS 9 @ main+0xa36f48（AllocOrDie 0x82 死亡现场 mov w0,#0x82）：x19=尺寸 x21=源 x22=对齐 x0=消息缓冲（native 栈，可直读）。
++// 濒死不等于崩溃：把注册表逐字打出来定位真池，2026-11-14 第一轮修错池（通用块）而真池在缓存链的教训（kb/23）。
++static void oom_fatal_obs(const uint64_t *regs) {
++    static _Atomic int n;
++    int i = atomic_fetch_add(&n, 1);
++    if (i > 8 && (i & 63)) return;
++    const char *msg = (const char *)regs[0];
++    LOG("【OOM 濒死 #%d】尺寸=%llu 对齐=%#llx 源=%#llx msg='%.96s'", i, (unsigned long long)regs[19], (unsigned long long)regs[22], (unsigned long long)regs[21], msg ? msg : "");
++    uint64_t mb, msz;
++    if (!dm_stubs_main_base(&mb, &msz)) { LOG("  main 基址未知，注册表不打"); return; }
++    const volatile uint64_t *reg = (const volatile uint64_t *)(mb + 0x1a50650);
++    for (int f = 0; f < 8; f++) {
++        uint64_t v = reg[f], vt = 0;
++        if (v && !(v & 7)) { uint64_t t = *(const volatile uint64_t *)v; if (t >= mb && t < mb + msz) vt = t - mb; else vt = t ? (uint64_t)-1 : 0; }
++        LOG("  注册表+0x%02x = main+%#llx（vt main+%#llx）", f * 8, (unsigned long long)(v ? v - mb : 0), (unsigned long long)vt);
++    }
++}
++// OBS 21 @ main+0x6c145c（缓存分配器 0x6c13e0 逐出重试入口 mov x0,x24）：x23=尺寸。触发频率 = 内存压力曲线：
++// 第一轮真机 4h07m 才死、第二轮 7.5 分钟即死，此门在两次崩溃前都有整段曲线可回看。
++static void cache_retry_obs(const uint64_t *regs) {
++    static _Atomic int n;
++    int i = atomic_fetch_add(&n, 1);
++    if (i <= 12 || !(i & (i - 1))) LOG("【内存压力 #%d】缓存分配器逐出重试（尺寸 %llu 字节）", i, (unsigned long long)regs[23]);
++}
++__attribute__((constructor)) static void dm_oom_obs_install(void) {
++    gate_obs_set(OBS_OOM_FATAL, oom_fatal_obs);
++    gate_obs_set(OBS_CACHE_RETRY, cache_retry_obs);
 +}
 diff --git a/dm/host/lan_discovery_apple.m b/dm/host/lan_discovery_apple.m
 new file mode 100644
@@ -4443,7 +4489,7 @@ index 4d22880..0be9257 100644
          // Derivation: pillar inner edge x = screen height * limit / 2, so for every delta added to the limit the inner edge moves outward by screen height * delta / 2 on each side. Measured on Mac 1952x900, the soft edge is <= 30 pixels wide
          // (with limit = screen aspect ratio, columns 0–20 at the right edge fade from black to bright, and it disappears once the limit is pushed to 2.4) => need delta >= 2 * 30 / 900 ~ 0.067; 0.15 is taken (about 67 pixels outward per side), leaving more than double the margin.
 diff --git a/dm/tools/patch_nso.py b/dm/tools/patch_nso.py
-index 837700c..8c70acc 100644
+index 837700c..bbd87b6 100644
 --- a/dm/tools/patch_nso.py
 +++ b/dm/tools/patch_nso.py
 @@ -680,7 +680,12 @@ for a in sorted(kinds):
@@ -4478,7 +4524,7 @@ index 837700c..8c70acc 100644
  params = PARAMS.get(BUILD_ID, [])
  for oa, wa, ob_, wb, r, key, why in params:
      for o, w0 in ((oa, wa), (ob_, wb)):
-@@ -847,6 +861,186 @@ for oa, wa, ob_, wb, r, key, why in params:
+@@ -847,6 +861,215 @@ for oa, wa, ob_, wb, r, key, why in params:
      tmp = 16 if r != 16 else 17
      emit(STUR(tmp, 31, -16)); emit(MRS_TPIDRRO(r)); emit_slot_addr(r, tmp, key); emit(LDRX(r, r)); emit(LDUR(tmp, 31, -16)); emit(B(here(), oa + 4))
      struct.pack_into('<I', IMG, oa, B(oa, start)); struct.pack_into('<I', IMG, ob_, NOP); stat('param')
@@ -4497,21 +4543,22 @@ index 837700c..8c70acc 100644
 +        # cuts.tsv 的两列 hex 是字节序列（structck bytes.fromhex 后与映像原样比对），不是字值
 +        cuts.append((o, struct.pack('<I', old).hex(), struct.pack('<I', new).hex(), why, '仅宿主')); stat('d3_param_cut')
 +
-+    # D3 长会话 OOM 堆扩容（2026-11-14 真机 4h07m 闪退；_scratch/d3_longsession_oom_re.md 全链逆向）：
-+    #   引擎内存全定长——0xa20 引导主 StandardAllocator 768 MiB（AllocateAddressRegion+Pages+Initialize，整块 boot 一次性提交），
-+    #   0xa36b50（boot 0xa36af0→0xa36b08 与 AllocOrDie 0xa36e20 懒初始化双路径）从主 SA 切 512 MiB 通用块建子分配器
-+    #   （块+0x190 起、可用 = 块−0x190，0x1FFFFE70）= AllocOrDie 默认源（[0x1a50690 紧急管理器]+0x58）。
-+    #   4h 会话后通用堆 1,618,912 字节连续块分配失败：重试 + 紧急回调链（[+0x60] 子系统紧急释放）全败 →
-+    #   错误码 0x82 "Out of Memory Error / Unable to allocate %d bytes"（上报器 0xa2ad70，码 ≥0x80 → bl 0xa2c440 陷阱自杀）。
-+    #   主 SA boot 一次性提交 → 内部耗尽对 alias 总量（全程平台 2.50 GB）不可见，外部无任何先兆。
-+    #   游戏从不读 GetInfo(6/7)（sdk 仅 1 处 svc 0x29、22 个调用者无一用 Total/Used；main 无直接 svc）→ 无压力反馈回路可修，
-+    #   唯一杠杆 = 扩容定长堆。主 SA 768→1152、通用块 512→896（×1.75）：SA 预算 896+128MiB 初始化块+杂项 ≈ 边距 88 MiB 与原版一致；
-+    #   alias 新平台 ≈2.88 GB < 4 GiB。DM_D3_HEAP_PATCH=0 恢复原值；DM_D3_MAIN_HEAP_MB/DM_D3_GENERAL_HEAP_MB 可调（64 KiB 倍数）。
-+    if os.environ.get('DM_D3_HEAP_PATCH', '1') != '0':
-+        main_mb = int(os.environ.get('DM_D3_MAIN_HEAP_MB', 1152)); general_mb = int(os.environ.get('DM_D3_GENERAL_HEAP_MB', 896))
++    # D3 长会话 OOM 第二轮（kb/23 §7 修正，2026-11-14；第一轮主 SA/通用堆扩容已回退）：
++    #   第一轮把主 SA 768→1152 / 通用堆 512→896，真机反而 7.5 分钟就 0x82，且映射水位平账显示
++    #   368/16 MiB 两 region 未映射成功——主 SA 扩大挤爆了 AddressRegionManager 的地址空间跨度（两日志水位同为 +3.75 GB），
++    #   把真正的缓存池弄坏了。第一轮还认错了池：AllocOrDie 的 source 是 [0x114b8e8]→静态代理 0x10c6080→
++    #   vt+0x10(0x6c7d60)→vt+0x18(0x6c13e0)→后备堆 *(0x1a50660)→0x6c0bc0 分组缓存分配器（带逐出），
++    #   并非 mgr+0x58 通用块；SNO 家族（0xe62e0-0xec740）直读 *(0x1a50670)=368 MiB region 分配器。
++    #   本轮：回退主堆原值（下方旋钮默认=原版，不产 cuts）；扩 368 MiB SNO region → 768、16 MiB region → 32，
++    #   配合 config game.tsv alias 4→6 GiB / reserve 8→10 GiB（地址空间上限放宽，旧版两日志水位同顶 +3.75 GB 即跨度证据）。
++    #   观测门：OBS_OOM_FATAL(9)@0xa36f48（0x82 濒死现场：x19=尺寸 x21=源 x22=对齐，宿主读注册表 0x1a50650-690 定位真池）、
++    #           OBS_CACHE_RETRY(21)@0x6c145c（0x6c13e0 缓存分配器逐出重试入口=内存压力信号）。
++    #   堆旋钮保留但默认关闭（DM_D3_HEAP_PATCH=1 显式开启）：扩主 SA 会挤压 region 跨度，须连 alias 一起调。
++    if os.environ.get('DM_D3_HEAP_PATCH', '0') == '1':
++        main_mb = int(os.environ.get('DM_D3_MAIN_HEAP_MB', 768)); general_mb = int(os.environ.get('DM_D3_GENERAL_HEAP_MB', 512))
 +        assert main_mb >= 768 and general_mb >= 512 and main_mb * 16 <= 0xFFFF and general_mb * 16 <= 0xFFFF \
 +            and general_mb * 1048576 + 0x8000000 + 0x5800000 <= main_mb * 1048576, '堆档位不合法（主/通用堆过小或超出 movz 表达范围）'
-+        movz_wd = lambda rd, kb_: 0x52A00000 | (kb_ << 5) | rd   # movz wd,#kb_,lsl 12（64 KiB 倍数）
++        movz_wd = lambda rd, kb_: 0x52A00000 | (kb_ << 5) | rd   # movz wd,#kb_,lsl 16（kb_ = MiB×16；第一轮 0x4800<<16=0x48000000=1152MiB 已实证）
 +        hi16 = ((general_mb * 1048576 - 0x190) >> 16) & 0xFFFF   # 子分配器可用 = 通用块 − 0x190；lo16 恒 0xFE70（64 KiB 对齐下不变）
 +        assert ((general_mb * 1048576 - 0x190) & 0xFFFF) == 0xFE70, '通用块尺寸导致 lo16 变化，需另补 0xa36b70'
 +        for o, old, new, why in (
@@ -4521,12 +4568,40 @@ index 837700c..8c70acc 100644
 +            (0xa36b64, 0x320303e0, movz_wd(0, general_mb * 16), f'通用堆块尺寸 ORR w0,#0x20000000 → movz w0,#{general_mb}MiB'),
 +            (0xa36b74, 0x72a3ffe2, 0x72800000 | (1 << 21) | (hi16 << 5) | 2, f'通用子分配器可用 movk w2,#0x1fff → #{hi16:#x}（={general_mb}MiB−0x190）'),
 +        ):
++            if main_mb == 768 and general_mb == 512: continue   # 原值不产 cuts（原字是 ORR 位掩码，MOVZ 编码不同但值相同，逐值判）
 +            w = struct.unpack_from('<I', IMG, o)[0]
 +            assert w == old, f'D3 堆扩容剪口原字不符 {o:#x}：{w:08x}'
 +            assert o not in kinds and not any(seg[0].address <= o < seg[-1].address + 4 for seg in windows), f'D3 堆扩容剪口与改写点冲突 {o:#x}'
 +            struct.pack_into('<I', IMG, o, new)
 +            cuts.append((o, struct.pack('<I', old).hex(), struct.pack('<I', new).hex(), why, '仅宿主'))
 +        stat('d3_heap_cut')
++    # D3 region 扩容（第二轮主修）：SNO region（0x17400000 = 372 MiB，SNO 家族 0xe62e0-0xec740 专用池）
++    # 4h07m 会话耗尽 → 768 MiB；16 MiB region → 32 MiB。原值不产 cuts。须配 alias ≥ 新映射总量（game.tsv 已 6 GiB）。
++    record_mb = int(os.environ.get('DM_D3_RECORD_REGION_MB', 768)); file_mb = int(os.environ.get('DM_D3_FILE_REGION_MB', 32))
++    assert 372 <= record_mb * 16 <= 0xFFFF and 16 <= file_mb * 16 <= 0xFFFF, 'region 档位超出 movz 表达范围'
++    movz_w16 = lambda rd, imm: 0x52A00000 | (imm << 5) | rd   # movz wd,#imm,lsl 16（imm = MiB×16；原 SNO region 字 0x52a2e813 = movz w19,#0x1740,lsl16 = 372MiB）
++    for o, old, new, why in (
++        (0xa36c34, 0x52a2e813, movz_w16(19, record_mb * 16), f'SNO region 尺寸 movz w19,#0x1740,lsl16(372MiB) → #{record_mb}MiB（长会话 OOM 第二轮）'),
++        (0xa36ca4, 0x320803e1, movz_w16(1, file_mb * 16), f'文件 region 尺寸 mov w1,#0x1000000(16MiB) → #{file_mb}MiB'),
++    ):
++        if (o == 0xa36c34 and record_mb * 16 == 0x1740) or (o == 0xa36ca4 and file_mb == 16): continue   # 原值不产 cuts
++        w = struct.unpack_from('<I', IMG, o)[0]
++        assert w == old, f'D3 region 剪口原字不符 {o:#x}：{w:08x}'
++        assert o not in kinds and not any(seg[0].address <= o < seg[-1].address + 4 for seg in windows), f'D3 region 剪口与改写点冲突 {o:#x}'
++        struct.pack_into('<I', IMG, o, new)
++        cuts.append((o, struct.pack('<I', old).hex(), struct.pack('<I', new).hex(), why, '仅宿主'))
++    stat('d3_region_cut')
++    # D3 OOM 观测门（零行为改动，只读寄存器 + 宿主读 main 全局）：
++    if os.environ.get('DM_D3_OOM_DIAG', '1') != '0':
++        for o, oid, word, why in (
++            (0xa36f48, 9, '52801040', 'AllocOrDie(0xa36e20) 0x82 濒死现场 mov w0,#0x82：x19=尺寸 x21=源 x22=对齐 x0=消息缓冲（宿主读注册表 main+0x1a50650 定位真池）'),
++            (0x6c145c, 21, 'aa1803e0', '缓存分配器逐出重试入口（0x6c13e0 应急回收后重试 0x6c0bc0）：x23=尺寸；触发频率=内存压力曲线'),
++        ):
++            w = struct.unpack_from('<I', IMG, o)[0]
++            assert w == int(word, 16), f'D3 OOM 观测门原字不符 {o:#x}：{w:08x}'
++            assert o not in kinds and not any(seg[0].address <= o < seg[-1].address + 4 for seg in windows), f'D3 OOM 观测门与改写点冲突 {o:#x}'
++            site_obs(o, oid, int(word, 16))
++            stat('d3_oom_obs')
 +
 +# D3 赛季 v1（kb/20 §6 定稿；hle_season.c 宿主处理器；2026-11-11 gameplay 分支）：
 +#   ① 世界装载防死锁直补丁（kb/20 §3.2 指令级根因）：0x492990 世界装载函数里 0x492f6c bl GameIsSeasonal(0x4c8df0)——
@@ -4665,7 +4740,7 @@ index 837700c..8c70acc 100644
  
  # The three existing native rule trampolines all use only the dead temporary w8 that is overwritten afterwards, and do not change the w0/stat return, sp or NZCV.
  # 6c6290 is after the original mode3 gate; the Blaze / reference count and data invalidation 6c62dc branches before it and the state update after it are untouched.
-@@ -893,38 +1087,38 @@ if FAR:   # patch area before the base: file = text + ro + data (padded to 16K)
+@@ -893,38 +1116,38 @@ if FAR:   # patch area before the base: file = text + ro + data (padded to 16K)
  else:
      open(P('patched.bin'), 'wb').write(IMG + bytearray(PATCH_OFF - len(IMG)) + patch)
  import hashlib

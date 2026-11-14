@@ -12,8 +12,11 @@ romfs_marker	CPKs/CoreCommon.cpk
 shared_font	ttf
 # Mac bring-up: nninitStartup reserves 0x30000000 bytes; the 256 MiB alias candidate failed.
 # Reserve 8 GiB virtual space with a 4 GiB alias; actual commit is measured separately.
-mem_reserve	0x200000000
-mem_alias	0x100000000
+# 2026-11-14 kb/23 §7: AddressRegionManager 的地址空间跨度两代真机日志同顶 +3.75 GB（= alias 4 GiB − 节点区），
+# 第一轮扩主 SA（+384 MiB）把 368/16 MiB region 挤出跨度（映射平账 -384 MiB 实证）→ 7.5 分钟 0x82。
+# 本轮 region 扩容（368→768 / 16→32）需要 +384 MiB 跨度：alias 4→6 GiB、reserve 8→10 GiB（extended-virtual-addressing 下 8 GiB 已实证，10 GiB 同机制）。
+mem_reserve	0x280000000
+mem_alias	0x180000000
 mem_stack	0x10000000
 app_pool	0xCD500000
 # SDK 8 candidate; target API version check still needs measurement.
