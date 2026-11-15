@@ -1,4 +1,5 @@
 #import "LauncherViewController.h"
+#import "LogShare.h"
 #include <math.h>
 
 static NSString *text(NSString *zh, NSString *en) {
@@ -66,7 +67,13 @@ static NSString *text(NSString *zh, NSString *en) {
     UILabel *note=[self label:self.ready?text(@"设置会自动保存，下次打开可重新选择。",@"Settings are saved. Choose again whenever you reopen the app."):self.reason
                          style:UIFontTextStyleFootnote color:self.ready?UIColor.secondaryLabelColor:UIColor.labelColor];
     UILabel *owned=[self label:text(@"暗黑破坏神 III · 永恒之战版",@"Diablo III · Eternal Collection") style:UIFontTextStyleFootnote color:UIColor.secondaryLabelColor];
-    UIStackView *intro=[[UIStackView alloc] initWithArrangedSubviews:@[title,subtitle,self.play,note,owned]];
+    // 分享日志（LogShare.m）：崩溃重启后交上一场现场的主路径——游戏没跑也能把 log.txt/log.prev.txt 发出去。
+    UIButton *share=[UIButton buttonWithType:UIButtonTypeSystem];
+    UIButtonConfiguration *sc=[UIButtonConfiguration tintedButtonConfiguration];
+    sc.title=text(@"分享日志",@"Share logs");sc.buttonSize=UIButtonConfigurationSizeSmall;sc.image=[UIImage systemImageNamed:@"square.and.arrow.up"];sc.imagePlacement=UIButtonConfigurationPlacementLeading;sc.imagePadding=6;
+    share.configuration=sc;share.accessibilityIdentifier=@"share-logs";
+    [share addTarget:self action:@selector(shareLogs:) forControlEvents:UIControlEventTouchUpInside];
+    UIStackView *intro=[[UIStackView alloc] initWithArrangedSubviews:@[title,subtitle,self.play,note,share,owned]];
     intro.axis=UILayoutConstraintAxisVertical;intro.spacing=16;
     [intro setCustomSpacing:8 afterView:title];[intro setCustomSpacing:24 afterView:subtitle];
     UIScrollView *left=[UIScrollView new];[left addSubview:intro];intro.translatesAutoresizingMaskIntoConstraints=NO;
@@ -131,6 +138,7 @@ static NSString *text(NSString *zh, NSString *en) {
     [d setBool:self.lan.on forKey:@"LaunchLocalLAN"];
     if(sender==self.mode||sender==self.metalfx)[self.table reloadData];
 }
+- (void)shareLogs:(UIButton *)sender { dm_log_share(sender, 0); }   // 游戏未跑：不附线程现场，直接分享现有文件
 - (void)start:(UIButton *)sender {
     if(!self.ready||self.starting)return;
     self.starting=YES;sender.enabled=NO;[self changed:nil];
