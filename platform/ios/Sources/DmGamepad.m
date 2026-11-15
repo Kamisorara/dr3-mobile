@@ -284,8 +284,7 @@ static CGFloat dist(CGPoint a, CGPoint b) { return hypot(a.x - b.x, a.y - b.y); 
     // ① view.hidden 不收触摸；② UIView.hitTest 对 alpha<0.01 返回 nil——所以 opacity 只能压到 0.02（肉眼不可见、
     //   仍高于 0.01 阈值），并重写 hitTest: 兜底（2026-11-15 真机：opacity=0 点屏唤出永不触发）。
     self.layer.opacity = _padShown ? 1 : 0.02;
-    fprintf(stderr, "[pad] 虚拟键 %s（手柄%s）
-", _padShown ? "显示" : "隐身", _physical ? "在线" : "离线");
+    fprintf(stderr, "[pad] 虚拟键 %s（手柄%s）\n", _padShown ? "显示" : "隐身", _physical ? "在线" : "离线");
 }
 - (UIView *)hitTest:(CGPoint)p withEvent:(UIEvent *)e {
     return [self pointInside:p withEvent:e] ? self : nil;   // 全屏触控层恒收：隐身（alpha 0.02）时也要能被点醒；默认实现对低 alpha 会丢弃
