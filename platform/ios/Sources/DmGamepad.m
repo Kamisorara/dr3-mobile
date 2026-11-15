@@ -280,8 +280,15 @@ static CGFloat dist(CGPoint a, CGPoint b) { return hypot(a.x - b.x, a.y - b.y); 
 - (void)touchesEnded:(NSSet<UITouch *> *)ts withEvent:(UIEvent *)e { [self endTouches:ts tapped:YES]; }
 - (void)touchesCancelled:(NSSet<UITouch *> *)ts withEvent:(UIEvent *)e { [self endTouches:ts tapped:NO]; }
 - (void)applyPadVisibility {
-    // 不用 view.hidden：隐身层必须继续收触摸（点屏幕唤出）。opacity 0/1 整层切换，无离屏 pass。
-    self.layer.opacity = _padShown ? 1 : 0;
+    // 隐身层必须继续收触摸（点屏幕唤出）。两个坑都不能踩：
+    // ① view.hidden 不收触摸；② UIView.hitTest 对 alpha<0.01 返回 nil——所以 opacity 只能压到 0.02（肉眼不可见、
+    //   仍高于 0.01 阈值），并重写 hitTest: 兜底（2026-11-15 真机：opacity=0 点屏唤出永不触发）。
+    self.layer.opacity = _padShown ? 1 : 0.02;
+    fprintf(stderr, "[pad] 虚拟键 %s（手柄%s）
+", _padShown ? "显示" : "隐身", _physical ? "在线" : "离线");
+}
+- (UIView *)hitTest:(CGPoint)p withEvent:(UIEvent *)e {
+    return [self pointInside:p withEvent:e] ? self : nil;   // 全屏触控层恒收：隐身（alpha 0.02）时也要能被点醒；默认实现对低 alpha 会丢弃
 }
 - (void)setPhysicalPresent:(BOOL)present {
     _physical = present;
