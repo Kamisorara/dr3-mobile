@@ -70,7 +70,7 @@ static NSString *text(NSString *zh, NSString *en) {
     // 分享日志（LogShare.m）：崩溃重启后交上一场现场的主路径——游戏没跑也能把 log.txt/log.prev.txt 发出去。
     UIButton *share=[UIButton buttonWithType:UIButtonTypeSystem];
     UIButtonConfiguration *sc=[UIButtonConfiguration tintedButtonConfiguration];
-    sc.title=text(@"分享日志",@"Share logs");sc.buttonSize=UIButtonConfigurationSizeSmall;sc.image=[UIImage systemImageNamed:@"square.and.arrow.up"];sc.imagePlacement=UIButtonConfigurationPlacementLeading;sc.imagePadding=6;
+    sc.title=text(@"分享日志",@"Share logs");sc.buttonSize=UIButtonConfigurationSizeSmall;sc.image=[UIImage systemImageNamed:@"square.and.arrow.up"];sc.imagePlacement=NSDirectionalRectEdgeLeading;   // Xcode 26：imagePlacement 的类型已是 NSDirectionalRectEdgesc.imagePadding=6;
     share.configuration=sc;share.accessibilityIdentifier=@"share-logs";
     [share addTarget:self action:@selector(shareLogs:) forControlEvents:UIControlEventTouchUpInside];
     UIStackView *intro=[[UIStackView alloc] initWithArrangedSubviews:@[title,subtitle,self.play,note,share,owned]];
