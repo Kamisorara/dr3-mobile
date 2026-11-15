@@ -1,5 +1,5 @@
 diff --git a/dm/gfx/nvn/hle_nvn.c b/dm/gfx/nvn/hle_nvn.c
-index d4c3531..ddf5bd9 100644
+index d4c3531..2a14a81 100644
 --- a/dm/gfx/nvn/hle_nvn.c
 +++ b/dm/gfx/nvn/hle_nvn.c
 @@ -52,6 +52,7 @@ static uint8_t g_unimpl_seen[NVN_NFUNC];
@@ -279,9 +279,13 @@ index d4c3531..ddf5bd9 100644
  static void dump_frame(void) {
      static int inited, nframes = 3, calls = 1;
      if (!inited) {
-@@ -994,12 +1110,12 @@ static void dump_frame(void) {
+@@ -993,13 +1109,16 @@ static void dump_frame(void) {
+         if (g_frame <= (uint64_t)nframes && o < sizeof line - 96) o += snprintf(line + o, sizeof line - o, " %s=%llu", nvn_names[i] + 3, d);
      }
      if (g_tsv) fflush(g_tsv);
++    // TSV 尺寸防呆：逐帧 45 埋点 ≈ 4 MB/分钟，真机忘关一晚就是数 GB（2026-11-15 真机 51 分钟 206 MB）。
++    // 超 64 MB 停写（约一刻钟的明细，够任何一次定向排查），所有写入点都判 g_tsv 非空，fclose 置 NULL 即全停。
++    if (g_tsv) { long sz = ftell(g_tsv); if (sz < 0 || sz > 64L * 1024 * 1024) { LOG("[nvn] performance.tsv 已写 %.1f MB 超上限 64 MB，停写（DM_NVN_TSV 为诊断开关，排查完记得从 env.txt 移除）", sz / 1048576.0); fclose(g_tsv); g_tsv = NULL; } }
      if (g_frame <= (uint64_t)nframes) LOG("[nvn] %s %llu：%u 个函数 %llu 次调用 |%s", g_frame ? "帧" : "初始化", g_frame, nfn, total, line);
 -    else if (g_frame % 300 == 0) LOG("[nvn] 帧 %llu：%u 个函数 %llu 次调用", g_frame, nfn, total);
 +    else if (g_frame % 300 == 0 && nvn_summary_on()) LOG("[nvn] 帧 %llu：%u 个函数 %llu 次调用", g_frame, nfn, total);
@@ -294,7 +298,7 @@ index d4c3531..ddf5bd9 100644
              static long cap = -1; if (cap < 0) { const char *e = getenv("DM_MEM_CAP_GB"); cap = e ? atol(e) : DM_MEM_CAP_DEFAULT_GB; }
              if (cap > 0 && mb > (unsigned long long)cap * 1024) { LOG("【红】内存看门狗：常驻 %llu MB 超过上限 %ld GB（帧 %llu），自行退出", mb, cap, (unsigned long long)g_frame); _exit(86); } } }
      dm_guest_frame_tick();   // Deterministic guest clock (DM_DETCLOCK, host hle_os.c): each present advances a fixed step; a no-op when not enabled
-@@ -1218,6 +1334,9 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
+@@ -1218,6 +1337,9 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
              if (pproc) trow(f, "@proc_cpu_ms", (pc - pproc) / 1e6); pproc = pc;
              trow(f, "@call_ms", (t0 - g_t0_ns) / 1e6);
          }
@@ -304,7 +308,7 @@ index d4c3531..ddf5bd9 100644
          trow(f, "@passes", (double)(ps - prev_pass)); trow(f, "@draws", (double)(dr - prev_draw));
          static uint64_t pl, pst, pf, pudc; uint64_t l, st, fu; mtl_bw(&l, &st, &fu);
          trow(f, "@rt_load_mb", (l - pl) / 1048576.0); trow(f, "@rt_store_mb", (st - pst) / 1048576.0); trow(f, "@pass_full_rw", (double)(fu - pf));
-@@ -1265,7 +1384,7 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
+@@ -1265,7 +1387,7 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
          uint64_t g0, g1; if (frame_rec() && mtl_gpu_span(f - 8, &g0, &g1)) { trow(f - 8, "@gpu_beg_ms", (g0 - g_t0_ns) / 1e6); trow(f - 8, "@gpu_end_ms", (g1 - g_t0_ns) / 1e6); } }
      prev_in = t0; prev_pass = ps; prev_draw = dr;
      dump_frame();
@@ -313,7 +317,7 @@ index d4c3531..ddf5bd9 100644
      mtl_set_frame(g_frame);
      // Real-device semantics: present only enqueues and returns immediately; this frame's display time is scheduled by the pacer, and the texture can be acquired again only at "display time + one period" (blocking in AcquireTexture)
      uint64_t period = present_period(o), now = dm_detclock_enabled() ? guest_ns() : now_ns();
-@@ -1435,7 +1554,14 @@ NVN_NOPROTO(nvnProgramSetShadersExt, NVNboolean, NVNprogram *p, int n, const sha
+@@ -1435,7 +1557,14 @@ NVN_NOPROTO(nvnProgramSetShadersExt, NVNboolean, NVNprogram *p, int n, const sha
  // Singular / combined forms → plural / separate forms; state the replay layer does not have yet (conditional render, depth bounds, ...) is logged once and drawing continues (better to over-draw than to drop).
  #include "../tex/nvn_deswizzle.h"
  
@@ -329,7 +333,7 @@ index d4c3531..ddf5bd9 100644
  // Combined texture handle (texture id | sampler id << 20) is recorded into the texture slot as is: the replay layer takes the texture from the low 20 bits and the sampler from the high bits (nvn_mtl.m NVN_RB_SAMPT)
  NVN(nvnCommandBufferBindTexture, void, NVNcommandBuffer *c, NVNshaderStage st, int i, NVNtextureHandle h) { uint64_t v = (uint64_t)h; bind_handles(c, OP_BIND_TEX, st, i, 1, &v); }
  // "Deferred" binding: the GPU reads the handles h points to when it executes this command, not at recording. The per-texture binding of The Legend of Zelda: Breath of the Wild's engine (main+0xec2e64) always uses it,
-@@ -1573,4 +1699,12 @@ int nvn_host_signal_sync(void *nvnsync) {
+@@ -1573,4 +1702,12 @@ int nvn_host_signal_sync(void *nvnsync) {
      if (!o || o->magic != MAGIC('S', 'Y', 'N', 'C')) return -1;
      o->fence = 0; o->fenced = 1; return 0;
  }

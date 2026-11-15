@@ -106,11 +106,13 @@ def main():
     # Same defaults as the normal build (tools/build_ios.py)。不带 MTL_HUD_ENABLED：Apple 的 libMTLHud
     # 见到变量「存在」就可能挂上（0 也不算关）——想要 HUD 的人用启动器开关（开 = setenv 1，关 = unsetenv）。
     # | No MTL_HUD_ENABLED here: Apple's libMTLHud can attach on the variable's mere presence (a value
-    # | of 0 does not disable it) — the launcher switch owns it (on = setenv 1, off = unsetenv).
+    # of 0 does not disable it) — the launcher switch owns it (on = setenv 1, off = unsetenv).
+    # 不默认开 DM_NVN_TSV / DM_HID_RECEIPT_LOG / DM_PAD_EVENT_LOG：三者都是诊断开关——逐帧 TSV ≈ 4 MB/分钟
+    # （2026-11-15 真机 51 分钟 206 MB），手柄回执/按键事件每场 6-7 MB。排查时在 Documents/env.txt 手动加。
+    # | The three diagnostic sinks (per-frame TSV ≈ 4 MB/min, HID receipts / pad events 6-7 MB per session)
+    # stay out of the default template; add them to Documents/env.txt on the device when needed.
     (dm / 'env.txt').write_text('DM_LANG=zh-Hans\nDM_OPMODE=0\nDM_NVN_UNIFORM_FORWARD=1\nDM_NVN_TBDR=0\n'
-                                'DM_PSO_MANIFEST=off\nDM_NVN_TSV=performance.tsv\n'
-                                'DM_NVN_TSV_CALLS=0\nDM_HID_RECEIPT_LOG=controller.jsonl\n'
-                                'DM_HID_RECEIPT_LIMIT=65536\nDM_PAD_EVENT_LOG=controller-events.jsonl\n')
+                                'DM_PSO_MANIFEST=off\n')
     # The packer replaces these two (see shell_manifest.txt): the real graphics proof and the
     # asset inventory of the user's own RomFS/DLC. The placeholders keep boot honest: without
     # them the app reports what is missing instead of half-starting.
