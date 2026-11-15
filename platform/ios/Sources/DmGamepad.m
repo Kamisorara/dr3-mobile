@@ -74,6 +74,7 @@ static __weak DmGamepad *g_view;
     CAShapeLayer *_season; CATextLayer *_seasonLabel;
     CAShapeLayer *_share; CATextLayer *_shareLabel;
     BOOL _sticksShown;                             // a stick was held at the last refresh
+    BOOL _physical, _padShown;                     // d2r 式显隐：手柄在线默认隐身；点屏幕临时唤出，动手柄再隐回
     BOOL _full;                                    // the 3D layout is current
 }
 
@@ -236,6 +237,7 @@ static CGFloat dist(CGPoint a, CGPoint b) { return hypot(a.x - b.x, a.y - b.y); 
     _sticksShown = sticks;
 }
 - (void)touchesBegan:(NSSet<UITouch *> *)ts withEvent:(UIEvent *)e {
+    if (!_padShown) { _padShown = YES; [self applyPadVisibility]; return; }   // pad was hidden with a controller connected: this tap only summons it (d2r behaviour), it is not a key press
     for (UITouch *t in ts) {
         CGPoint p = [t locationInView:self]; int hit = [self btnAt:p];
         if (hit >= 0) { [_owner setObject:@(C_BTN | (uint64_t)hit << 8) forKey:t]; continue; }
@@ -392,13 +394,29 @@ static UIImage *controlImage(CGSize size,CGFloat scale,void (^draw)(CGContextRef
 
 @end
 
+- (void)applyPadVisibility {
+    // 不用 view.hidden：隐身层必须继续收触摸（点屏幕唤出）。opacity 0/1 整层切换，无离屏 pass。
+    self.layer.opacity = _padShown ? 1 : 0;
+    self.userInteractionEnabled = YES;
+}
 static void physical_present(int present) {
-    g_view.hidden = present;
+    if (!g_view) return;                  // 直接访问 ivar，不像发消息那样对 nil 无害
+    g_view->_physical = present;
+    g_view->_padShown = !present;          // d2r 式：连接即隐身，拔出常驻显示；临时唤出态由触摸/手柄输入翻转
+    [g_view applyPadVisibility];
     if (present) { [g_view reset]; dm_input_clear(); }
+}
+// 物理手柄任意输入（gamepad_mac.m publish 汇聚点 → 主队列回调）：临时唤出态立即隐回，并清掉虚拟按键状态防粘连
+static void pad_activity(void) {
+    if (!g_view || !g_view->_physical || !g_view->_padShown) return;
+    g_view->_padShown = NO;
+    [g_view applyPadVisibility];
+    [g_view reset]; dm_input_clear();
 }
 UIView *dm_gamepad_view(CGRect frame) {
     DmGamepad *v = [[DmGamepad alloc] initWithFrame:frame]; g_view = v;
     dm_gamepad_start(physical_present);
+    void dm_gamepad_activity_notify(void (*fn)(void)); dm_gamepad_activity_notify(pad_activity);
     return v;
 }
 void dm_gamepad_reset(void) {

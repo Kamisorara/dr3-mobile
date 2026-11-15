@@ -15,7 +15,10 @@ static NSString *doc_path(NSString *name) {
 
 void dm_log_share(UIView *source, int in_game) {
     fflush(stderr);                                        // stderr 是行缓冲（main.m freopen + _IOLBF），落盘尾行
-    if (in_game) crash_dump_now("分享日志");               // 当前全部线程现场 → log.txt 末尾
+    // 线程现场限频 60 秒：一次全量转储 ≈ 140 行（52 线程），反复点分享曾把日志点出 6 份（2026-11-15 真机）。
+    // 首点必附现场；60 秒内的重复分享直接发现有日志，不再膨胀。
+    static time_t last_dump;
+    if (in_game && time(NULL) - last_dump >= 60) { last_dump = time(NULL); crash_dump_now("分享日志"); }   // 当前全部线程现场 → log.txt 末尾
     dispatch_async(dispatch_get_main_queue(), ^{          // present 模式照 front_save_failed（front_ios.m）
         UIViewController *vc = nil;
         for (UIScene *s in UIApplication.sharedApplication.connectedScenes)
