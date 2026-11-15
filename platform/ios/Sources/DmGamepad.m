@@ -279,6 +279,22 @@ static CGFloat dist(CGPoint a, CGPoint b) { return hypot(a.x - b.x, a.y - b.y); 
 }
 - (void)touchesEnded:(NSSet<UITouch *> *)ts withEvent:(UIEvent *)e { [self endTouches:ts tapped:YES]; }
 - (void)touchesCancelled:(NSSet<UITouch *> *)ts withEvent:(UIEvent *)e { [self endTouches:ts tapped:NO]; }
+- (void)applyPadVisibility {
+    // 不用 view.hidden：隐身层必须继续收触摸（点屏幕唤出）。opacity 0/1 整层切换，无离屏 pass。
+    self.layer.opacity = _padShown ? 1 : 0;
+}
+- (void)setPhysicalPresent:(BOOL)present {
+    _physical = present;
+    _padShown = !present;                 // d2r 式：连接即隐身，拔出常驻显示；临时唤出态由触摸/手柄输入翻转
+    [self applyPadVisibility];
+    if (present) { [self reset]; dm_input_clear(); }
+}
+- (void)physicalActivity {
+    if (!_physical || !_padShown) return; // 不在手柄在线的临时唤出态：无事可做
+    _padShown = NO;
+    [self applyPadVisibility];
+    [self reset]; dm_input_clear();       // 清虚拟按键状态防粘连
+}
 - (void)reset { [_owner removeAllObjects]; [_faceOf removeAllObjects]; _stick[0] = _stick[1] = nil; [self recompute]; }
 
 // ---- Shapes ----
@@ -394,25 +410,9 @@ static UIImage *controlImage(CGSize size,CGFloat scale,void (^draw)(CGContextRef
 
 @end
 
-- (void)applyPadVisibility {
-    // 不用 view.hidden：隐身层必须继续收触摸（点屏幕唤出）。opacity 0/1 整层切换，无离屏 pass。
-    self.layer.opacity = _padShown ? 1 : 0;
-    self.userInteractionEnabled = YES;
-}
-static void physical_present(int present) {
-    if (!g_view) return;                  // 直接访问 ivar，不像发消息那样对 nil 无害
-    g_view->_physical = present;
-    g_view->_padShown = !present;          // d2r 式：连接即隐身，拔出常驻显示；临时唤出态由触摸/手柄输入翻转
-    [g_view applyPadVisibility];
-    if (present) { [g_view reset]; dm_input_clear(); }
-}
-// 物理手柄任意输入（gamepad_mac.m publish 汇聚点 → 主队列回调）：临时唤出态立即隐回，并清掉虚拟按键状态防粘连
-static void pad_activity(void) {
-    if (!g_view || !g_view->_physical || !g_view->_padShown) return;
-    g_view->_padShown = NO;
-    [g_view applyPadVisibility];
-    [g_view reset]; dm_input_clear();
-}
+// d2r 式显隐（状态方法在类外通过消息驱动；ivar 只在类内动）
+static void physical_present(int present) { [g_view setPhysicalPresent:present]; }
+static void pad_activity(void) { [g_view physicalActivity]; }   // 任意物理输入（gamepad_mac.m publish → 主队列）
 UIView *dm_gamepad_view(CGRect frame) {
     DmGamepad *v = [[DmGamepad alloc] initWithFrame:frame]; g_view = v;
     dm_gamepad_start(physical_present);
