@@ -13,6 +13,7 @@ static struct { const void *who; uint64_t b; int32_t ax[4]; } g_s[NSLOT];
 static int g_active = 1;
 static int g_count;                            // number of attached extended gamepads
 static void (*g_on_present)(int present);
+static void (*g_on_activity)(void);   // any physical input (d2r-style pad auto-hide): fires on the controller handler queue = main
 static int g_face_letter = -1; static float g_dead = -1;
 
 static int slot_of(const void *who, int make) {
@@ -79,6 +80,7 @@ static void publish(GCController *c, GCExtendedGamepad *g) {
     stick(g.leftThumbstick.xAxis.value, g.leftThumbstick.yAxis.value, &g_s[i].ax[0], &g_s[i].ax[1]);
     stick(g.rightThumbstick.xAxis.value, g.rightThumbstick.yAxis.value, &g_s[i].ax[2], &g_s[i].ax[3]);
     apply();
+    if (g_on_activity) g_on_activity();
 }
 static void present_changed(void) { static int was = -1; int now = g_count > 0; if (now == was) return; was = now; if (g_on_present) g_on_present(now); }
 static void attach(GCController *c) {
@@ -115,6 +117,7 @@ void dm_gamepad_reset(void) {
     const int32_t zero[4] = {0}; trace(0, zero);
     if (any) LOG("Gamepad focus lost: cleared buttons and axes");
 }
+void dm_gamepad_activity_notify(void (*fn)(void)) { g_on_activity = fn; }   // iOS front registers its pad-auto-hide (DmGamepad.m); Mac leaves it unset
 void dm_gamepad_start(void (*on_present)(int present)) {
     static int started; if (started) return; started = 1;
     g_on_present = on_present;
