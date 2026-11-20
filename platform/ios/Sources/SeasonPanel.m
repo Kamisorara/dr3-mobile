@@ -1,12 +1,12 @@
 #import "SeasonPanel.h"
 #import <UIKit/UIKit.h>
 
-// 与 hle_season.c 同式的轮换日历（整月差，日不计；今天早于 origin 时 clamp 到 S1）
+// 与 hle_season.c 同式的轮换日历（整月差/SEASON_MONTHS=2，两月一季 2026-11-21 定案；今天早于 origin 时 clamp 到 S1）
 static int dm_season_number(NSInteger oy, NSInteger om) {
     NSCalendar *c = NSCalendar.currentCalendar;
     NSDateComponents *now = [c components:NSCalendarUnitYear | NSCalendarUnitMonth fromDate:[NSDate date]];
     NSInteger diff = (now.year - oy) * 12 + (now.month - om);
-    return (int)MAX(diff, 0) + 1;
+    return (int)(MAX(diff, 0) / 2) + 1;
 }
 
 // 与 hle_season.c 同式的 12 主题表（v4，2026-11-13）：官方 S14→…→S22→S24→S25→S27 顺序循环
@@ -22,7 +22,7 @@ static NSString *const kThemeDesc[12] = {
     @"神龛召唤暗影分身 + 魔盒第 4 槽", @"21 件虚灵武器", @"7 枚灵魂碎片", @"天使坩埚圣化传奇",
 };
 
-// 赛季面板 = 纯展示（用户定案 2026-11-12）：S1 写死 2026-11-01、月更轮换、不可关闭，无任何可编辑项。
+// 赛季面板 = 纯展示（用户定案 2026-11-12）：S1 写死 2026-11-01、两月轮换（2026-11-21 定案）、不可关闭，无任何可编辑项。
 // v4（2026-11-13）：主题 = 官方 12 主题顺序循环；跨季英雄转非赛季（官方严格 rollover）。
 // 面板不写任何配置；宿主侧同样写死（dm-season.tsv 整个废除）。
 @implementation SeasonPanel
@@ -79,7 +79,7 @@ static NSString *const kThemeDesc[12] = {
     UILabel *cur = (UILabel *)[self viewWithTag:100];
     cur.text = [NSString stringWithFormat:@"当前生效 S%d", s];
     UILabel *desc = (UILabel *)[self viewWithTag:101];
-    desc.text = [NSString stringWithFormat:@"主题：%@（官方S%d）· %@\n每月 1 号换季（跨季英雄转非赛季）；主题自下次启动生效",
+    desc.text = [NSString stringWithFormat:@"主题：%@（官方S%d）· %@\n每两月 1 号换季（逢单月；跨季英雄转非赛季）；主题自下次启动生效",
                  kThemeZh[t], kThemeOff[t], kThemeDesc[t]];
 }
 

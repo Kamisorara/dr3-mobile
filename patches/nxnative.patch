@@ -3489,15 +3489,15 @@ new file mode 100644
 index 0000000..2d6cfa8
 --- /dev/null
 +++ b/dm/host/hle_season.c
-@@ -0,0 +1,562 @@
+@@ -0,0 +1,563 @@
 +// 赛季轮换 v1（kb/20 §6 定稿实现；gameplay 分支 2026-11-11）：
-+//   目标（用户定案）：每月 1 号新赛季，2026-11 = S1。
++//   目标（用户定案 2026-11-21）：两月一季，逢单月 1 号新赛季（v1 为月更，2026-11-21 定案改两月更），2026-11 = S1。
 +//   离线防进不去 = patch_nso.py D3 块的世界装载直补丁（0x492f6c bl GameIsSeasonal → mov w0,#0，恒走普通装载；
 +//   kb/20 §3.2 指令级根因：世界装载 0x492990 的 enum==6||GameIsSeasonal → 早退分支跳过装载主路径）。
-+//   全部写死（用户定案 2026-11-12）：赛季不可关闭 + 月更轮换 + S1 = 2026-11-01，无任何可配项；
++//   全部写死（用户定案 2026-11-12；2026-11-21 改两月更）：赛季不可关闭 + 两月轮换 + S1 = 2026-11-01，无任何可配项；
 +//   面板 = 纯展示（SeasonPanel v3，无编辑控件、不写配置）；dm-season.tsv 整个废除，
 +//   设备上残留的旧 tsv（含 enabled=0 / origin 改动）一律不读——配置不可能被翻掉。
-+//   赛季号 = 今天相对 2026-11-01 的整月差 + 1（日不计——每月 1 号换季），clamp ≥1。
++//   赛季号 = 今天相对 2026-11-01 的整月差 / SEASON_MONTHS + 1（日不计——每两月 1 号换季），clamp ≥1。
 +//   主题映射 v4（2026-11-13 定案）：官方主题顺序循环 12 个（S14→S15→…→S22→S24→S25→S27，排除无
 +//   Perk 旗标的 S23/S26），theme_idx = (S-1) mod 12；主题载体 = Perk.CommunityEvent 15 键
 +//   （argv blob 注入 + 赛季源 setter 按键值，参考项目全语义移植；位表/键序 = .so merge_bind
@@ -3520,7 +3520,7 @@ index 0000000..2d6cfa8
 +//   已 rolled 英雄进门不重盖位（修此前纯内存态「重启即失忆、重盖位」缺口）——跨季英雄永久转非赛季，
 +//   同一主题 12 个月后再次轮到时需新建英雄（官方语义）。
 +//   边界：不写角色 Digest season_created（kb/17 §3.4 未解）；档案对象 X+0x34 不碰（门已放行，无需第二半）。
-+// | Season rotation v1 (kb/20 §6). Monthly rotation: a new season on the 1st of every month, 2026-11 = S1.
++// | Season rotation v1 (kb/20 §6). Bimonthly rotation (2026-11-21): a new season on the 1st of every odd month, 2026-11 = S1.
 +// | Everything is hardwired (2026-11-12): the season cannot be turned off, S1 starts at 2026-11-01,
 +// | the panel is display-only and the legacy dm-season.tsv is no longer read at all.
 +// | svc 0x90 gates the hero↔profile season check entry: stamps hero+0x12C bit1; heroes that already
@@ -3580,6 +3580,7 @@ index 0000000..2d6cfa8
 +#define HERO_FLAG_OFF 0x12cUL               // 记录 +0x12C：bit1=赛季、bit0=专家（kb/17 §1.3 读侧）
 +#define SEASON_ORIGIN_Y 2026                // S1 起点（用户定案 2026-11-12 写死）：2026-11-01
 +#define SEASON_ORIGIN_M 11                  // S1 起点（同上）：11 月
++#define SEASON_MONTHS 2                     // 每赛季月数（用户定案 2026-11-21：两月一季，逢单月 1 号换季）
 +#define SEASON_NUM_OBJ_OFF 0x114ac60UL      // 单例指针→+0xB0 = 当期赛季号（HeroesList.current_season_num 运行时槽，0x60000 变更探测器/0xa273c0 官方 setter 实证）
 +#define SEASON_STATE_OBJ_OFF 0x114ac68UL    // 单例指针→+0xB0 = 赛季状态（1=InProgress；缺省 2=Unknown；UI 串簇 0x362a70 w19==1=InProgress）
 +#define SEASON_SLOT_OFF 0xb0UL
@@ -3652,7 +3653,7 @@ index 0000000..2d6cfa8
 +}
 +
 +// ---- 配置 ----
-+// 全部写死（用户定案 2026-11-12）：不可关闭 + 月更轮换 + S1 = 2026-11-01。
++// 全部写死（用户定案 2026-11-12；2026-11-21 改两月更）：不可关闭 + 两月轮换 + S1 = 2026-11-01。
 +// dm-season.tsv 整个废除——面板是纯展示，设备上残留的旧 tsv 一律不读。
 +static void config_load(void) {
 +    cfg.mode_rotate = 1;
@@ -3662,7 +3663,7 @@ index 0000000..2d6cfa8
 +    atomic_store(&g_season, 1);             // 生效号由 frame 拍按日历写入
 +    cfg_loaded = 1;
 +    heroes_load();
-+    LOG("赛季轮换：不可关闭·月更轮换 S1=2026-11-01（写死，无配置文件）");
++    LOG("赛季轮换：不可关闭·两月轮换 S1=2026-11-01（写死，无配置文件）");
 +}
 +
 +// ---- 旁路表 ----
@@ -3678,7 +3679,7 @@ index 0000000..2d6cfa8
 +    pthread_mutex_unlock(&g_hero_mu);
 +}
 +
-+// ---- 轮换日历：月更（每月 1 号换季）；今天 < origin 时 clamp 到 S1 ----
++// ---- 轮换日历：两月更（每 SEASON_MONTHS 个月 1 号换季，逢单月）；今天 < origin 时 clamp 到 S1 ----
 +static int season_effective(void) {
 +    if (!cfg.mode_rotate) return cfg.base;
 +    time_t now = time(NULL);
@@ -3686,7 +3687,7 @@ index 0000000..2d6cfa8
 +    if (!localtime_r(&now, &t)) return cfg.base;
 +    int diff = (t.tm_year + 1900 - cfg.oy) * 12 + (t.tm_mon + 1 - cfg.om);   // 整月差，日不计
 +    if (diff < 0) diff = 0;
-+    return diff + 1;
++    return diff / SEASON_MONTHS + 1;   // 两月一季（2026-11-21 定案；v1 为 diff+1 月更）
 +}
 +
 +// ---- Perk argv（main.c 在 nnMain 前调一次；boot 冻结主题——换季下次启动生效，参考项目同语义）----
@@ -4032,7 +4033,7 @@ index 0000000..2d6cfa8
 +    static int last = -1;
 +    if (cur != last) {
 +        atomic_store(&g_season, cur);
-+        LOG("赛季轮换：生效赛季 S%d（%s）", cur, cfg.mode_rotate ? "月更轮换" : "固定");
++        LOG("赛季轮换：生效赛季 S%d（%s）", cur, cfg.mode_rotate ? "两月轮换" : "固定");
 +        if (atomic_load(&g_enabled)) season_theme_log(cur);
 +        // 官方 rollover 模拟（kb/20 §9.5）：换季即刻把表内旧赛季英雄清位转非赛季（v4 落盘）
 +        if (atomic_load(&g_enabled) && cur > 1) {
